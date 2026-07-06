@@ -1213,11 +1213,15 @@ function updateAuthUI() {
   document.querySelectorAll('.sn-login-link').forEach(function(link) {
     if (currentUser) {
       link.innerHTML = '<i class="fas fa-user-check"></i> ' + currentUser.email.split('@')[0];
-      link.onclick = function(e) { e.preventDefault(); logout(); };
+      link.onclick = function(e) { e.preventDefault(); openProfileModal(e); };
     } else {
       link.innerHTML = '<i class="fas fa-sign-in-alt"></i> Log In';
       link.onclick = function(e) { e.preventDefault(); openLoginModal(e); };
     }
+  });
+
+  document.querySelectorAll('.sn-signup-link').forEach(function(link) {
+    link.style.display = currentUser ? 'none' : '';
   });
 }
 
@@ -1359,12 +1363,110 @@ function injectModals() {
     '<div id="sn-gcashModal" class="sn-login-modal">' +
     '<button class="pm-close" onclick="cancelGcashPayment()"><i class="fas fa-times"></i></button>' +
     '<div class="login-body" id="gcash-body"></div>' +
+    '</div>' +
+
+    // Profile overlay + modal
+    '<div id="sn-profileOverlay" class="sn-overlay" onclick="closeProfileModal()"></div>' +
+    '<div id="sn-profileModal" class="sn-tracking-modal">' +
+    '<button class="pm-close" onclick="closeProfileModal()"><i class="fas fa-times"></i></button>' +
+    '<div id="sn-profile-body" style="padding:8px 4px;"></div>' +
     '</div>';
 
   var div = document.createElement('div');
   div.innerHTML = html;
   while (div.firstChild) document.body.appendChild(div.firstChild);
 }
+
+// ============================================================
+// PROFILE
+// ============================================================
+
+async function openProfileModal(e) {
+  if (e) e.preventDefault();
+
+  if (!currentUser) {
+    showToast('Please log in to view your profile', 'info');
+    openLoginModal();
+    return;
+  }
+
+  document.getElementById('sn-profileOverlay').classList.add('active');
+  document.getElementById('sn-profileModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var body = document.getElementById('sn-profile-body');
+  body.innerHTML = '<div class="track-empty"><p>Loading your profile...</p></div>';
+
+  const { data: profile, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', currentUser.id)
+    .single();
+
+  if (error) {
+    body.innerHTML = '<div class="track-empty"><p>Could not load profile: ' + error.message + '</p></div>';
+    return;
+  }
+
+  renderProfileForm(profile);
+}
+
+function closeProfileModal() {
+  document.getElementById('sn-profileOverlay').classList.remove('active');
+  document.getElementById('sn-profileModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderProfileForm(profile) {
+  var body = document.getElementById('sn-profile-body');
+  var initial = (profile.full_name || currentUser.email || '?').trim().charAt(0).toUpperCase();
+
+  body.innerHTML =
+    '<div style="text-align:center;margin-bottom:20px;">' +
+    '<div style="width:64px;height:64px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;">' + initial + '</div>' +
+    '<h2 style="margin:0;">' + (profile.full_name || 'HomeWeb Shopper') + '</h2>' +
+    '<p style="color:#888;margin:4px 0 0;">' + currentUser.email + '</p>' +
+    '</div>' +
+
+    '<div class="co-field"><label>Full Name</label>' +
+    '<input type="text" id="profile-name" value="' + (profile.full_name || '') + '"/></div>' +
+
+    '<div class="co-field"><label>Phone Number</label>' +
+    '<input type="tel" id="profile-phone" placeholder="09XXXXXXXXX" value="' + (profile.phone || '') + '"/></div>' +
+
+    '<button class="co-btn co-btn--next" id="profile-save-btn" onclick="saveProfileChanges()">Save Changes</button>' +
+
+    '<div style="margin:20px 0;border-top:1px solid #eee;"></div>' +
+
+    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-bottom:10px;" onclick="closeProfileModal(); openOrderTracking();">' +
+    '<i class="fas fa-receipt"></i> View Order History</button>' +
+
+    '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;" onclick="closeProfileModal(); logout();">' +
+    '<i class="fas fa-sign-out-alt"></i> Log Out</button>';
+}
+
+async function saveProfileChanges() {
+  var name = document.getElementById('profile-name').value.trim();
+  var phone = document.getElementById('profile-phone').value.trim();
+  var btn = document.getElementById('profile-save-btn');
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({ full_name: name, phone: phone })
+    .eq('id', currentUser.id);
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Save Changes'; }
+
+  if (error) {
+    showToast('Could not save changes: ' + error.message, 'error');
+    return;
+  }
+
+  showToast('Profile updated \u2705');
+}
+
 
 // CART ICON CLICK //
 function initCartClick() {

@@ -165,7 +165,7 @@ img { display: block; max-width: 100%; }
 .search-tags a:hover { color: #fff; }
 
 /* Cart */
-.header-cart { padding-top: 6px; flex-shrink: 0; }
+.header-cart { padding-top: 6px; flex-shrink: 0; display: flex; align-items: center; gap: 18px; }
 
 .cart-icon {
   position: relative;
@@ -177,6 +177,17 @@ img { display: block; max-width: 100%; }
 }
 
 .cart-icon:hover { opacity: 0.8; }
+
+.account-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  color: #fff;
+  font-size: 26px;
+  transition: opacity 0.15s;
+}
+
+.account-icon:hover { opacity: 0.8; }
 
 .cart-badge {
   position: absolute;
