@@ -49,6 +49,8 @@ let shippingInfo = {
   street: '', city: 'Sta. Barbara', zip: '5002',
   delivery: 'standard'
 };
+let gcashStep = 1; // 1: mobile number, 2: mpin, 3: processing, 4: success
+let gcashMobile = '';
 
 //  ORDERS (TRACKING) — now fetched from Supabase, this is just an in-memory cache //
 let orders = [];
@@ -501,7 +503,16 @@ function saveShippingForm() {
 
 // Navigate between checkout steps //
 function goStep(delta) {
-  if (delta === 1 && checkoutStep === 4) { placeOrder(); return; }
+  if (delta === 1 && checkoutStep === 4) {
+    var payEl = document.querySelector('input[name="payment"]:checked');
+    var paymentMethod = payEl ? payEl.value : 'cod';
+    if (paymentMethod === 'gcash') {
+      openGcashPayment();
+    } else {
+      placeOrder();
+    }
+    return;
+  }
 
   if (delta === 1 && checkoutStep === 2) {
     saveShippingForm();
@@ -532,6 +543,134 @@ function removeCartItem(id) {
   updateCartBadge();
   if (!cart.length) { closeCheckout(); showToast('Cart is empty', 'info'); return; }
   renderCheckout();
+}
+
+// ============================================================
+// MOCK GCASH PAYMENT FLOW
+// (Simulated — no real GCash API integration; for demo purposes)
+// ============================================================
+
+function openGcashPayment() {
+  gcashStep = 1;
+  gcashMobile = shippingInfo.phone ? shippingInfo.phone.replace(/[^0-9]/g, '').slice(-10) : '';
+  renderGcashStep();
+  document.getElementById('sn-gcashOverlay').classList.add('active');
+  document.getElementById('sn-gcashModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeGcashModal() {
+  document.getElementById('sn-gcashOverlay').classList.remove('active');
+  document.getElementById('sn-gcashModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+// Cancel out of GCash flow entirely, back to the checkout payment step //
+function cancelGcashPayment() {
+  if (gcashStep === 3) return; // don't allow cancel mid "processing"
+  closeGcashModal();
+}
+
+function gcashOrderTotal() {
+  const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+  const ship = sub >= 500 ? 0 : 79;
+  return sub + ship;
+}
+
+function renderGcashStep() {
+  var body = document.getElementById('gcash-body');
+  if (!body) return;
+  var total = gcashOrderTotal();
+  var header = '<div class="login-icon" style="color:#0072BC"><i class="fas fa-mobile-alt"></i></div>' +
+    '<h2 style="color:#0072BC">GCash Payment</h2>';
+
+  if (gcashStep === 1) {
+    body.innerHTML = header +
+      '<p class="login-sub">You are paying <strong>' + fmt(total) + '</strong> to HomeWeb</p>' +
+      '<div class="co-field"><label>GCash Mobile Number <span class="co-required">*</span></label>' +
+      '<input type="tel" id="gcash-mobile" placeholder="09XXXXXXXXX" maxlength="11" value="' + gcashMobile + '"/>' +
+      '<span class="co-field-error">Enter a valid 11-digit GCash number</span></div>' +
+      '<button class="co-btn co-btn--next login-submit" onclick="submitGcashMobile()">Continue <i class="fas fa-arrow-right"></i></button>';
+
+    var input = document.getElementById('gcash-mobile');
+    if (input) {
+      input.addEventListener('input', function() {
+        this.closest('.co-field').classList.remove('co-field--error');
+      });
+      input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitGcashMobile(); });
+      input.focus();
+    }
+
+  } else if (gcashStep === 2) {
+    body.innerHTML = header +
+      '<p class="login-sub">Enter the MPIN for <strong>' + gcashMobile + '</strong></p>' +
+      '<div class="co-field"><label>MPIN <span class="co-required">*</span></label>' +
+      '<input type="password" id="gcash-mpin" inputmode="numeric" placeholder="\u2022\u2022\u2022\u2022" maxlength="6"/>' +
+      '<span class="co-field-error">Enter your 4\u20136 digit MPIN</span></div>' +
+      '<button class="co-btn co-btn--next login-submit" onclick="submitGcashMpin()">Confirm Payment <i class="fas fa-lock"></i></button>' +
+      '<p class="login-signup"><a href="#" onclick="gcashStep=1; renderGcashStep(); return false;">Use a different number</a></p>';
+
+    var mpin = document.getElementById('gcash-mpin');
+    if (mpin) {
+      mpin.addEventListener('input', function() {
+        this.closest('.co-field').classList.remove('co-field--error');
+      });
+      mpin.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitGcashMpin(); });
+      mpin.focus();
+    }
+
+  } else if (gcashStep === 3) {
+    body.innerHTML = header +
+      '<div class="gcash-spinner" style="margin:24px auto;width:40px;height:40px;border:4px solid #e0f0ff;border-top-color:#0072BC;border-radius:50%;animation:gcashspin 0.8s linear infinite;"></div>' +
+      '<p class="login-sub">Processing your payment of ' + fmt(total) + '...</p>' +
+      '<style>@keyframes gcashspin { to { transform: rotate(360deg); } }</style>';
+
+  } else if (gcashStep === 4) {
+    body.innerHTML =
+      '<div class="login-icon" style="color:#22C55E"><i class="fas fa-check-circle"></i></div>' +
+      '<h2 style="color:#22C55E">Payment Successful</h2>' +
+      '<p class="login-sub">' + fmt(total) + ' paid via GCash. Placing your order...</p>';
+  }
+}
+
+// Step 1 -> 2: validate mobile number //
+function submitGcashMobile() {
+  var input = document.getElementById('gcash-mobile');
+  var val = input.value.trim();
+  var ok = /^09[0-9]{9}$/.test(val);
+  if (!ok) {
+    input.closest('.co-field').classList.add('co-field--error');
+    input.focus();
+    return;
+  }
+  gcashMobile = val;
+  gcashStep = 2;
+  renderGcashStep();
+}
+
+// Step 2 -> 3 -> 4: validate MPIN, "process" payment, then finalize //
+function submitGcashMpin() {
+  var input = document.getElementById('gcash-mpin');
+  var val = input.value.trim();
+  var ok = /^[0-9]{4,6}$/.test(val);
+  if (!ok) {
+    input.closest('.co-field').classList.add('co-field--error');
+    input.focus();
+    return;
+  }
+
+  gcashStep = 3;
+  renderGcashStep();
+
+  setTimeout(function() {
+    gcashStep = 4;
+    renderGcashStep();
+
+    setTimeout(function() {
+      closeGcashModal();
+      placeOrder();
+    }, 1200);
+  }, 1600);
 }
 
 var ORDER_STATUS_MAP = {
@@ -1201,7 +1340,14 @@ function injectModals() {
     '<span class="co-field-error">Passwords do not match</span></div>' +
     '<button class="co-btn co-btn--next login-submit" id="signup-submit-btn" onclick="submitSignup()">Sign Up <i class="fas fa-arrow-right"></i></button>' +
     '<p class="login-signup">Already have an account? <a href="#" onclick="closeSignupModal(); openLoginModal(event); return false;">Log In</a></p>' +
-    '</div></div>';
+    '</div></div>' +
+
+    // GCash mock payment overlay + modal
+    '<div id="sn-gcashOverlay" class="sn-overlay" onclick="cancelGcashPayment()"></div>' +
+    '<div id="sn-gcashModal" class="sn-login-modal">' +
+    '<button class="pm-close" onclick="cancelGcashPayment()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body" id="gcash-body"></div>' +
+    '</div>';
 
   var div = document.createElement('div');
   div.innerHTML = html;
