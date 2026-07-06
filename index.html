@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+	<title>HomeWeb</title>
+	<link rel="stylesheet" href="style.css" />
+	<link rel="stylesheet" href="model.css" />
+	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+	<div class="topbar-inner">
+		<span>Download App</span>
+		<div class="topbar-right">
+			<a href="#"><i class="fas fa-bell"></i> Notifications</a>
+			<a href="#"><i class="fas fa-question-circle"></i> Help</a>
+			<a href="#"><i class="fas fa-user"></i> Sign Up</a>
+			<a href="#" class="sn-login-link"><i class="fas fa-sign-in-alt"></i> Log In</a>
+			<a href="#" class="sn-track-link" onclick="openOrderTracking(); return false;">Track Orders</a>
+		</div>
+	</div>
+</div>
+
+<!-- HEADER -->
+<header class="header">
+	<div class="header-inner">
+		<div class="logo">
+			<span class="logo-icon"><i class="fas fa-shopping-bag"></i></span>
+			<span class="logo-text">HomeWeb</span>
+		</div>
+		<div class="search-bar">
+			<div class="search-input-wrap">
+				<input type="text" placeholder="Search: products, categories..." />
+				<button class="search-btn"><i class="fas fa-search"></i> Search</button>
+			</div>
+			<div class="search-tags"></div>
+		</div>
+		<div class="header-cart">
+			<a href="#" class="cart-icon">
+				<i class="fas fa-shopping-cart"></i>
+				<span class="cart-badge"></span>
+			</a>
+		</div>
+	</div>
+</header>
+
+<!-- HERO BANNER -->
+<section class="hero">
+	<div class="hero-inner">
+		<div class="hero-main-banner">
+			<div class="hero-text">
+				<h1>Shop More,<br/><span>Save More.</span></h1>
+				<a href="#recommended" class="hero-cta">Shop Now <i class="fas fa-arrow-right"></i></a>
+			</div>
+			<div class="hero-image">
+				<div class="hero-img-placeholder">
+					<i class="fas fa-box-open"></i>    
+				</div>
+			</div>
+		</div>
+	</div>
+</section>
+
+<!-- CATEGORY SHORTCUTS -->
+<section class="categories">
+	<div class="section-inner">
+		<h2 class="section-title">Shop Category</h2>
+		<div class="category-grid">
+
+			<a class="cat-card" href="category.html?cat=vegetable">
+				<div class="cat-icon">
+					<img src="https://images.unsplash.com/photo-1741515043161-e97d05e5cfcc?w=200&h=200&fit=crop&q=80&auto=format" alt="Vegetable" loading="lazy"/>
+				</div>
+				<span>Vegetable</span>
+			</a>
+
+			<a class="cat-card" href="category.html?cat=meat">
+				<div class="cat-icon">
+					<img src="https://images.unsplash.com/photo-1547050605-2f268cd5daf0?w=200&h=200&fit=crop&q=80&auto=format" alt="Meat" loading="lazy"/>
+				</div>
+				<span>Meat</span>
+			</a>
+
+			<a class="cat-card" href="category.html?cat=seafood">
+				<div class="cat-icon">
+					<img src="https://images.unsplash.com/photo-1738471661544-796deafa2b85?w=200&h=200&fit=crop&q=80&auto=format" alt="Sea Food" loading="lazy"/>
+				</div>
+				<span>Sea Food</span>
+			</a>
+
+			<a class="cat-card" href="category.html?cat=sarisari">
+				<div class="cat-icon">
+					<img src="https://images.unsplash.com/photo-1601600576337-c1d8a0d1373c?w=200&h=200&fit=crop&q=80&auto=format" alt="Sari-sari Store" loading="lazy"/>
+				</div>
+				<span>Sari-sari Store</span>
+			</a>
+
+			<a class="cat-card" href="category.html?cat=drinks">
+				<div class="cat-icon">
+					<img src="https://images.unsplash.com/photo-1506617420156-8e4536971650?w=200&h=200&fit=crop&q=80&auto=format" alt="Drinks" loading="lazy"/>
+				</div>
+				<span>Drinks</span>
+			</a>
+
+		</div>
+	</div>
+</section>
+
+<!-- RECOMMENDED FOR YOU -->
+<section class="recommended" id="recommended">
+	<div class="section-inner">
+		<div class="section-header">
+			<h2 class="section-title">Recommended For You</h2>
+			<a href="category.html" class="see-all">See All <i class="fas fa-chevron-right"></i></a>
+		</div>
+		<div class="product-grid">
+
+			<!-- Vegetable -->
+			<div class="product-card" data-product-id="101">
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/kangkong2.jpg" alt="Fresh Kangkong Bundle" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Fresh Kangkong Bundle</p>
+					<div class="product-prices">
+						<span class="price-now">₱25</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i>
+						<span>(320)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+			<!-- Meat -->
+			<div class="product-card" data-product-id="201">
+				<div class="product-badge sale-badge">-16%</div>
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/pork-liempo.webp" alt="Pork Liempo (Belly) 500g" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Pork Liempo (Belly) 500g</p>
+					<div class="product-prices">
+						<span class="price-now">₱185</span>
+						<span class="price-old">₱220</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
+						<span>(890)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+			<!-- Sea Food -->
+			<div class="product-card" data-product-id="301">
+				<div class="product-badge sale-badge">-20%</div>
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/bangus.jpg" alt="Bangus (Milkfish) 500g" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Bangus (Milkfish) 500g</p>
+					<div class="product-prices">
+						<span class="price-now">₱120</span>
+						<span class="price-old">₱150</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
+						<span>(1.1k)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+			<!-- Sari-sari -->
+			<div class="product-card" data-product-id="401">
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/lucky_me1.jpg" alt="Lucky Me Pancit Canton 5-pack" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Lucky Me Pancit Canton 5-pack</p>
+					<div class="product-prices">
+						<span class="price-now">₱55</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
+						<span>(2.3k)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+			<!-- Drinks -->
+			<div class="product-card" data-product-id="501">
+				<div class="product-badge sale-badge">-18%</div>
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/wilkins mineral.jpg" alt="Wilkins Mineral Water 1L x6" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Wilkins Mineral Water 1L x6</p>
+					<div class="product-prices">
+						<span class="price-now">₱99</span>
+						<span class="price-old">₱120</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
+						<span>(1.5k)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+			<!-- Vegetable 2 -->
+			<div class="product-card" data-product-id="103">
+				<div class="product-badge sale-badge">-20%</div>
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/tomato.jpg" alt="Tomato 1kg Pack" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Tomato 1kg Pack</p>
+					<div class="product-prices">
+						<span class="price-now">₱80</span>
+						<span class="price-old">₱100</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i>
+						<span>(540)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+			<!-- Sari-sari 2 -->
+			<div class="product-card" data-product-id="404">
+				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
+				<div class="product-img"><img src="images/Milo1.jpg" alt="Milo 300g Pack" loading="lazy"/></div>
+				<div class="product-info">
+					<p class="product-name">Milo 300g Pack</p>
+					<div class="product-prices">
+						<span class="price-now">₱120</span>
+					</div>
+					<div class="product-stars">
+						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
+						<span>(950)</span>
+					</div>
+					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
+				</div>
+			</div>
+
+		</div>
+	</div>
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+	<div class="footer-inner">
+		<div class="footer-col">
+			<div class="logo" style="margin-bottom:12px;">
+				<span class="logo-icon"><i class="fas fa-shopping-bag"></i></span>
+				<span class="logo-text">HomeWeb</span>
+			</div>
+			<p class="footer-desc">Your one-stop online marketplace in the Philippines.</p>
+			<div class="social-links"></div>
+		</div>
+		<div class="footer-col">
+			<h4>Customer Service</h4>
+			<ul>
+				<li><a href="#">Help Center</a></li>
+			</ul>
+		</div>
+		<div class="footer-col">
+			<h4>HomeWeb</h4>
+			<ul>
+				<li><a href="#">About Us</a></li>
+				<li><a href="#">Seller Center</a></li>
+
+			</ul>
+		</div>
+		<div class="footer-col">
+			<h4>Payment & Delivery</h4>
+			<div class="payment-icons">
+				<span class="pay-icon">GCash</span>
+				<span class="pay-icon">COD</span>
+			</div>
+		</div>
+	</div>
+	<div class="footer-bottom">
+		<p>&copy; 2026 HomeWeb.</p>
+	</div>
+</footer>
+
+<script src="shop.js"></script>
+<script>
+	const categoryProducts = [
+	{ id:101, name:'Fresh Kangkong Bundle',         price:25,  oldPrice:null, discount:0,  rating:5, sold:'320',  icon:'fa-carrot',          location:'Sta. Barbara', category:'vegetable' },
+	{ id:103, name:'Tomato 1kg Pack',               price:80,  oldPrice:100,  discount:20, rating:5, sold:'540',  icon:'fa-carrot',          location:'Sta. Barbara', category:'vegetable' },
+	{ id:201, name:'Pork Liempo (Belly) 500g',      price:185, oldPrice:220,  discount:16, rating:4, sold:'890',  icon:'fa-drumstick-bite', location:'Sta. Barbara', category:'meat' },
+	{ id:301, name:'Bangus (Milkfish) 500g',        price:120, oldPrice:150,  discount:20, rating:4, sold:'1.1k', icon:'fa-fish-fins',      location:'Sta. Barbara', category:'seafood' },
+	{ id:401, name:'Lucky Me Pancit Canton 5-pack', price:55,  oldPrice:null, discount:0,  rating:4, sold:'2.3k', icon:'fa-storefront',     location:'Sta. Barbara', category:'sarisari' },
+	{ id:404, name:'Milo 300g Pack',                price:120, oldPrice:null, discount:0,  rating:4, sold:'950',  icon:'fa-storefront',          location:'Sta. Barbara', category:'sarisari' },
+	{ id:501, name:'Wilkins Mineral Water 1L x6',   price:99,  oldPrice:120,  discount:18, rating:4, sold:'1.5k', icon:'fa-bottle-water',   location:'Sta. Barbara', category:'drinks' },
+	];
+</script>
+</body>
+</html>
