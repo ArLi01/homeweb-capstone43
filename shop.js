@@ -1,4 +1,8 @@
 // HomeWeb – Product Modal + Cart + Checkout + Search + Login //
+const SUPABASE_URL = 'https://rlvopautxysifjtxytrd.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_0TbK21sRcO4etl4BQsjKQg_QvInt7x-';
+ 
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // PRODUCT DATA //
 const products = [
@@ -50,8 +54,8 @@ let shippingInfo = {
   delivery: 'standard'
 };
 
-//  ORDERS (TRACKING) //
-let orders = JSON.parse(localStorage.getItem('shopnow_orders') || '[]');
+//  ORDERS (TRACKING) — now fetched from Supabase, this is just an in-memory cache //
+let orders = [];
 
 //  HELPERS //
 const fmt = n => '\u20B1' + Number(n).toLocaleString();
@@ -534,100 +538,114 @@ function removeCartItem(id) {
   renderCheckout();
 }
 
-// Place order //
-function placeOrder() {
-  // Compute totals
+var ORDER_STATUS_MAP = {
+  'placed':           { label: 'Order Placed',          desc: 'Your order has been received and is being reviewed.' },
+  'preparing':        { label: 'Preparing Your Order',  desc: 'The seller is packing your items with care.' },
+  'out_for_delivery': { label: 'Out for Delivery',      desc: 'Your rider is on the way to deliver your order!' },
+  'delivered':        { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' }
+};
+
+// Place order — writes to Supabase (orders, order_items, order_status_history) //
+async function placeOrder() {
+  if (!currentUser) {
+    showToast('Please log in to place an order', 'info');
+    closeCheckout();
+    openLoginModal();
+    return;
+  }
+
   const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
   const shipFee = sub >= 500 ? 0 : 79;
 
-  // Payment method — get from radio
   var payEl = document.querySelector('input[name="payment"]:checked');
   var paymentMethod = payEl ? payEl.value : 'cod';
+  var orderCode = 'HW' + String(Date.now()).slice(-8).toUpperCase();
 
-  // Generate order
-  var orderId = 'HW' + String(Date.now()).slice(-8).toUpperCase();
-  var now = new Date();
+  const nextBtn = document.querySelector('#sn-checkoutModal .co-btn--next');
+  if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = 'Placing order...'; }
 
-  var order = {
-    id: orderId,
-    items: cart.map(function(item) {
-      return { id: item.id, name: item.name, price: item.price, icon: item.icon, qty: item.qty };
-    }),
+  // 1. Insert the order
+  const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
+    order_code: orderCode,
+    user_id: currentUser.id,
+    status: 'placed',
     subtotal: sub,
-    shippingFee: shipFee,
+    shipping_fee: shipFee,
     total: sub + shipFee,
-    shipping: Object.assign({}, shippingInfo),
-    payment: paymentMethod,
-    status: 'placed',          
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString(),
-    timeline: [
-      { status: 'placed',      label: 'Order Placed',     time: now.toISOString(), desc: 'Your order has been received and is being reviewed.' }
-    ]
-  };
+    payment_method: paymentMethod,
+    shipping_first_name: shippingInfo.firstName,
+    shipping_last_name: shippingInfo.lastName,
+    shipping_phone: shippingInfo.phone,
+    shipping_street: shippingInfo.street,
+    shipping_city: shippingInfo.city,
+    shipping_zip: shippingInfo.zip,
+    delivery_option: shippingInfo.delivery
+  }).select().single();
 
-  setTimeout(function() {
-    updateOrderStatus(orderId, 'preparing');
-  }, 2000);
-  setTimeout(function() {
-    updateOrderStatus(orderId, 'out_for_delivery');
-  }, 6000);
+  if (orderErr) {
+    if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
+    showToast('Could not place order: ' + orderErr.message, 'error');
+    return;
+  }
 
-  orders.unshift(order);
-  localStorage.setItem('shopnow_orders', JSON.stringify(orders));
+  // 2. Insert order items
+  const itemRows = cart.map(function(item) {
+    return { order_id: orderRow.id, product_id: item.id, product_name: item.name, price: item.price, qty: item.qty };
+  });
+  await supabase.from('order_items').insert(itemRows);
+
+  // 3. Insert the first status history entry
+  await supabase.from('order_status_history').insert({
+    order_id: orderRow.id,
+    status: 'placed',
+    label: ORDER_STATUS_MAP.placed.label,
+    description: ORDER_STATUS_MAP.placed.desc
+  });
+
+  // Simulate the seller progressing the order (writes real rows to the DB) //
+  setTimeout(function() { advanceOrderStatus(orderRow.id, 'preparing'); }, 8000);
+  setTimeout(function() { advanceOrderStatus(orderRow.id, 'out_for_delivery'); }, 20000);
 
   // Clear cart
   closeCheckout();
   cart = [];
   saveCart();
   updateCartBadge();
-  showOrderSuccess(orderId);
+  showOrderSuccess(orderCode);
 }
 
-// Update order //
-function updateOrderStatus(orderId, newStatus) {
-  var order = orders.find(function(o) { return o.id === orderId; });
-  if (!order || order.status === 'delivered') return;
-
-  var now = new Date();
-  var statusMap = {
-    'preparing':        { label: 'Preparing Your Order', desc: 'The seller is packing your items with care.' },
-    'out_for_delivery': { label: 'Out for Delivery',      desc: 'Your rider is on the way to deliver your order!' },
-    'delivered':        { label: 'Delivered',              desc: 'Your order has been delivered. Enjoy!' }
-  };
-
-  var info = statusMap[newStatus];
+// Advance an order's status in Supabase + log it to the timeline //
+async function advanceOrderStatus(orderDbId, newStatus) {
+  const info = ORDER_STATUS_MAP[newStatus];
   if (!info) return;
 
-  order.status = newStatus;
-  order.updatedAt = now.toISOString();
-  order.timeline.push({
+  const { data: existing } = await supabase.from('orders').select('status').eq('id', orderDbId).single();
+  if (!existing || existing.status === 'delivered') return;
+
+  await supabase.from('orders').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', orderDbId);
+  await supabase.from('order_status_history').insert({
+    order_id: orderDbId,
     status: newStatus,
     label: info.label,
-    time: now.toISOString(),
-    desc: info.desc
+    description: info.desc
   });
 
-  localStorage.setItem('shopnow_orders', JSON.stringify(orders));
-
-  // tracking //
-  if (currentTrackingOrder && currentTrackingOrder.id === orderId) {
-    renderTrackingDetail(order);
+  if (currentTrackingOrder && currentTrackingOrder.id === orderDbId) {
+    openTrackingDetail(orderDbId);
   }
-
   var listEl = document.getElementById('sn-tracking-list');
-  if (listEl) renderOrderList();
+  if (listEl && listEl.style.display !== 'none') renderOrderList();
 }
 
-// Mark order as delivered //
-function markDelivered(orderId) {
-  updateOrderStatus(orderId, 'delivered');
+// Mark order as delivered (manual override, e.g. for demo purposes) //
+async function markDelivered(orderDbId) {
+  await advanceOrderStatus(orderDbId, 'delivered');
   showToast('Order marked as delivered \u2705');
 }
 
-// Show order success modal with generated order ID //
-function showOrderSuccess(orderId) {
-  document.getElementById('sn-orderId').textContent = orderId;
+// Show order success modal with generated order code //
+function showOrderSuccess(orderCode) {
+  document.getElementById('sn-orderId').textContent = orderCode;
   document.getElementById('sn-successOverlay').classList.add('active');
   document.getElementById('sn-successModal').classList.add('active');
   document.body.style.overflow = 'hidden';
@@ -640,12 +658,40 @@ function closeSuccess() {
 }
 
 // ORDER TRACKING //
-function openOrderTracking(e) {
+async function openOrderTracking(e) {
   if (e) e.preventDefault();
-  renderOrderList();
+
+  if (!currentUser) {
+    showToast('Please log in to view your orders', 'info');
+    openLoginModal();
+    return;
+  }
+
   document.getElementById('sn-trackingOverlay').classList.add('active');
   document.getElementById('sn-trackingModal').classList.add('active');
   document.body.style.overflow = 'hidden';
+
+  var listEl = document.getElementById('sn-tracking-list');
+  if (listEl) listEl.innerHTML = '<div class="track-empty"><p>Loading your orders...</p></div>';
+
+  await fetchOrders();
+  renderOrderList();
+}
+
+// Fetch this user's orders (with their items) from Supabase //
+async function fetchOrders() {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*, order_items(*)')
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    showToast('Could not load orders: ' + error.message, 'error');
+    orders = [];
+    return;
+  }
+  orders = data || [];
 }
 
 function closeOrderTracking() {
@@ -674,15 +720,15 @@ function renderOrderList() {
   var html = '<div class="track-order-list">';
   orders.forEach(function(order) {
     var statusInfo = getOrderStatusInfo(order.status);
-    var dateStr = formatDate(order.createdAt);
+    var dateStr = formatDate(order.created_at);
 
-    var itemNames = order.items.map(function(item) {
-      return item.name + (item.qty > 1 ? ' x' + item.qty : '');
+    var itemNames = (order.order_items || []).map(function(item) {
+      return item.product_name + (item.qty > 1 ? ' x' + item.qty : '');
     }).join(', ');
 
     html += '<div class="track-order-card" onclick="openTrackingDetail(\'' + order.id + '\')">' +
       '<div class="track-card-top">' +
-      '<div class="track-card-id">' + order.id + '</div>' +
+      '<div class="track-card-id">' + order.order_code + '</div>' +
       '<span class="track-status-text"> - ' + statusInfo.label + '</span>' +
       '</div>' +
       '<div class="track-card-items-text">' + itemNames + '</div>' +
@@ -697,9 +743,18 @@ function renderOrderList() {
   container.innerHTML = html;
 }
 
-function openTrackingDetail(orderId) {
-  var order = orders.find(function(o) { return o.id === orderId; });
-  if (!order) return;
+async function openTrackingDetail(orderId) {
+  const { data: order, error } = await supabase
+    .from('orders')
+    .select('*, order_items(*), order_status_history(*)')
+    .eq('id', orderId)
+    .single();
+
+  if (error || !order) {
+    showToast('Could not load order details', 'error');
+    return;
+  }
+
   currentTrackingOrder = order;
   renderTrackingDetail(order);
   document.getElementById('sn-tracking-list').style.display = 'none';
@@ -711,38 +766,38 @@ function renderTrackingDetail(order) {
   if (!container) return;
 
   var statusInfo = getOrderStatusInfo(order.status);
-  var dateStr = formatDate(order.createdAt);
+  var dateStr = formatDate(order.created_at);
 
-  // Build simple text timeline
+  // Build simple text timeline (most recent first)
   var timelineHtml = '<div class="track-timeline">';
-  var reversedTimeline = order.timeline.slice().reverse();
-  reversedTimeline.forEach(function(entry) {
-    var entryInfo = getOrderStatusInfo(entry.status);
+  var sortedHistory = (order.order_status_history || []).slice().sort(function(a, b) {
+    return new Date(b.created_at) - new Date(a.created_at);
+  });
+  sortedHistory.forEach(function(entry) {
     timelineHtml += '<div class="track-tl-row">' +
       '<span class="track-tl-label">' + entry.label + '</span>' +
-      '<span class="track-tl-time">' + formatTime(entry.time) + '</span>' +
+      '<span class="track-tl-time">' + formatTime(entry.created_at) + '</span>' +
       '</div>' +
-      '<div class="track-tl-desc">' + entry.desc + '</div>';
+      '<div class="track-tl-desc">' + entry.description + '</div>';
   });
   timelineHtml += '</div>';
 
   // Items list
-  var itemsHtml = order.items.map(function(item) {
+  var itemsHtml = (order.order_items || []).map(function(item) {
     return '<div class="track-detail-item">' +
-      '<span class="track-detail-item-name">' + item.name + '</span>' +
+      '<span class="track-detail-item-name">' + item.product_name + '</span>' +
       '<span class="track-detail-item-qty">' + item.qty + ' x ' + fmt(item.price) + '</span>' +
       '<span class="track-detail-item-sub">' + fmt(item.price * item.qty) + '</span>' +
       '</div>';
   }).join('');
 
   // Delivery address
-  var addr = order.shipping;
-  var addressStr = (addr.street || '') + ', ' + (addr.city || '') + ' ' + (addr.zip || '');
+  var addressStr = (order.shipping_street || '') + ', ' + (order.shipping_city || '') + ' ' + (order.shipping_zip || '');
 
   var html =
     '<div class="track-detail-back" onclick="openOrderTracking()">Back to orders</div>' +
 
-    '<h3>' + statusInfo.label + ' — Order #' + order.id + '</h3>' +
+    '<h3>' + statusInfo.label + ' — Order #' + order.order_code + '</h3>' +
 
     // Timeline
     '<div class="track-detail-section">' +
@@ -759,18 +814,18 @@ function renderTrackingDetail(order) {
     // Summary + Address
     '<div class="track-detail-section">' +
     '<h4>Delivery Address</h4>' +
-    '<p>' + (addr.firstName || '') + ' ' + (addr.lastName || '') + '</p>' +
+    '<p>' + (order.shipping_first_name || '') + ' ' + (order.shipping_last_name || '') + '</p>' +
     '<p>' + addressStr + '</p>' +
-    '<p>' + (addr.phone || '') + '</p>' +
+    '<p>' + (order.shipping_phone || '') + '</p>' +
     '</div>' +
 
     '<div class="track-detail-section">' +
     '<h4>Order Summary</h4>' +
     '<div class="track-summary-rows">' +
     '<div class="track-summary-row"><span>Subtotal</span><span>' + fmt(order.subtotal) + '</span></div>' +
-    '<div class="track-summary-row"><span>Shipping</span><span>' + (order.shippingFee === 0 ? 'FREE' : fmt(order.shippingFee)) + '</span></div>' +
+    '<div class="track-summary-row"><span>Shipping</span><span>' + (Number(order.shipping_fee) === 0 ? 'FREE' : fmt(order.shipping_fee)) + '</span></div>' +
     '<div class="track-summary-row total"><span>Total</span><span>' + fmt(order.total) + '</span></div>' +
-    '<div class="track-summary-row"><span>Payment</span><span>' + (order.payment === 'cod' ? 'Cash on Delivery' : order.payment === 'gcash' ? 'GCash' : order.payment) + '</span></div>' +
+    '<div class="track-summary-row"><span>Payment</span><span>' + (order.payment_method === 'cod' ? 'Cash on Delivery' : order.payment_method === 'gcash' ? 'GCash' : order.payment_method) + '</span></div>' +
     '<div class="track-summary-row"><span>Placed on</span><span>' + dateStr + '</span></div>' +
     '</div>' +
     '</div>';
@@ -867,23 +922,143 @@ function validateLoginForm() {
 }
 
 // Submit login //
-function submitLogin() {
+async function submitLogin() {
   if (!validateLoginForm()) {
     showToast('Please fix the errors below', 'info');
     return;
   }
   const email = document.getElementById('login-email').value.trim();
-  currentUser = { email: email };
+  const password = document.getElementById('login-password').value;
+
+  const btn = document.querySelector('#sn-loginModal .login-submit');
+  if (btn) { btn.disabled = true; btn.textContent = 'Logging in...'; }
+
+  const { data, error } = await supabase.auth.signInWithPassword({ email: email, password: password });
+
+  if (btn) { btn.disabled = false; btn.innerHTML = 'Log In <i class="fas fa-arrow-right"></i>'; }
+
+  if (error) {
+    showToast(error.message, 'error');
+    return;
+  }
+
+  currentUser = data.user;
   closeLoginModal();
   updateAuthUI();
-  showToast('Welcome back, ' + email.split('@')[0] + '!');
+  showToast('Welcome back, ' + (currentUser.email || '').split('@')[0] + '!');
 }
 
 // Logout //
-function logout() {
+async function logout() {
+  await supabase.auth.signOut();
   currentUser = null;
   updateAuthUI();
   showToast('Logged out', 'info');
+}
+
+// ============================================================
+// SIGNUP MODAL
+// ============================================================
+
+function openSignupModal(e) {
+  if (e) e.preventDefault();
+  if (currentUser) return;
+
+  ['signup-name', 'signup-email', 'signup-password', 'signup-password2'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) { el.value = ''; el.closest('.co-field').classList.remove('co-field--error'); }
+  });
+
+  document.getElementById('sn-signupOverlay').classList.add('active');
+  document.getElementById('sn-signupModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSignupModal() {
+  document.getElementById('sn-signupOverlay').classList.remove('active');
+  document.getElementById('sn-signupModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function validateSignupForm() {
+  const nameEl = document.getElementById('signup-name');
+  const emailEl = document.getElementById('signup-email');
+  const passEl = document.getElementById('signup-password');
+  const pass2El = document.getElementById('signup-password2');
+  let isValid = true;
+  let firstInvalidEl = null;
+
+  function markError(el, ok) {
+    const field = el.closest('.co-field');
+    if (!ok) {
+      isValid = false;
+      field.classList.add('co-field--error');
+      firstInvalidEl = firstInvalidEl || el;
+    } else {
+      field.classList.remove('co-field--error');
+    }
+  }
+
+  markError(nameEl, nameEl.value.trim().length > 0);
+  markError(emailEl, /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailEl.value.trim()));
+  markError(passEl, passEl.value.length >= 6);
+  markError(pass2El, pass2El.value === passEl.value && pass2El.value.length >= 6);
+
+  if (firstInvalidEl) firstInvalidEl.focus();
+  return isValid;
+}
+
+async function submitSignup() {
+  if (!validateSignupForm()) {
+    showToast('Please fix the errors below', 'info');
+    return;
+  }
+
+  const name = document.getElementById('signup-name').value.trim();
+  const email = document.getElementById('signup-email').value.trim();
+  const password = document.getElementById('signup-password').value;
+
+  const btn = document.getElementById('signup-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating account...'; }
+
+  const { data, error } = await supabase.auth.signUp({
+    email: email,
+    password: password,
+    options: { data: { full_name: name } }
+  });
+
+  if (btn) { btn.disabled = false; btn.innerHTML = 'Sign Up <i class="fas fa-arrow-right"></i>'; }
+
+  if (error) {
+    showToast(error.message, 'error');
+    return;
+  }
+
+  // If "Confirm email" is turned off in Supabase settings, data.session
+  // will already be set and the user is logged in immediately.
+  if (data.session) {
+    currentUser = data.user;
+    closeSignupModal();
+    updateAuthUI();
+    showToast('Account created! Welcome, ' + name.split(' ')[0] + '!');
+  } else {
+    closeSignupModal();
+    showToast('Account created! Please check your email to confirm.', 'info');
+  }
+}
+
+// Restore session on page load (so refreshing doesn't log the user out) //
+async function restoreSession() {
+  const { data } = await supabase.auth.getSession();
+  if (data.session) {
+    currentUser = data.session.user;
+    updateAuthUI();
+  }
+
+  supabase.auth.onAuthStateChange(function(event, session) {
+    currentUser = session ? session.user : null;
+    updateAuthUI();
+  });
 }
 
 // Update topbar login link //
@@ -910,6 +1085,17 @@ function initLoginModal() {
     });
     el.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') submitLogin();
+    });
+  });
+
+  ['signup-name', 'signup-email', 'signup-password', 'signup-password2'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', function() {
+      this.closest('.co-field').classList.remove('co-field--error');
+    });
+    el.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') submitSignup();
     });
   });
 }
@@ -994,7 +1180,31 @@ function injectModals() {
     '<span class="co-field-error">Password is required</span></div>' +
     '<label class="login-remember"><input type="checkbox" id="login-remember"/> <span>Remember me</span></label>' +
     '<button class="co-btn co-btn--next login-submit" onclick="submitLogin()">Log In <i class="fas fa-arrow-right"></i></button>' +
-    '<p class="login-signup">Don\'t have an account? <a href="#" onclick="return false;">Sign Up</a></p>' +
+    '<p class="login-signup">Don\'t have an account? <a href="#" onclick="closeLoginModal(); openSignupModal(event); return false;">Sign Up</a></p>' +
+    '</div></div>' +
+
+    // Signup overlay + modal
+    '<div id="sn-signupOverlay" class="sn-overlay" onclick="closeSignupModal()"></div>' +
+    '<div id="sn-signupModal" class="sn-login-modal">' +
+    '<button class="pm-close" onclick="closeSignupModal()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body">' +
+    '<div class="login-icon"><i class="fas fa-user-plus"></i></div>' +
+    '<h2>Create Your Account</h2>' +
+    '<p class="login-sub">Sign up to start shopping on HomeWeb</p>' +
+    '<div class="co-field"><label>Full Name <span class="co-required">*</span></label>' +
+    '<input type="text" id="signup-name" placeholder="Juan Dela Cruz"/>' +
+    '<span class="co-field-error">Full name is required</span></div>' +
+    '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
+    '<input type="email" id="signup-email" placeholder="you@example.com"/>' +
+    '<span class="co-field-error">Enter a valid email address</span></div>' +
+    '<div class="co-field"><label>Password <span class="co-required">*</span></label>' +
+    '<input type="password" id="signup-password" placeholder="At least 6 characters"/>' +
+    '<span class="co-field-error">Password must be at least 6 characters</span></div>' +
+    '<div class="co-field"><label>Confirm Password <span class="co-required">*</span></label>' +
+    '<input type="password" id="signup-password2" placeholder="Re-enter your password"/>' +
+    '<span class="co-field-error">Passwords do not match</span></div>' +
+    '<button class="co-btn co-btn--next login-submit" id="signup-submit-btn" onclick="submitSignup()">Sign Up <i class="fas fa-arrow-right"></i></button>' +
+    '<p class="login-signup">Already have an account? <a href="#" onclick="closeSignupModal(); openLoginModal(event); return false;">Log In</a></p>' +
     '</div></div>';
 
   var div = document.createElement('div');
@@ -1021,4 +1231,5 @@ document.addEventListener('DOMContentLoaded', function() {
   initLoginModal();
   updateCartBadge();
   initSearch();
+  restoreSession();
 });

@@ -17,7 +17,7 @@
 		<div class="topbar-right">
 			<a href="#"><i class="fas fa-bell"></i> Notifications</a>
 			<a href="#"><i class="fas fa-question-circle"></i> Help</a>
-			<a href="#"><i class="fas fa-user"></i> Sign Up</a>
+			<a href="#" class="sn-signup-link" onclick="openSignupModal(event); return false;"><i class="fas fa-user"></i> Sign Up</a>
 			<a href="#" class="sn-login-link"><i class="fas fa-sign-in-alt"></i> Log In</a>
 			<a href="#" class="sn-track-link" onclick="openOrderTracking(); return false;">Track Orders</a>
 		</div>
@@ -287,6 +287,8 @@
 	</div>
 </footer>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-client.js"></script>
 <script src="shop.js"></script>
 <script>
 	const categoryProducts = [
