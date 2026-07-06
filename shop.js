@@ -51,6 +51,7 @@ let shippingInfo = {
 };
 let gcashStep = 1; // 1: mobile number, 2: mpin, 3: processing, 4: success
 let gcashMobile = '';
+let selectedPaymentMethod = 'cod';
 
 //  ORDERS (TRACKING) — now fetched from Supabase, this is just an in-memory cache //
 let orders = [];
@@ -309,6 +310,7 @@ function addToCart(andCheckout) {
 function openCheckout() {
   if (!cart.length) { showToast('Your cart is empty', 'info'); return; }
   checkoutStep = 1;
+  selectedPaymentMethod = 'cod';
   renderCheckout();
   document.getElementById('sn-coOverlay').classList.add('active');
   document.getElementById('sn-checkoutModal').classList.add('active');
@@ -393,9 +395,9 @@ function renderCheckout() {
     body = '<div class="co-form">' +
       '<h3>Payment Method</h3>' +
       '<div class="co-pay-opts">' +
-      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="cod" checked/>' +
+      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="cod" ' + (selectedPaymentMethod === 'cod' ? 'checked' : '') + '/>' +
       '<span><i class="fas fa-money-bill-wave"></i><strong>Cash on Delivery</strong></span></label>' +
-      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="gcash"/>' +
+      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="gcash" ' + (selectedPaymentMethod === 'gcash' ? 'checked' : '') + '/>' +
       '<span><i class="fas fa-mobile-alt"></i><strong>GCash</strong></span></label>' +
       '</div>' +
       '<div id="sn-cardFields" style="display:none" class="co-card-fields">' +
@@ -459,6 +461,7 @@ function renderCheckout() {
   if (checkoutStep === 3) {
     modal.querySelectorAll('input[name="payment"]').forEach(function(r) {
       r.addEventListener('change', function() {
+        selectedPaymentMethod = this.value;
         var cf = document.getElementById('sn-cardFields');
         if (cf) cf.style.display = this.value === 'card' ? 'block' : 'none';
       });
@@ -504,9 +507,7 @@ function saveShippingForm() {
 // Navigate between checkout steps //
 function goStep(delta) {
   if (delta === 1 && checkoutStep === 4) {
-    var payEl = document.querySelector('input[name="payment"]:checked');
-    var paymentMethod = payEl ? payEl.value : 'cod';
-    if (paymentMethod === 'gcash') {
+    if (selectedPaymentMethod === 'gcash') {
       openGcashPayment();
     } else {
       placeOrder();
@@ -692,8 +693,7 @@ async function placeOrder() {
   const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
   const shipFee = sub >= 500 ? 0 : 79;
 
-  var payEl = document.querySelector('input[name="payment"]:checked');
-  var paymentMethod = payEl ? payEl.value : 'cod';
+  var paymentMethod = selectedPaymentMethod;
   var orderCode = 'HW' + String(Date.now()).slice(-8).toUpperCase();
 
   const nextBtn = document.querySelector('#sn-checkoutModal .co-btn--next');
