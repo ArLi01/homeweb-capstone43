@@ -289,6 +289,13 @@ function changeQty(delta) {
 
 // Add to cart //
 function addToCart(andCheckout) {
+  if (!currentUser) {
+    closeProductModal();
+    showToast('Please log in to add items to your cart', 'info');
+    openLoginModal();
+    return;
+  }
+
   const p = currentProduct;
   const existing = cart.find(function(x) { return x.id === p.id; });
   if (existing) existing.qty += p.qty;
@@ -308,6 +315,11 @@ function addToCart(andCheckout) {
 // CHECKOUT FLOW //
 
 function openCheckout() {
+  if (!currentUser) {
+    showToast('Please log in to check out', 'info');
+    openLoginModal();
+    return;
+  }
   if (!cart.length) { showToast('Your cart is empty', 'info'); return; }
   checkoutStep = 1;
   selectedPaymentMethod = 'cod';
@@ -507,7 +519,6 @@ function saveShippingForm() {
 // Navigate between checkout steps //
 function goStep(delta) {
   if (delta === 1 && checkoutStep === 4) {
-    alert('DEBUG: selectedPaymentMethod = "' + selectedPaymentMethod + '"');
     if (selectedPaymentMethod === 'gcash') {
       openGcashPayment();
     } else {
