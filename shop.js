@@ -507,6 +507,7 @@ function saveShippingForm() {
 // Navigate between checkout steps //
 function goStep(delta) {
   if (delta === 1 && checkoutStep === 4) {
+    alert('DEBUG: selectedPaymentMethod = "' + selectedPaymentMethod + '"');
     if (selectedPaymentMethod === 'gcash') {
       openGcashPayment();
     } else {
