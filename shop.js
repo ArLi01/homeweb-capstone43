@@ -833,14 +833,14 @@ function generateMockRider() {
   var plateLetters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26));
   var plateNumbers = randomBetween(1000, 9999);
   var phone = '09' + randomBetween(100000000, 999999999);
-  var rating = (randomBetween(45, 50) / 10).toFixed(1);
   var eta = randomBetween(15, 30);
   return {
     name: name,
     vehicle: vehicle,
     plate: plateLetters + ' ' + plateNumbers,
     phone: phone,
-    rating: rating,
+    rating: null, // no real account behind a mock rider, so no genuine rating exists
+    ratingCount: 0,
     eta: eta
   };
 }
@@ -1020,6 +1020,28 @@ async function submitReview(orderId, productId) {
   openTrackingDetail(orderId);
 }
 
+async function submitRiderRating(orderId, riderUserId) {
+  var riderKey = 'rider-' + orderId;
+  var ratingInput = document.getElementById('review-rating-' + riderKey);
+  var rating = ratingInput ? parseInt(ratingInput.value, 10) : 0;
+  if (!rating) { showToast('Please select a star rating first', 'info'); return; }
+
+  var comment = document.getElementById('review-comment-' + riderKey).value.trim();
+
+  const { error } = await supabase.from('rider_ratings').insert({
+    order_id: orderId, rider_user_id: riderUserId, customer_id: currentUser.id,
+    rating: rating, comment: comment || null
+  });
+
+  if (error) {
+    showToast('Could not submit rider rating: ' + error.message, 'error');
+    return;
+  }
+
+  showToast('Thanks for rating your rider! \u2b50');
+  openTrackingDetail(orderId);
+}
+
 // Show order success modal with generated order code //
 function showOrderSuccess(orderCode) {
   document.getElementById('sn-orderId').textContent = orderCode;
@@ -1081,34 +1103,6 @@ function closeRiderModal() {
   document.getElementById('sn-riderModal').classList.remove('active');
   document.body.style.overflow = '';
   if (riderPollIntervalId) { clearInterval(riderPollIntervalId); riderPollIntervalId = null; }
-}
-
-async function findAvailableRider() {
-  const { data: riderRow } = await supabase
-    .from('riders')
-    .select('user_id, vehicle_type, plate_number')
-    .eq('is_available', true)
-    .limit(1)
-    .maybeSingle();
-
-  if (!riderRow) return null;
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('full_name, phone')
-    .eq('id', riderRow.user_id)
-    .single();
-
-  return {
-    user_id: riderRow.user_id,
-    name: (profile && profile.full_name) || 'Your Rider',
-    phone: (profile && profile.phone) || '',
-    vehicle: riderRow.vehicle_type.charAt(0).toUpperCase() + riderRow.vehicle_type.slice(1),
-    plate: riderRow.plate_number || '',
-    rating: '5.0',
-    eta: randomBetween(15, 30),
-    isReal: true
-  };
 }
 
 async function assignRider(orderId, orderCode) {
@@ -1203,7 +1197,7 @@ function renderRiderStep(orderCode, rider) {
       '<div style="flex:1;">' +
       '<p style="margin:0;font-weight:700;">' + rider.name + '</p>' +
       '<p style="margin:2px 0;color:#777;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + rider.vehicle + ' \u2022 ' + rider.plate + '</p>' +
-      '<p style="margin:2px 0;color:#777;font-size:13px;"><i class="fas fa-star" style="color:#F59E0B;"></i> ' + rider.rating + ' rating</p>' +
+      '<p style="margin:2px 0;color:#777;font-size:13px;">' + (rider.rating ? '<i class="fas fa-star" style="color:#F59E0B;"></i> ' + rider.rating + ' rating' : 'New rider') + '</p>' +
       '</div>' +
       '</div>' +
       '<div class="track-summary-rows">' +
@@ -1222,6 +1216,8 @@ function closeSuccess() {
 }
 
 // ORDER TRACKING //
+let trackingDetailPollIntervalId = null;
+
 async function openOrderTracking(e) {
   if (e) e.preventDefault();
 
@@ -1230,6 +1226,8 @@ async function openOrderTracking(e) {
     openLoginModal();
     return;
   }
+
+  if (trackingDetailPollIntervalId) { clearInterval(trackingDetailPollIntervalId); trackingDetailPollIntervalId = null; }
 
   document.getElementById('sn-trackingOverlay').classList.add('active');
   document.getElementById('sn-trackingModal').classList.add('active');
@@ -1265,6 +1263,7 @@ function closeOrderTracking() {
   document.getElementById('sn-tracking-detail').style.display = 'none';
   currentTrackingOrder = null;
   document.body.style.overflow = '';
+  if (trackingDetailPollIntervalId) { clearInterval(trackingDetailPollIntervalId); trackingDetailPollIntervalId = null; }
 }
 
 function renderOrderList() {
@@ -1330,10 +1329,35 @@ async function openTrackingDetail(orderId) {
   }
   order._myReviews = myReviews;
 
+  var myRiderRating = null;
+  if (order.status === 'delivered' && order.rider_user_id) {
+    const { data: riderRatingRow } = await supabase
+      .from('rider_ratings')
+      .select('rating, comment')
+      .eq('order_id', orderId)
+      .maybeSingle();
+    myRiderRating = riderRatingRow || null;
+  }
+  order._myRiderRating = myRiderRating;
+
   currentTrackingOrder = order;
   renderTrackingDetail(order);
   document.getElementById('sn-tracking-list').style.display = 'none';
   document.getElementById('sn-tracking-detail').style.display = '';
+
+  // Live-update this view while it's open — catches status changes made
+  // from other sessions (a rider's dashboard, the auto-timer, etc.) //
+  if (trackingDetailPollIntervalId) clearInterval(trackingDetailPollIntervalId);
+  trackingDetailPollIntervalId = setInterval(async function() {
+    if (!currentTrackingOrder || currentTrackingOrder.id !== orderId) {
+      clearInterval(trackingDetailPollIntervalId);
+      return;
+    }
+    const { data: latest } = await supabase.from('orders').select('status, updated_at').eq('id', orderId).single();
+    if (latest && (latest.status !== currentTrackingOrder.status || latest.updated_at !== currentTrackingOrder.updated_at)) {
+      openTrackingDetail(orderId);
+    }
+  }, 5000);
 }
 
 function renderTrackingDetail(order) {
@@ -1395,6 +1419,28 @@ function renderTrackingDetail(order) {
     }).join('');
   }
 
+  var riderRatingHtml = '';
+  if (order.status === 'delivered' && order.rider_user_id) {
+    var riderKey = 'rider-' + order.id;
+    var existingRiderRating = order._myRiderRating;
+    if (existingRiderRating) {
+      riderRatingHtml = '<div style="padding:12px 4px;">' +
+        '<div style="color:#F59E0B;font-size:14px;">' + starsHTML(existingRiderRating.rating) + '</div>' +
+        (existingRiderRating.comment ? '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">"' + existingRiderRating.comment + '"</p>' : '') +
+        '</div>';
+    } else {
+      riderRatingHtml = '<div style="padding:12px 4px;">' +
+        '<div class="star-picker" id="star-picker-' + riderKey + '" style="font-size:20px;color:#ccc;cursor:pointer;margin-bottom:8px;">' +
+        [1, 2, 3, 4, 5].map(function(n) {
+          return '<i class="far fa-star" onclick="setStarRating(\'' + riderKey + '\', ' + n + ')" style="margin-right:4px;"></i>';
+        }).join('') +
+        '<input type="hidden" id="review-rating-' + riderKey + '" value="0"/></div>' +
+        '<textarea id="review-comment-' + riderKey + '" placeholder="Optional comment about your delivery..." style="width:100%;border:1px solid #e5e5e5;border-radius:8px;padding:8px;font-size:12.5px;resize:vertical;min-height:44px;"></textarea>' +
+        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:8px;" onclick="submitRiderRating(\'' + order.id + '\', \'' + order.rider_user_id + '\')">Submit Rider Rating</button>' +
+        '</div>';
+    }
+  }
+
   // Delivery address
   var addressStr = (order.shipping_street || '') + ', ' + (order.shipping_city || '') + ' ' + (order.shipping_zip || '');
 
@@ -1422,6 +1468,13 @@ function renderTrackingDetail(order) {
       '</div>'
     ) : '') +
 
+    (riderRatingHtml ? (
+      '<div class="track-detail-section">' +
+      '<h4>Rate Your Rider</h4>' +
+      riderRatingHtml +
+      '</div>'
+    ) : '') +
+
     (order.rider_name ? (
       '<div class="track-detail-section">' +
       '<h4>Your Rider</h4>' +
@@ -1429,7 +1482,7 @@ function renderTrackingDetail(order) {
       '<div style="flex-shrink:0;width:44px;height:44px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;">' + order.rider_name.charAt(0) + '</div>' +
       '<div>' +
       '<p style="margin:0;font-weight:600;">' + order.rider_name + '</p>' +
-      '<p style="margin:2px 0;color:#777;font-size:13px;">' + order.rider_vehicle + ' \u2022 ' + order.rider_plate + ' \u2022 <i class="fas fa-star" style="color:#F59E0B;"></i> ' + order.rider_rating + '</p>' +
+      '<p style="margin:2px 0;color:#777;font-size:13px;">' + order.rider_vehicle + ' \u2022 ' + order.rider_plate + ' \u2022 ' + (order.rider_rating ? '<i class="fas fa-star" style="color:#F59E0B;"></i> ' + order.rider_rating : 'New rider') + '</p>' +
       '<p style="margin:0;color:#777;font-size:13px;">' + order.rider_phone + '</p>' +
       '</div></div></div>'
     ) : '') +
@@ -2831,7 +2884,7 @@ async function acceptOrder(orderId) {
       rider_phone: (myProfile && myProfile.phone) || '',
       rider_vehicle: myRiderProfile ? (myRiderProfile.vehicle_type.charAt(0).toUpperCase() + myRiderProfile.vehicle_type.slice(1)) : 'Motorcycle',
       rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
-      rider_rating: '5.0',
+      rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? myRiderProfile.rating_avg : null,
       updated_at: new Date().toISOString()
     })
     .eq('id', orderId)
@@ -2922,7 +2975,11 @@ function renderRiderDashboard() {
 
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
-    '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed</p>' +
+    '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed' +
+    (myRiderProfile && myRiderProfile.rating_count > 0
+      ? ' \u2022 <span style="color:#F59E0B;">' + stars(Math.round(myRiderProfile.rating_avg)) + '</span> ' + myRiderProfile.rating_avg + ' (' + myRiderProfile.rating_count + ')'
+      : ' \u2022 New rider, no ratings yet') +
+    '</p>' +
     toggleHtml +
     (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="loadAvailableOrders().then(renderRiderDashboard)"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Active Deliveries</h3>' +
