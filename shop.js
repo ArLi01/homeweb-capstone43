@@ -359,6 +359,36 @@ function openProductModal(id) {
   document.getElementById('sn-overlay').classList.add('active');
   m.classList.add('active');
   document.body.style.overflow = 'hidden'; 
+
+  loadAndRenderReviews(p.id);
+}
+
+async function loadAndRenderReviews(productId) {
+  var container = document.getElementById('pm-reviews');
+  if (!container) return;
+  container.innerHTML = '<p style="color:#999;font-size:12.5px;">Loading reviews...</p>';
+
+  const { data, error } = await supabase
+    .from('reviews')
+    .select('rating, comment, created_at')
+    .eq('product_id', productId)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (error || !data || !data.length) {
+    container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews</h3><p style="color:#999;font-size:12.5px;">No reviews yet.</p>';
+    return;
+  }
+
+  var rowsHtml = data.map(function(r) {
+    return '<div style="padding:8px 0;border-bottom:1px solid #f5f5f5;">' +
+      '<div style="color:#F59E0B;font-size:13px;">' + stars(r.rating) + '</div>' +
+      (r.comment ? '<p style="margin:4px 0 0;font-size:12.5px;color:#555;">' + r.comment + '</p>' : '') +
+      '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(r.created_at) + '</p>' +
+      '</div>';
+  }).join('');
+
+  container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' + rowsHtml;
 }
 
 function closeProductModal() {
@@ -1016,7 +1046,13 @@ async function findAvailableRider() {
 }
 
 async function assignRider(orderId, orderCode) {
-  var rider = await findAvailableRider();
+  // Skip auto-assign entirely if a real rider already claimed this order manually //
+  const { data: currentOrder } = await supabase.from('orders').select('rider_user_id, status').eq('id', orderId).single();
+  if (currentOrder && currentOrder.rider_user_id) return;
+
+  // This automatic timer is a fallback for demo purposes only — real riders
+  // get assigned by manually claiming an order from their dashboard instead.
+  var rider = generateMockRider();
   if (!rider) rider = generateMockRider();
 
   var updatePayload = {
@@ -1845,7 +1881,9 @@ function injectModals() {
     '<div class="pm-actions">' +
     '<button class="pm-btn pm-btn--cart" onclick="addToCart(false)"><i class="fas fa-cart-plus"></i> Add to Cart</button>' +
     '<button class="pm-btn pm-btn--buy" onclick="addToCart(true)"><i class="fas fa-bolt"></i> Buy Now</button>' +
-    '</div></div></div></div>' +
+    '</div>' +
+    '<div class="pm-reviews" id="pm-reviews" style="grid-column:1/-1;margin-top:16px;padding-top:16px;border-top:1px solid #eee;"></div>' +
+    '</div></div></div>' +
 
     // Checkout overlay + modal
     '<div id="sn-coOverlay" class="sn-overlay" onclick="closeCheckout()"></div>' +
@@ -2378,6 +2416,32 @@ async function switchMerchantView(view) {
   renderMerchantDashboard();
 }
 
+async function viewProductReviews(productId, productName) {
+  var body = document.getElementById('sn-merchant-body');
+  body.innerHTML = '<div class="track-empty"><p>Loading reviews...</p></div>';
+
+  const { data, error } = await supabase
+    .from('reviews')
+    .select('rating, comment, created_at')
+    .eq('product_id', productId)
+    .order('created_at', { ascending: false });
+
+  var rowsHtml = (!error && data && data.length)
+    ? data.map(function(r) {
+        return '<div style="padding:10px 0;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="color:#F59E0B;font-size:14px;">' + stars(r.rating) + '</div>' +
+          (r.comment ? '<p style="margin:4px 0 0;font-size:13px;color:#555;">' + r.comment + '</p>' : '') +
+          '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(r.created_at) + '</p>' +
+          '</div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No reviews yet for this product.</p>';
+
+  body.innerHTML =
+    '<div class="track-detail-back" onclick="renderMerchantDashboard()">Back to My Store</div>' +
+    '<h2 style="margin:8px 0 16px;">Reviews \u2014 ' + productName + '</h2>' +
+    rowsHtml;
+}
+
 function renderMerchantProductsView(tabs) {
   var body = document.getElementById('sn-merchant-body');
 
@@ -2390,8 +2454,10 @@ function renderMerchantProductsView(tabs) {
       '<div style="flex:1;min-width:0;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">' + p.name + (p.is_active ? '' : ' <span style="color:#DC2626;font-size:11px;">(inactive)</span>') + '</p>' +
       '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + meta.title + '</p>' +
+      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(Math.round(p.rating_avg || 0)) + ' <span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-shrink:0;">' +
+      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="viewProductReviews(\'' + p.id + '\', \'' + p.name.replace(/'/g, "\\'") + '\')" title="Reviews"><i class="fas fa-comment-dots"></i></button>' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="stockInPrompt(\'' + p.id + '\')" title="Stock in"><i class="fas fa-plus"></i></button>' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="openProductForm(\'' + p.id + '\')" title="Edit"><i class="fas fa-edit"></i></button>' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="toggleProductActive(\'' + p.id + '\', ' + !p.is_active + ')" title="' + (p.is_active ? 'Deactivate' : 'Activate') + '"><i class="fas fa-' + (p.is_active ? 'eye-slash' : 'eye') + '"></i></button>' +
@@ -2544,6 +2610,7 @@ async function deleteMyProduct(productId) {
 
 let myRiderProfile = null;
 let myAssignedOrders = [];
+let availableOrders = [];
 
 async function openRiderDashboard(e) {
   if (e) e.preventDefault();
@@ -2572,6 +2639,7 @@ async function openRiderDashboard(e) {
   myRiderProfile = riderRow;
 
   await loadMyAssignedOrders();
+  await loadAvailableOrders();
   renderRiderDashboard();
 }
 
@@ -2590,11 +2658,68 @@ async function loadMyAssignedOrders() {
   myAssignedOrders = error ? [] : (data || []);
 }
 
+// Orders that have been placed but no rider has claimed yet //
+async function loadAvailableOrders() {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*, order_items(*)')
+    .eq('status', 'placed')
+    .is('rider_user_id', null)
+    .order('created_at', { ascending: false });
+  availableOrders = error ? [] : (data || []);
+}
+
+// Claim an unassigned order for this rider (handles the race where
+// someone else — or the auto-assign fallback — grabbed it first) //
+async function acceptOrder(orderId) {
+  const { data: myProfile } = await supabase.from('profiles').select('full_name, phone').eq('id', currentUser.id).single();
+
+  const { data, error } = await supabase
+    .from('orders')
+    .update({
+      status: 'preparing',
+      rider_user_id: currentUser.id,
+      rider_name: (myProfile && myProfile.full_name) || 'Rider',
+      rider_phone: (myProfile && myProfile.phone) || '',
+      rider_vehicle: myRiderProfile ? (myRiderProfile.vehicle_type.charAt(0).toUpperCase() + myRiderProfile.vehicle_type.slice(1)) : 'Motorcycle',
+      rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
+      rider_rating: '5.0',
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', orderId)
+    .eq('status', 'placed')
+    .is('rider_user_id', null)
+    .select();
+
+  if (error || !data || !data.length) {
+    showToast('Too late — another rider already claimed this order', 'info');
+    await loadAvailableOrders();
+    renderRiderDashboard();
+    return;
+  }
+
+  await supabase.from('order_status_history').insert({
+    order_id: orderId,
+    status: 'preparing',
+    label: 'Preparing Your Order',
+    description: 'Your order has been accepted by a rider and is being prepared for pickup.'
+  });
+
+  await supabase.from('riders').update({ is_available: false }).eq('user_id', currentUser.id);
+  if (myRiderProfile) myRiderProfile.is_available = false;
+
+  showToast('Order accepted \uD83D\uDEF5');
+  await loadMyAssignedOrders();
+  await loadAvailableOrders();
+  renderRiderDashboard();
+}
+
 async function toggleMyAvailability(newState) {
   const { error } = await supabase.from('riders').update({ is_available: newState }).eq('user_id', currentUser.id);
   if (error) { showToast('Could not update availability: ' + error.message, 'error'); return; }
   myRiderProfile.is_available = newState;
   showToast(newState ? 'You\'re now available for deliveries' : 'You\'re now offline', 'info');
+  if (newState) await loadAvailableOrders();
   renderRiderDashboard();
 }
 
@@ -2628,11 +2753,24 @@ function renderRiderDashboard() {
       '</div>';
   }
 
+  var availableHtml = availableOrders.length
+    ? availableOrders.map(function(o) {
+        var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + fmt(o.total) + '</p>' +
+          '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
+          '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
+          '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="acceptOrder(\'' + o.id + '\')">Accept Delivery</button>' +
+          '</div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No orders waiting for a rider right now.</p>';
+
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
     '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed</p>' +
     toggleHtml +
-    '<h3 style="margin:0 0 8px;font-size:14px;">Active Deliveries</h3>' +
+    (available ? ('<h3 style="margin:0 0 8px;font-size:14px;">Available Orders</h3>' + availableHtml) : '') +
+    '<h3 style="margin:16px 0 8px;font-size:14px;">Active Deliveries</h3>' +
     (activeOrders.length ? activeOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No active deliveries right now.</p>') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Completed</h3>' +
     (pastOrders.length ? pastOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No completed deliveries yet.</p>');
