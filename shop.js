@@ -2788,7 +2788,12 @@ async function acceptOrder(orderId) {
     .is('rider_user_id', null)
     .select();
 
-  if (error || !data || !data.length) {
+  if (error) {
+    showToast('Could not accept order: ' + error.message, 'error');
+    console.error('acceptOrder error:', error);
+    return;
+  }
+  if (!data || !data.length) {
     showToast('Too late — another rider already claimed this order', 'info');
     await loadAvailableOrders();
     renderRiderDashboard();
