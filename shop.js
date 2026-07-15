@@ -87,7 +87,7 @@ function renderProductCardHtml(p) {
     '<div class="product-info">' +
     '<p class="product-name">' + p.name + '</p>' +
     '<div class="product-prices"><span class="price-now">' + fmtPrice(p.price) + '</span>' + oldPriceHtml + '</div>' +
-    '<div class="product-stars">' + starsHTML(p.rating) + '<span>(' + p.sold + ')</span></div>' +
+    '<div class="product-stars">' + starsHTML(p.rating) + '<span>' + (p.ratingAvg > 0 ? p.ratingAvg + ' \u2022 ' : '') + p.sold + '</span></div>' +
     stockNote +
     '</div></div>';
 }
@@ -347,7 +347,7 @@ function openProductModal(id) {
     m.querySelector('.pm-icon').innerHTML = '<i class="fas ' + p.icon + '"></i>';
   }
   m.querySelector('.pm-name').textContent = p.name;
-  m.querySelector('.pm-stars').innerHTML = stars(p.rating) + '<span>' + p.sold + ' sold</span>';
+  m.querySelector('.pm-stars').innerHTML = stars(p.rating) + '<span>' + (p.ratingAvg > 0 ? p.ratingAvg + ' \u2022 ' : '') + p.sold + '</span>';
   m.querySelector('.pm-price-now').textContent = fmt(p.price);
   m.querySelector('.pm-price-old').textContent = p.oldPrice ? fmt(p.oldPrice) : '';
   const disc = m.querySelector('.pm-discount');
@@ -813,10 +813,11 @@ function submitGcashMpin() {
 }
 
 var ORDER_STATUS_MAP = {
-  'placed':           { label: 'Order Placed',          desc: 'Your order has been received and is being reviewed.' },
-  'preparing':        { label: 'Preparing Your Order',  desc: 'The seller is packing your items with care.' },
-  'out_for_delivery': { label: 'Out for Delivery',      desc: 'Your rider is on the way to deliver your order!' },
-  'delivered':        { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' }
+  'placed':                { label: 'Order Placed',          desc: 'Your order has been received and is being reviewed.' },
+  'preparing':              { label: 'Preparing Your Order',  desc: 'The seller is packing your items with care.' },
+  'out_for_delivery':        { label: 'Out for Delivery',      desc: 'Your rider is on the way to deliver your order!' },
+  'awaiting_confirmation':   { label: 'Delivered — Awaiting Your Confirmation', desc: 'Your rider marked this as delivered. Please confirm you received it.' },
+  'delivered':              { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' }
 };
 
 function randomBetween(min, max) {
@@ -927,7 +928,7 @@ async function advanceOrderStatus(orderDbId, newStatus) {
     description: info.desc
   });
 
-  if (newStatus === 'delivered' && existing.rider_user_id) {
+  if (newStatus === 'awaiting_confirmation' && existing.rider_user_id) {
     await supabase.from('riders').update({ is_available: true }).eq('user_id', existing.rider_user_id);
   }
 
@@ -940,17 +941,35 @@ async function advanceOrderStatus(orderDbId, newStatus) {
   if (listEl && listEl.style.display !== 'none') renderOrderList();
 
   // Chain the next automatic step, spaced out to feel realistic //
+  // Note: this stops at awaiting_confirmation, NOT delivered — the
+  // customer must separately confirm receipt to finalize the order.
   if (newStatus === 'out_for_delivery') {
-    setTimeout(function() { advanceOrderStatus(orderDbId, 'delivered'); }, randomBetween(15000, 20000));
+    setTimeout(function() { advanceOrderStatus(orderDbId, 'awaiting_confirmation'); }, randomBetween(15000, 20000));
   }
 }
 
-// Mark order as delivered (manual override, e.g. for demo purposes) //
-async function markDelivered(orderDbId) {
-  await advanceOrderStatus(orderDbId, 'delivered');
-  showToast('Order marked as delivered \u2705');
+// Customer confirms they actually received the order — this is the
+// ONLY way an order becomes fully 'delivered' and unlocks reviews.
+// Independent from the rider's "Mark Delivered" action on purpose,
+// so a rider can't unilaterally close out an order they never delivered.
+async function confirmDelivery(orderDbId) {
+  const { data: existing } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderDbId).single();
+  if (!existing || existing.status !== 'awaiting_confirmation') {
+    showToast('This order isn\'t ready to confirm yet', 'info');
+    return;
+  }
+
+  await supabase.from('orders').update({ status: 'delivered', updated_at: new Date().toISOString() }).eq('id', orderDbId);
+  await supabase.from('order_status_history').insert({
+    order_id: orderDbId, status: 'delivered', label: 'Delivered', description: 'Confirmed received by customer. Thank you for shopping with HomeWeb!'
+  });
+
+  updateNotifBadge();
+  showToast('Delivery confirmed \u2705 You can now leave a review!');
+  openTrackingDetail(orderDbId);
 }
 
+// Mark order as delivered (manual override, e.g. for demo purposes) //
 // ============================================================
 // REVIEWS & RATINGS
 // ============================================================
@@ -1017,6 +1036,8 @@ function showOrderSuccess(orderCode) {
 let riderSearchOrderId = null;
 let riderSearchStep = 1; // 1: searching, 2: rider found
 
+let riderPollIntervalId = null;
+
 function openRiderSearchModal(orderId, orderCode) {
   riderSearchOrderId = orderId;
   riderSearchStep = 1;
@@ -1028,12 +1049,38 @@ function openRiderSearchModal(orderId, orderCode) {
 
   var searchDelay = randomBetween(30000, 60000);
   setTimeout(function() { assignRider(orderId, orderCode); }, searchDelay);
+
+  // Poll for a rider claiming this order from a different session (e.g. a
+  // real rider accepting it from their own dashboard) — there's no live
+  // realtime connection here, so this is how we catch that update. //
+  if (riderPollIntervalId) clearInterval(riderPollIntervalId);
+  riderPollIntervalId = setInterval(async function() {
+    if (riderSearchStep !== 1 || riderSearchOrderId !== orderId) {
+      clearInterval(riderPollIntervalId);
+      return;
+    }
+    const { data: order } = await supabase
+      .from('orders')
+      .select('rider_name, rider_phone, rider_vehicle, rider_plate, rider_rating')
+      .eq('id', orderId)
+      .single();
+
+    if (order && order.rider_name) {
+      clearInterval(riderPollIntervalId);
+      riderSearchStep = 2;
+      renderRiderStep(orderCode, {
+        name: order.rider_name, phone: order.rider_phone, vehicle: order.rider_vehicle,
+        plate: order.rider_plate, rating: order.rider_rating, eta: randomBetween(15, 30)
+      });
+    }
+  }, 4000);
 }
 
 function closeRiderModal() {
   document.getElementById('sn-riderOverlay').classList.remove('active');
   document.getElementById('sn-riderModal').classList.remove('active');
   document.body.style.overflow = '';
+  if (riderPollIntervalId) { clearInterval(riderPollIntervalId); riderPollIntervalId = null; }
 }
 
 async function findAvailableRider() {
@@ -1406,10 +1453,14 @@ function renderTrackingDetail(order) {
     '</div>' +
     '</div>';
 
-  // Mark as delivered button (only if not yet delivered)
-  if (order.status !== 'delivered') {
-    html += '<button class="co-btn co-btn--next track-mark-delivered" onclick="markDelivered(\'' + order.id + '\')">' +
-      'Mark as Delivered</button>';
+  // Customer confirms receipt — only appears once the rider has actually
+  // marked it delivered, never at any earlier status. This is the only
+  // way an order finalizes as 'delivered' and unlocks reviews.
+  if (order.status === 'awaiting_confirmation') {
+    html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
+      '<p style="margin:0 0 10px;font-size:13px;color:#92400E;"><i class="fas fa-info-circle"></i> Your rider marked this order as delivered. Please confirm you actually received it.</p>' +
+      '<button class="co-btn co-btn--next track-mark-delivered" onclick="confirmDelivery(\'' + order.id + '\')">Confirm Receipt</button>' +
+      '</div>';
   }
 
   container.innerHTML = html;
@@ -2512,7 +2563,7 @@ function renderMerchantProductsView(tabs) {
       '<div style="flex:1;min-width:0;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">' + p.name + (p.is_active ? '' : ' <span style="color:#DC2626;font-size:11px;">(inactive)</span>') + '</p>' +
       '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + meta.title + '</p>' +
-      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(Math.round(p.rating_avg || 0)) + ' <span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
+      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(Math.round(p.rating_avg || 0)) + ' ' + (p.rating_avg > 0 ? p.rating_avg + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-shrink:0;">' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="viewProductReviews(\'' + p.id + '\', \'' + p.name.replace(/'/g, "\\'") + '\')" title="Reviews"><i class="fas fa-comment-dots"></i></button>' +
@@ -2834,8 +2885,8 @@ function renderRiderDashboard() {
     '<button class="co-btn" style="padding:6px 14px;background:' + (available ? '#FEE2E2' : 'var(--primary,#22C55E)') + ';color:' + (available ? '#DC2626' : '#fff') + ';" onclick="toggleMyAvailability(' + !available + ')">' +
     (available ? 'Go Offline' : 'Go Online') + '</button></div>';
 
-  var activeOrders = myAssignedOrders.filter(function(o) { return o.status !== 'delivered'; });
-  var pastOrders = myAssignedOrders.filter(function(o) { return o.status === 'delivered'; });
+  var activeOrders = myAssignedOrders.filter(function(o) { return o.status === 'preparing' || o.status === 'out_for_delivery'; });
+  var pastOrders = myAssignedOrders.filter(function(o) { return o.status === 'awaiting_confirmation' || o.status === 'delivered'; });
 
   function orderCardHtml(o) {
     var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
@@ -2844,7 +2895,9 @@ function renderRiderDashboard() {
     if (o.status === 'preparing') {
       actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'out_for_delivery\')">Mark Picked Up</button>';
     } else if (o.status === 'out_for_delivery') {
-      actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'delivered\')">Mark Delivered</button>';
+      actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'awaiting_confirmation\')">Mark Delivered</button>';
+    } else if (o.status === 'awaiting_confirmation') {
+      actionBtn = '<p style="margin:8px 0 0;color:#F59E0B;font-size:12px;"><i class="fas fa-clock"></i> Waiting for customer to confirm receipt</p>';
     }
 
     return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
