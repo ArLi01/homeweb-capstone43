@@ -363,6 +363,22 @@ function openProductModal(id) {
   loadAndRenderReviews(p.id);
 }
 
+function reviewRowHtml(r) {
+  var name = r.is_anonymous ? 'Anonymous Customer' : (r.reviewer_name || 'HomeWeb Customer');
+  var avatarHtml = (!r.is_anonymous && r.reviewer_avatar_url)
+    ? '<img src="' + r.reviewer_avatar_url + '" style="width:100%;height:100%;object-fit:cover;"/>'
+    : '<i class="fas ' + (r.is_anonymous ? 'fa-user-secret' : 'fa-user') + '"></i>';
+
+  return '<div style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #f5f5f5;">' +
+    '<div style="flex-shrink:0;width:32px;height:32px;border-radius:50%;background:#F3F4F6;color:#999;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:13px;">' + avatarHtml + '</div>' +
+    '<div style="flex:1;">' +
+    '<p style="margin:0;font-weight:600;font-size:12.5px;">' + name + '</p>' +
+    '<div style="color:#F59E0B;font-size:13px;">' + stars(r.rating) + '</div>' +
+    (r.comment ? '<p style="margin:4px 0 0;font-size:12.5px;color:#555;">' + r.comment + '</p>' : '') +
+    '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(r.created_at) + '</p>' +
+    '</div></div>';
+}
+
 async function loadAndRenderReviews(productId) {
   var container = document.getElementById('pm-reviews');
   if (!container) return;
@@ -370,7 +386,7 @@ async function loadAndRenderReviews(productId) {
 
   const { data, error } = await supabase
     .from('reviews')
-    .select('rating, comment, created_at')
+    .select('rating, comment, created_at, is_anonymous, reviewer_name, reviewer_avatar_url')
     .eq('product_id', productId)
     .order('created_at', { ascending: false })
     .limit(10);
@@ -380,13 +396,7 @@ async function loadAndRenderReviews(productId) {
     return;
   }
 
-  var rowsHtml = data.map(function(r) {
-    return '<div style="padding:8px 0;border-bottom:1px solid #f5f5f5;">' +
-      '<div style="color:#F59E0B;font-size:13px;">' + stars(r.rating) + '</div>' +
-      (r.comment ? '<p style="margin:4px 0 0;font-size:12.5px;color:#555;">' + r.comment + '</p>' : '') +
-      '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(r.created_at) + '</p>' +
-      '</div>';
-  }).join('');
+  var rowsHtml = data.map(reviewRowHtml).join('');
 
   container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' + rowsHtml;
 }
@@ -964,10 +974,19 @@ async function submitReview(orderId, productId) {
   if (!rating) { showToast('Please select a star rating first', 'info'); return; }
 
   var comment = document.getElementById('review-comment-' + productId).value.trim();
+  var isAnonymous = document.getElementById('review-anon-' + productId).checked;
+
+  var reviewerName = null, reviewerAvatar = null;
+  if (!isAnonymous) {
+    const { data: myProfile } = await supabase.from('profiles').select('full_name, avatar_url').eq('id', currentUser.id).single();
+    reviewerName = (myProfile && myProfile.full_name) || 'HomeWeb Customer';
+    reviewerAvatar = myProfile ? myProfile.avatar_url : null;
+  }
 
   const { error } = await supabase.from('reviews').insert({
     order_id: orderId, product_id: productId, customer_id: currentUser.id,
-    rating: rating, comment: comment || null
+    rating: rating, comment: comment || null,
+    is_anonymous: isAnonymous, reviewer_name: reviewerName, reviewer_avatar_url: reviewerAvatar
   });
 
   if (error) {
@@ -1046,14 +1065,26 @@ async function findAvailableRider() {
 }
 
 async function assignRider(orderId, orderCode) {
-  // Skip auto-assign entirely if a real rider already claimed this order manually //
+  // Skip auto-assign entirely if a real rider already claimed this order,
+  // or if it's no longer sitting in 'placed' status for some other reason //
   const { data: currentOrder } = await supabase.from('orders').select('rider_user_id, status').eq('id', orderId).single();
-  if (currentOrder && currentOrder.rider_user_id) return;
+  if (!currentOrder || currentOrder.rider_user_id || currentOrder.status !== 'placed') return;
 
-  // This automatic timer is a fallback for demo purposes only — real riders
-  // get assigned by manually claiming an order from their dashboard instead.
+  // If real riders are online, give them a fair chance to claim it manually
+  // instead of racing them with a mock assignment. Keep deferring and
+  // re-checking until either a real rider claims it, or nobody's online. //
+  const { count: onlineRiders } = await supabase
+    .from('riders')
+    .select('user_id', { count: 'exact', head: true })
+    .eq('is_available', true);
+
+  if (onlineRiders && onlineRiders > 0) {
+    setTimeout(function() { assignRider(orderId, orderCode); }, randomBetween(20000, 30000));
+    return;
+  }
+
+  // No real riders online — fall back to the mock generator (demo purposes only) //
   var rider = generateMockRider();
-  if (!rider) rider = generateMockRider();
 
   var updatePayload = {
     status: 'preparing',
@@ -1245,7 +1276,7 @@ async function openTrackingDetail(orderId) {
   if (order.status === 'delivered') {
     const { data: reviewRows } = await supabase
       .from('reviews')
-      .select('product_id, rating, comment')
+      .select('product_id, rating, comment, is_anonymous')
       .eq('order_id', orderId)
       .eq('customer_id', currentUser.id);
     (reviewRows || []).forEach(function(r) { myReviews[r.product_id] = r; });
@@ -1299,6 +1330,7 @@ function renderTrackingDetail(order) {
           '<p style="margin:0 0 4px;font-weight:600;font-size:13px;">' + item.product_name + '</p>' +
           '<div style="color:#F59E0B;font-size:14px;">' + starsHTML(existing.rating) + '</div>' +
           (existing.comment ? '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">"' + existing.comment + '"</p>' : '') +
+          '<p style="margin:4px 0 0;color:#aaa;font-size:11px;">Posted as ' + (existing.is_anonymous ? 'Anonymous' : 'yourself') + '</p>' +
           '</div>';
       }
       return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;" data-review-product="' + item.product_id + '">' +
@@ -1309,6 +1341,8 @@ function renderTrackingDetail(order) {
         }).join('') +
         '<input type="hidden" id="review-rating-' + item.product_id + '" value="0"/></div>' +
         '<textarea id="review-comment-' + item.product_id + '" placeholder="Optional comment..." style="width:100%;border:1px solid #e5e5e5;border-radius:8px;padding:8px;font-size:12.5px;resize:vertical;min-height:44px;"></textarea>' +
+        '<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:#666;cursor:pointer;">' +
+        '<input type="checkbox" id="review-anon-' + item.product_id + '"/> Post anonymously</label>' +
         '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:8px;" onclick="submitReview(\'' + order.id + '\', \'' + item.product_id + '\')">Submit Review</button>' +
         '</div>';
     }).join('');
@@ -2184,9 +2218,17 @@ function renderProfileForm(profile) {
       '<i class="fas fa-motorcycle"></i> Register as Rider</button>';
   }
 
+  var avatarHtml = profile.avatar_url
+    ? '<img src="' + profile.avatar_url + '" style="width:100%;height:100%;object-fit:cover;"/>'
+    : initial;
+
   body.innerHTML =
     '<div style="text-align:center;margin-bottom:12px;">' +
-    '<div style="width:64px;height:64px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;">' + initial + '</div>' +
+    '<div style="position:relative;width:64px;height:64px;margin:0 auto 10px;">' +
+    '<div style="width:64px;height:64px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;overflow:hidden;">' + avatarHtml + '</div>' +
+    '<button onclick="document.getElementById(\'avatar-file-input\').click()" title="Change photo" style="position:absolute;bottom:-2px;right:-2px;width:24px;height:24px;border-radius:50%;background:#fff;border:1px solid #ddd;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:11px;color:#555;"><i class="fas fa-camera"></i></button>' +
+    '<input type="file" id="avatar-file-input" accept="image/*" style="display:none;" onchange="uploadAvatar(this.files[0])"/>' +
+    '</div>' +
     '<h2 style="margin:0;">' + (profile.full_name || 'HomeWeb Shopper') + '</h2>' +
     '<p style="color:#888;margin:4px 0 0;">' + currentUser.email + '</p>' +
     roleChips +
@@ -2234,6 +2276,27 @@ async function saveProfileChanges() {
   showToast('Profile updated \u2705');
 }
 
+async function uploadAvatar(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { showToast('Please choose an image file', 'error'); return; }
+  if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB', 'error'); return; }
+
+  showToast('Uploading photo...', 'info');
+  var ext = file.name.split('.').pop();
+  var path = 'avatars/' + currentUser.id + '/' + Date.now() + '.' + ext;
+
+  const { error: uploadErr } = await supabase.storage.from('uploads').upload(path, file, { upsert: true });
+  if (uploadErr) { showToast('Could not upload photo: ' + uploadErr.message, 'error'); return; }
+
+  const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(path);
+
+  const { error: updateErr } = await supabase.from('profiles').update({ avatar_url: urlData.publicUrl }).eq('id', currentUser.id);
+  if (updateErr) { showToast('Could not save photo: ' + updateErr.message, 'error'); return; }
+
+  showToast('Profile photo updated \u2705');
+  openProfileModal();
+}
+
 // ============================================================
 // MERCHANT DASHBOARD (Phase 2: tenant product management)
 // ============================================================
@@ -2243,6 +2306,7 @@ let myMerchantProducts = [];
 let myMerchantSales = null;
 let merchantDashboardView = 'products'; // 'products' | 'sales'
 let editingProductId = null;
+let pendingProductImageFile = null;
 
 async function openMerchantDashboard(e) {
   if (e) e.preventDefault();
@@ -2422,18 +2486,12 @@ async function viewProductReviews(productId, productName) {
 
   const { data, error } = await supabase
     .from('reviews')
-    .select('rating, comment, created_at')
+    .select('rating, comment, created_at, is_anonymous, reviewer_name, reviewer_avatar_url')
     .eq('product_id', productId)
     .order('created_at', { ascending: false });
 
   var rowsHtml = (!error && data && data.length)
-    ? data.map(function(r) {
-        return '<div style="padding:10px 0;border-bottom:1px solid #f0f0f0;">' +
-          '<div style="color:#F59E0B;font-size:14px;">' + stars(r.rating) + '</div>' +
-          (r.comment ? '<p style="margin:4px 0 0;font-size:13px;color:#555;">' + r.comment + '</p>' : '') +
-          '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(r.created_at) + '</p>' +
-          '</div>';
-      }).join('')
+    ? data.map(reviewRowHtml).join('')
     : '<p style="color:#999;font-size:13px;">No reviews yet for this product.</p>';
 
   body.innerHTML =
@@ -2476,6 +2534,7 @@ function renderMerchantProductsView(tabs) {
 // Add/Edit product form (shown inline in the same dashboard body) //
 function openProductForm(productId) {
   editingProductId = productId;
+  pendingProductImageFile = null;
   var body = document.getElementById('sn-merchant-body');
   var p = productId ? myMerchantProducts.find(function(x) { return x.id === productId; }) : null;
 
@@ -2495,13 +2554,19 @@ function openProductForm(productId) {
       return '<option value="' + k + '"' + (p && p.category === k ? ' selected' : '') + '>' + CATEGORY_META[k].title + '</option>';
     }).join('') +
     '</select></div>' +
-    '<div class="co-field"><label>Image URL (optional)</label>' +
-    '<input type="text" id="pf-image" placeholder="https://..." value="' + (p && p.image_url ? p.image_url : '') + '"/></div>' +
+    '<div class="co-field"><label>Product Photo</label>' +
+    '<div style="display:flex;gap:12px;align-items:center;">' +
+    '<div id="pf-image-preview" style="width:56px;height:56px;border-radius:8px;background:#F3F4F6;overflow:hidden;flex-shrink:0;">' +
+    (p && p.image_url ? '<img src="' + p.image_url + '" style="width:100%;height:100%;object-fit:cover;"/>' : '') +
+    '</div>' +
+    '<button type="button" class="co-btn" style="background:#F3F4F6;color:#333;" onclick="document.getElementById(\'pf-image-file\').click()">Choose Photo</button>' +
+    '<input type="file" id="pf-image-file" accept="image/*" style="display:none;" onchange="previewProductImage(this.files[0])"/>' +
+    '</div></div>' +
     (p ? '' :
       '<div class="co-field"><label>Initial Stock <span class="co-required">*</span></label>' +
       '<input type="number" id="pf-stock" min="0" value="0"/>' +
       '<span class="co-field-error">Enter a starting stock quantity</span></div>') +
-    '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" id="pf-save-btn" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
     '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="renderMerchantDashboard()">Cancel</button>';
 
   ['pf-name', 'pf-price', 'pf-stock'].forEach(function(id) {
@@ -2510,22 +2575,52 @@ function openProductForm(productId) {
   });
 }
 
+function previewProductImage(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { showToast('Please choose an image file', 'error'); return; }
+  if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB', 'error'); return; }
+  pendingProductImageFile = file;
+  var preview = document.getElementById('pf-image-preview');
+  preview.innerHTML = '<img src="' + URL.createObjectURL(file) + '" style="width:100%;height:100%;object-fit:cover;"/>';
+}
+
 async function saveProduct() {
   var name = document.getElementById('pf-name').value.trim();
   var price = parseFloat(document.getElementById('pf-price').value);
   var category = document.getElementById('pf-category').value;
   var desc = document.getElementById('pf-desc').value.trim();
-  var image = document.getElementById('pf-image').value.trim();
 
   var ok = true;
   if (!name) { document.getElementById('pf-name').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!(price >= 0)) { document.getElementById('pf-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!ok) { showToast('Please fix the errors above', 'info'); return; }
 
+  var saveBtn = document.getElementById('pf-save-btn');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving...'; }
+
+  // Upload a new photo if one was chosen; otherwise keep whatever's already there //
+  var imageUrl = null;
+  var existingProduct = editingProductId ? myMerchantProducts.find(function(x) { return x.id === editingProductId; }) : null;
+  if (existingProduct) imageUrl = existingProduct.image_url;
+
+  if (pendingProductImageFile) {
+    var ext = pendingProductImageFile.name.split('.').pop();
+    var path = 'products/' + myMerchantId + '/' + Date.now() + '.' + ext;
+    const { error: uploadErr } = await supabase.storage.from('uploads').upload(path, pendingProductImageFile, { upsert: true });
+    if (uploadErr) {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = editingProductId ? 'Save Changes' : 'Add Product'; }
+      showToast('Could not upload photo: ' + uploadErr.message, 'error');
+      return;
+    }
+    const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(path);
+    imageUrl = urlData.publicUrl;
+  }
+
   if (editingProductId) {
     const { error } = await supabase.from('products').update({
-      name: name, description: desc, price: price, category: category, image_url: image || null, updated_at: new Date().toISOString()
+      name: name, description: desc, price: price, category: category, image_url: imageUrl, updated_at: new Date().toISOString()
     }).eq('id', editingProductId);
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; }
     if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
     showToast('Product updated \u2705');
   } else {
@@ -2534,8 +2629,9 @@ async function saveProduct() {
 
     const { data: newProduct, error } = await supabase.from('products').insert({
       merchant_id: myMerchantId, name: name, description: desc, price: price,
-      category: category, image_url: image || null, stock_qty: stock
+      category: category, image_url: imageUrl, stock_qty: stock
     }).select().single();
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Add Product'; }
     if (error) { showToast('Could not add product: ' + error.message, 'error'); return; }
 
     if (stock > 0) {
@@ -2546,6 +2642,7 @@ async function saveProduct() {
     showToast('Product added \u2705');
   }
 
+  pendingProductImageFile = null;
   await loadMyMerchantProducts();
   renderMerchantDashboard();
   await loadProducts();
@@ -2769,7 +2866,7 @@ function renderRiderDashboard() {
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
     '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed</p>' +
     toggleHtml +
-    (available ? ('<h3 style="margin:0 0 8px;font-size:14px;">Available Orders</h3>' + availableHtml) : '') +
+    (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="loadAvailableOrders().then(renderRiderDashboard)"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Active Deliveries</h3>' +
     (activeOrders.length ? activeOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No active deliveries right now.</p>') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Completed</h3>' +
