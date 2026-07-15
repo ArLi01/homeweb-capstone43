@@ -1,48 +1,143 @@
 // HomeWeb – Product Modal + Cart + Checkout + Search + Login //
 
-// PRODUCT DATA //
-const products = [
-  { id:101, name:'Fresh Kangkong Bundle',         price:25,  oldPrice:null, discount:0,  rating:5, sold:'320',  icon:'fa-carrot',          location:'Sta. Barbara', category:'vegetable' },
-  { id:103, name:'Tomato 1kg Pack',               price:80,  oldPrice:100,  discount:20, rating:5, sold:'540',  icon:'fa-carrot',          location:'Sta. Barbara', category:'vegetable' },
-  { id:201, name:'Pork Liempo (Belly) 500g',      price:185, oldPrice:220,  discount:16, rating:4, sold:'890',  icon:'fa-drumstick-bite', location:'Sta. Barbara', category:'meat' },
-  { id:301, name:'Bangus (Milkfish) 500g',        price:120, oldPrice:150,  discount:20, rating:4, sold:'1.1k', icon:'fa-fish-fins',      location:'Sta. Barbara', category:'seafood' },
-  { id:401, name:'Lucky Me Pancit Canton 5-pack', price:55,  oldPrice:null, discount:0,  rating:4, sold:'2.3k', icon:'fa-storefront',     location:'Sta. Barbara', category:'sarisari' },
-  { id:404, name:'Milo 300g Pack',                price:120, oldPrice:null, discount:0,  rating:4, sold:'950',  icon:'fa-storefront',          location:'Sta. Barbara', category:'sarisari' },
-  { id:501, name:'Wilkins Mineral Water 1L x6',   price:99,  oldPrice:120,  discount:18, rating:4, sold:'1.5k', icon:'fa-bottle-water',   location:'Sta. Barbara', category:'drinks' },
-];
+// PRODUCT DATA — now loaded live from Supabase (see loadProducts()) //
+let products = [];
 
-// Product image mapping //
-const productImages = {
-  101: 'images/kangkong2.jpg',
-  103: 'images/tomato.jpg',
-  201: 'images/pork-liempo.webp',
-  301: 'images/bangus.jpg',
-  401: 'images/lucky_me1.jpg',
-  404: 'images/Milo1.jpg',
-  501: 'images/wilkins mineral.jpg',
+var CATEGORY_META = {
+  vegetable: { title: 'Vegetable',      bg: '#F0FFF4', color: '#22C55E', icon: 'fa-carrot' },
+  meat:      { title: 'Meat',           bg: '#FFF0F0', color: '#EF4444', icon: 'fa-drumstick-bite' },
+  seafood:   { title: 'Sea Food',       bg: '#F0F8FF', color: '#3B82F6', icon: 'fa-fish-fins' },
+  sarisari:  { title: 'Sari-sari Store',bg: '#FFFBEB', color: '#F59E0B', icon: 'fa-store' },
+  drinks:    { title: 'Drinks',         bg: '#EFF6FF', color: '#0EA5E9', icon: 'fa-bottle-water' },
+  other:     { title: 'Other',          bg: '#F9F9F9', color: '#888888', icon: 'fa-box' }
 };
+var DEFAULT_CATEGORY_META = { bg: '#F9F9F9', color: '#CBD5E1', icon: 'fa-box' };
 
-// Helper: get product image or fallback to icon
 function getProductImage(id) {
-  return productImages[id] || null;
+  var p = products.find(function(x) { return x.id === id; });
+  return (p && p.image_url) ? p.image_url : null;
 }
 
-//categoryProducts//
-document.addEventListener('DOMContentLoaded', function() {
-  if (typeof categoryProducts !== 'undefined') {
-    categoryProducts.forEach(function(p) {
-      if (!products.find(function(x) { return x.id === p.id; })) {
-        products.push(p);
-      }
-    });
+// Fetch all active products (with seller info) from Supabase //
+async function loadProducts() {
+  const { data, error } = await supabase
+    .from('products')
+    .select('*, merchants(store_name)')
+    .eq('is_active', true)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Could not load products:', error.message);
+    products = [];
+    return;
   }
-});
+
+  products = (data || []).map(function(p) {
+    var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
+    return {
+      id: p.id,
+      name: p.name,
+      description: p.description,
+      price: p.price,
+      oldPrice: null,
+      discount: 0,
+      rating: Math.round(p.rating_avg || 0) || 0,
+      ratingAvg: p.rating_avg || 0,
+      sold: (p.rating_count || 0) + (p.rating_count === 1 ? ' review' : ' reviews'),
+      icon: meta.icon,
+      location: (p.merchants && p.merchants.store_name) || 'HomeWeb Seller',
+      category: p.category,
+      image_url: p.image_url,
+      stock_qty: p.stock_qty,
+      merchant_id: p.merchant_id
+    };
+  });
+}
+
+function fmtPrice(n) {
+  return '\u20B1' + Number(n).toLocaleString();
+}
+
+function starsHTML(n) {
+  var s = '';
+  for (var i = 1; i <= 5; i++) {
+    s += '<i class="' + (i <= n ? 'fas' : 'far') + ' fa-star"></i>';
+  }
+  return s;
+}
+
+// Shared product card markup used by both the homepage and category page //
+function renderProductCardHtml(p) {
+  var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
+  var badge = p.discount ? '<div class="product-badge sale-badge">-' + p.discount + '%</div>' : '';
+  var oldPriceHtml = p.oldPrice ? '<span class="price-old">' + fmtPrice(p.oldPrice) + '</span>' : '';
+  var imgSrc = getProductImage(p.id);
+  var imgHtml = imgSrc
+    ? '<div class="product-img" style="background:' + meta.bg + ';"><img src="' + imgSrc + '" alt="' + p.name + '" loading="lazy"/></div>'
+    : '<div class="product-img" style="background:' + meta.bg + ';"><i class="fas ' + p.icon + '" style="color:' + meta.color + ';font-size:32px;"></i></div>';
+
+  var stockNote = (typeof p.stock_qty === 'number' && p.stock_qty <= 0)
+    ? '<p class="product-location" style="color:#DC2626;"><i class="fas fa-ban"></i> Out of stock</p>'
+    : '<p class="product-location"><i class="fas fa-store"></i> ' + p.location + '</p>';
+
+  return '<div class="product-card" data-product-id="' + p.id + '">' +
+    badge +
+    '<div class="wishlist-btn"><i class="far fa-heart"></i></div>' +
+    imgHtml +
+    '<div class="product-info">' +
+    '<p class="product-name">' + p.name + '</p>' +
+    '<div class="product-prices"><span class="price-now">' + fmtPrice(p.price) + '</span>' + oldPriceHtml + '</div>' +
+    '<div class="product-stars">' + starsHTML(p.rating) + '<span>(' + p.sold + ')</span></div>' +
+    stockNote +
+    '</div></div>';
+}
+
+// Render the homepage "Recommended For You" grid //
+function renderHomeProducts() {
+  var grid = document.getElementById('home-product-grid');
+  if (!grid) return;
+  var list = products.slice(0, 8);
+  grid.innerHTML = list.length
+    ? list.map(renderProductCardHtml).join('')
+    : '<p style="color:#999;padding:2rem;">No products available yet.</p>';
+  attachCardClicks();
+}
+
+// Render the category page grid, filtered by ?cat= param //
+function renderCategoryPage() {
+  var grid = document.getElementById('cat-product-grid');
+  if (!grid) return;
+
+  var params = new URLSearchParams(window.location.search);
+  var cat = params.get('cat');
+  var showAll = !cat;
+  var meta = showAll ? { title: 'All Products' } : (CATEGORY_META[cat] || { title: 'All Products' });
+
+  var titleEl = document.getElementById('cat-title');
+  if (titleEl) titleEl.textContent = meta.title;
+
+  var list = showAll ? products.slice() : products.filter(function(p) { return p.category === cat; });
+  var empty = document.getElementById('cat-empty');
+
+  if (!list.length) {
+    grid.innerHTML = '';
+    if (empty) { empty.style.display = 'block'; empty.innerHTML = '<i class="fas fa-box-open" style="font-size:32px;display:block;margin-bottom:12px;opacity:0.4"></i><p>No products found in this category yet.</p>'; }
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  grid.innerHTML = list.map(renderProductCardHtml).join('');
+  attachCardClicks();
+}
+
 
 //  STATE //
 let cart = JSON.parse(localStorage.getItem('shopnow_cart') || '[]');
 let currentProduct = null;    
 let checkoutStep = 1;         
 let currentUser = null;      
+let userRoles = [];
+let activeRole = 'customer';
 let currentTrackingOrder = null; 
 let shippingInfo = {
   firstName: '', lastName: '', phone: '',
@@ -111,8 +206,8 @@ function filterProducts(query) {
 
   // Check each product card //
   document.querySelectorAll('.product-card').forEach(function(card) {
-    const id = Number(card.dataset.productId);
-    const product = products.find(function(p) { return p.id === id; });
+    const id = card.dataset.productId;
+    const product = products.find(function(p) { return String(p.id) === String(id); });
     if (!product) return;
 
     const matches = !q || product.name.toLowerCase().includes(q);
@@ -209,15 +304,6 @@ function initSearch() {
 }
 
 // INJECT DATA-IDS onto existing cards //
-function injectProductIds() {
-  document.querySelectorAll('.flash-sale .product-card').forEach(function(card, i) {
-    if (!card.dataset.productId) card.dataset.productId = i + 1;
-  });
-  document.querySelectorAll('.recommended .product-card').forEach(function(card, i) {
-    if (!card.dataset.productId) card.dataset.productId = i + 6;
-  });
-}
-
 //  ATTACH CLICK TO ALL PRODUCT CARDS  //
 function attachCardClicks() {
   document.querySelectorAll('.product-card').forEach(function(card) {
@@ -225,7 +311,7 @@ function attachCardClicks() {
     card.addEventListener('click', function(e) {
       if (e.target.closest('.wishlist-btn')) return;
       const idx = this.dataset.productId;
-      if (idx) openProductModal(Number(idx));
+      if (idx) openProductModal(idx);
     });
   });
 
@@ -693,6 +779,31 @@ var ORDER_STATUS_MAP = {
   'delivered':        { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' }
 };
 
+function randomBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+var MOCK_RIDER_NAMES = ['Jomar Santos', 'Kevin Reyes', 'Angelo Cruz', 'Mark Villanueva', 'Rico Fernandez', 'Paolo Ramos', 'Jayson Dela Peña', 'Nico Aquino'];
+var MOCK_RIDER_VEHICLES = ['Motorcycle', 'Motorcycle', 'Motorcycle', 'Tricycle'];
+
+function generateMockRider() {
+  var name = MOCK_RIDER_NAMES[Math.floor(Math.random() * MOCK_RIDER_NAMES.length)];
+  var vehicle = MOCK_RIDER_VEHICLES[Math.floor(Math.random() * MOCK_RIDER_VEHICLES.length)];
+  var plateLetters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26));
+  var plateNumbers = randomBetween(1000, 9999);
+  var phone = '09' + randomBetween(100000000, 999999999);
+  var rating = (randomBetween(45, 50) / 10).toFixed(1);
+  var eta = randomBetween(15, 30);
+  return {
+    name: name,
+    vehicle: vehicle,
+    plate: plateLetters + ' ' + plateNumbers,
+    phone: phone,
+    rating: rating,
+    eta: eta
+  };
+}
+
 // Place order — writes to Supabase (orders, order_items, order_status_history) //
 async function placeOrder() {
   if (!currentUser) {
@@ -749,16 +860,15 @@ async function placeOrder() {
     description: ORDER_STATUS_MAP.placed.desc
   });
 
-  // Simulate the seller progressing the order (writes real rows to the DB) //
-  setTimeout(function() { advanceOrderStatus(orderRow.id, 'preparing'); }, 8000);
-  setTimeout(function() { advanceOrderStatus(orderRow.id, 'out_for_delivery'); }, 20000);
+  // Rider search + realistic status progression begins here
+  // (advanceOrderStatus/assignRider chain the rest of the timeline)
 
   // Clear cart
   closeCheckout();
   cart = [];
   saveCart();
   updateCartBadge();
-  showOrderSuccess(orderCode);
+  openRiderSearchModal(orderRow.id, orderCode);
 }
 
 // Advance an order's status in Supabase + log it to the timeline //
@@ -766,7 +876,7 @@ async function advanceOrderStatus(orderDbId, newStatus) {
   const info = ORDER_STATUS_MAP[newStatus];
   if (!info) return;
 
-  const { data: existing } = await supabase.from('orders').select('status').eq('id', orderDbId).single();
+  const { data: existing } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderDbId).single();
   if (!existing || existing.status === 'delivered') return;
 
   await supabase.from('orders').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', orderDbId);
@@ -777,11 +887,22 @@ async function advanceOrderStatus(orderDbId, newStatus) {
     description: info.desc
   });
 
+  if (newStatus === 'delivered' && existing.rider_user_id) {
+    await supabase.from('riders').update({ is_available: true }).eq('user_id', existing.rider_user_id);
+  }
+
+  updateNotifBadge();
+
   if (currentTrackingOrder && currentTrackingOrder.id === orderDbId) {
     openTrackingDetail(orderDbId);
   }
   var listEl = document.getElementById('sn-tracking-list');
   if (listEl && listEl.style.display !== 'none') renderOrderList();
+
+  // Chain the next automatic step, spaced out to feel realistic //
+  if (newStatus === 'out_for_delivery') {
+    setTimeout(function() { advanceOrderStatus(orderDbId, 'delivered'); }, randomBetween(15000, 20000));
+  }
 }
 
 // Mark order as delivered (manual override, e.g. for demo purposes) //
@@ -790,12 +911,194 @@ async function markDelivered(orderDbId) {
   showToast('Order marked as delivered \u2705');
 }
 
+// ============================================================
+// REVIEWS & RATINGS
+// ============================================================
+
+function setStarRating(productId, n) {
+  var input = document.getElementById('review-rating-' + productId);
+  if (input) input.value = n;
+
+  var picker = document.getElementById('star-picker-' + productId);
+  if (!picker) return;
+  picker.querySelectorAll('i').forEach(function(star, i) {
+    star.classList.toggle('fas', i < n);
+    star.classList.toggle('far', i >= n);
+    star.style.color = i < n ? '#F59E0B' : '#ccc';
+  });
+}
+
+async function submitReview(orderId, productId) {
+  var ratingInput = document.getElementById('review-rating-' + productId);
+  var rating = ratingInput ? parseInt(ratingInput.value, 10) : 0;
+  if (!rating) { showToast('Please select a star rating first', 'info'); return; }
+
+  var comment = document.getElementById('review-comment-' + productId).value.trim();
+
+  const { error } = await supabase.from('reviews').insert({
+    order_id: orderId, product_id: productId, customer_id: currentUser.id,
+    rating: rating, comment: comment || null
+  });
+
+  if (error) {
+    showToast('Could not submit review: ' + error.message, 'error');
+    return;
+  }
+
+  showToast('Thanks for your review! \u2b50');
+  await loadProducts();
+  renderHomeProducts();
+  renderCategoryPage();
+  openTrackingDetail(orderId);
+}
+
 // Show order success modal with generated order code //
 function showOrderSuccess(orderCode) {
   document.getElementById('sn-orderId').textContent = orderCode;
   document.getElementById('sn-successOverlay').classList.add('active');
   document.getElementById('sn-successModal').classList.add('active');
   document.body.style.overflow = 'hidden';
+}
+
+// ============================================================
+// MOCK RIDER SEARCH
+// (Simulated — no real logistics/dispatch integration)
+// ============================================================
+
+let riderSearchOrderId = null;
+let riderSearchStep = 1; // 1: searching, 2: rider found
+
+function openRiderSearchModal(orderId, orderCode) {
+  riderSearchOrderId = orderId;
+  riderSearchStep = 1;
+  renderRiderStep(orderCode, null);
+
+  document.getElementById('sn-riderOverlay').classList.add('active');
+  document.getElementById('sn-riderModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var searchDelay = randomBetween(30000, 60000);
+  setTimeout(function() { assignRider(orderId, orderCode); }, searchDelay);
+}
+
+function closeRiderModal() {
+  document.getElementById('sn-riderOverlay').classList.remove('active');
+  document.getElementById('sn-riderModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+async function findAvailableRider() {
+  const { data: riderRow } = await supabase
+    .from('riders')
+    .select('user_id, vehicle_type, plate_number')
+    .eq('is_available', true)
+    .limit(1)
+    .maybeSingle();
+
+  if (!riderRow) return null;
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('full_name, phone')
+    .eq('id', riderRow.user_id)
+    .single();
+
+  return {
+    user_id: riderRow.user_id,
+    name: (profile && profile.full_name) || 'Your Rider',
+    phone: (profile && profile.phone) || '',
+    vehicle: riderRow.vehicle_type.charAt(0).toUpperCase() + riderRow.vehicle_type.slice(1),
+    plate: riderRow.plate_number || '',
+    rating: '5.0',
+    eta: randomBetween(15, 30),
+    isReal: true
+  };
+}
+
+async function assignRider(orderId, orderCode) {
+  var rider = await findAvailableRider();
+  if (!rider) rider = generateMockRider();
+
+  var updatePayload = {
+    status: 'preparing',
+    rider_name: rider.name,
+    rider_phone: rider.phone,
+    rider_vehicle: rider.vehicle,
+    rider_plate: rider.plate,
+    rider_rating: rider.rating,
+    updated_at: new Date().toISOString()
+  };
+  if (rider.isReal) updatePayload.rider_user_id = rider.user_id;
+
+  await supabase.from('orders').update(updatePayload).eq('id', orderId);
+
+  if (rider.isReal) {
+    await supabase.from('riders').update({ is_available: false }).eq('user_id', rider.user_id);
+  }
+
+  await supabase.from('order_status_history').insert({
+    order_id: orderId,
+    status: 'preparing',
+    label: 'Preparing Your Order',
+    description: rider.name + ' has been assigned to your order and is heading to the seller for pickup.'
+  });
+
+  updateNotifBadge();
+
+  var listEl = document.getElementById('sn-tracking-list');
+  if (listEl && listEl.style.display !== 'none') renderOrderList();
+  if (currentTrackingOrder && currentTrackingOrder.id === orderId) openTrackingDetail(orderId);
+
+  // Only pop the "rider found" screen if the user still has this order's modal open //
+  if (riderSearchOrderId === orderId) {
+    riderSearchStep = 2;
+    renderRiderStep(orderCode, rider);
+  } else {
+    showToast(rider.name + ' has been assigned to Order #' + orderCode + '! \uD83D\uDEF5');
+  }
+
+  // Continue the realistic timeline: out for delivery in another 15-20s //
+  // (a real assigned rider can also do this manually from their dashboard)
+  setTimeout(function() { advanceOrderStatus(orderId, 'out_for_delivery'); }, randomBetween(15000, 20000));
+}
+
+function renderRiderStep(orderCode, rider) {
+  var body = document.getElementById('sn-rider-body');
+  if (!body) return;
+
+  if (riderSearchStep === 1) {
+    body.innerHTML =
+      '<div style="text-align:center;padding:8px 4px;">' +
+      '<div class="gcash-spinner" style="margin:8px auto 20px;width:48px;height:48px;border:4px solid #eef7ee;border-top-color:var(--primary,#22C55E);border-radius:50%;animation:gcashspin 0.9s linear infinite;"></div>' +
+      '<h2 style="margin:0 0 6px;">Finding a rider near you...</h2>' +
+      '<p class="login-sub">Order #' + orderCode + ' has been placed. We\'re matching you with a nearby rider.</p>' +
+      '<p style="color:#aaa;font-size:12.5px;margin-top:16px;">You can close this and keep shopping — we\'ll notify you once a rider is found.</p>' +
+      '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal()">Continue Shopping</button>' +
+      '</div>' +
+      '<style>@keyframes gcashspin { to { transform: rotate(360deg); } }</style>';
+
+  } else if (riderSearchStep === 2) {
+    body.innerHTML =
+      '<div style="text-align:center;padding:4px;">' +
+      '<div class="login-icon" style="color:#22C55E"><i class="fas fa-check-circle"></i></div>' +
+      '<h2 style="margin:6px 0;">Rider Found!</h2>' +
+      '<p class="login-sub">Order #' + orderCode + ' is being prepared for pickup.</p>' +
+      '</div>' +
+      '<div style="display:flex;gap:14px;align-items:center;background:#F9FAFB;border-radius:12px;padding:16px;margin:12px 0;">' +
+      '<div style="flex-shrink:0;width:56px;height:56px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:22px;font-weight:700;display:flex;align-items:center;justify-content:center;">' + rider.name.charAt(0) + '</div>' +
+      '<div style="flex:1;">' +
+      '<p style="margin:0;font-weight:700;">' + rider.name + '</p>' +
+      '<p style="margin:2px 0;color:#777;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + rider.vehicle + ' \u2022 ' + rider.plate + '</p>' +
+      '<p style="margin:2px 0;color:#777;font-size:13px;"><i class="fas fa-star" style="color:#F59E0B;"></i> ' + rider.rating + ' rating</p>' +
+      '</div>' +
+      '</div>' +
+      '<div class="track-summary-rows">' +
+      '<div class="track-summary-row"><span>Rider Phone</span><span>' + rider.phone + '</span></div>' +
+      '<div class="track-summary-row"><span>Estimated Arrival</span><span>' + rider.eta + ' mins</span></div>' +
+      '</div>' +
+      '<button class="co-btn co-btn--next" style="width:100%;margin-top:16px;" onclick="closeRiderModal(); viewOrderNow(\'' + riderSearchOrderId + '\');">Track This Order</button>' +
+      '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal()">Continue Shopping</button>';
+  }
 }
 
 function closeSuccess() {
@@ -902,6 +1205,17 @@ async function openTrackingDetail(orderId) {
     return;
   }
 
+  var myReviews = {};
+  if (order.status === 'delivered') {
+    const { data: reviewRows } = await supabase
+      .from('reviews')
+      .select('product_id, rating, comment')
+      .eq('order_id', orderId)
+      .eq('customer_id', currentUser.id);
+    (reviewRows || []).forEach(function(r) { myReviews[r.product_id] = r; });
+  }
+  order._myReviews = myReviews;
+
   currentTrackingOrder = order;
   renderTrackingDetail(order);
   document.getElementById('sn-tracking-list').style.display = 'none';
@@ -938,6 +1252,32 @@ function renderTrackingDetail(order) {
       '</div>';
   }).join('');
 
+  // Review section (only for delivered orders)
+  var reviewsHtml = '';
+  if (order.status === 'delivered') {
+    var myReviews = order._myReviews || {};
+    reviewsHtml = (order.order_items || []).map(function(item) {
+      var existing = myReviews[item.product_id];
+      if (existing) {
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<p style="margin:0 0 4px;font-weight:600;font-size:13px;">' + item.product_name + '</p>' +
+          '<div style="color:#F59E0B;font-size:14px;">' + starsHTML(existing.rating) + '</div>' +
+          (existing.comment ? '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">"' + existing.comment + '"</p>' : '') +
+          '</div>';
+      }
+      return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;" data-review-product="' + item.product_id + '">' +
+        '<p style="margin:0 0 6px;font-weight:600;font-size:13px;">' + item.product_name + '</p>' +
+        '<div class="star-picker" id="star-picker-' + item.product_id + '" style="font-size:20px;color:#ccc;cursor:pointer;margin-bottom:8px;">' +
+        [1, 2, 3, 4, 5].map(function(n) {
+          return '<i class="far fa-star" onclick="setStarRating(\'' + item.product_id + '\', ' + n + ')" style="margin-right:4px;"></i>';
+        }).join('') +
+        '<input type="hidden" id="review-rating-' + item.product_id + '" value="0"/></div>' +
+        '<textarea id="review-comment-' + item.product_id + '" placeholder="Optional comment..." style="width:100%;border:1px solid #e5e5e5;border-radius:8px;padding:8px;font-size:12.5px;resize:vertical;min-height:44px;"></textarea>' +
+        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:8px;" onclick="submitReview(\'' + order.id + '\', \'' + item.product_id + '\')">Submit Review</button>' +
+        '</div>';
+    }).join('');
+  }
+
   // Delivery address
   var addressStr = (order.shipping_street || '') + ', ' + (order.shipping_city || '') + ' ' + (order.shipping_zip || '');
 
@@ -957,6 +1297,25 @@ function renderTrackingDetail(order) {
     '<h4>Order Items</h4>' +
     '<div class="track-detail-items">' + itemsHtml + '</div>' +
     '</div>' +
+
+    (reviewsHtml ? (
+      '<div class="track-detail-section">' +
+      '<h4>Rate & Review</h4>' +
+      reviewsHtml +
+      '</div>'
+    ) : '') +
+
+    (order.rider_name ? (
+      '<div class="track-detail-section">' +
+      '<h4>Your Rider</h4>' +
+      '<div style="display:flex;gap:12px;align-items:center;">' +
+      '<div style="flex-shrink:0;width:44px;height:44px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;">' + order.rider_name.charAt(0) + '</div>' +
+      '<div>' +
+      '<p style="margin:0;font-weight:600;">' + order.rider_name + '</p>' +
+      '<p style="margin:2px 0;color:#777;font-size:13px;">' + order.rider_vehicle + ' \u2022 ' + order.rider_plate + ' \u2022 <i class="fas fa-star" style="color:#F59E0B;"></i> ' + order.rider_rating + '</p>' +
+      '<p style="margin:0;color:#777;font-size:13px;">' + order.rider_phone + '</p>' +
+      '</div></div></div>'
+    ) : '') +
 
     // Summary + Address
     '<div class="track-detail-section">' +
@@ -1091,6 +1450,7 @@ async function submitLogin() {
 
   currentUser = data.user;
   closeLoginModal();
+  await fetchUserRoles();
   updateAuthUI();
   showToast('Welcome back, ' + (currentUser.email || '').split('@')[0] + '!');
 }
@@ -1099,6 +1459,8 @@ async function submitLogin() {
 async function logout() {
   await supabase.auth.signOut();
   currentUser = null;
+  userRoles = [];
+  activeRole = 'customer';
   updateAuthUI();
   showToast('Logged out', 'info');
 }
@@ -1107,14 +1469,38 @@ async function logout() {
 // SIGNUP MODAL
 // ============================================================
 
+let signupRole = 'customer';
+
+var BUSINESS_TYPES = [
+  { value: 'vegetable', label: 'Vegetable' },
+  { value: 'meat', label: 'Meat' },
+  { value: 'seafood', label: 'Sea Food' },
+  { value: 'sarisari', label: 'Sari-sari Store' },
+  { value: 'drinks', label: 'Drinks' },
+  { value: 'other', label: 'Other' }
+];
+
+var VEHICLE_TYPES = [
+  { value: 'motorcycle', label: 'Motorcycle' },
+  { value: 'tricycle', label: 'Tricycle' },
+  { value: 'bicycle', label: 'Bicycle' }
+];
+
+function getVal(id) {
+  var el = document.getElementById(id);
+  return el ? el.value : '';
+}
+function setVal(id, val) {
+  var el = document.getElementById(id);
+  if (el && val) el.value = val;
+}
+
 function openSignupModal(e) {
   if (e) e.preventDefault();
   if (currentUser) return;
 
-  ['signup-name', 'signup-email', 'signup-password', 'signup-password2'].forEach(function(id) {
-    var el = document.getElementById(id);
-    if (el) { el.value = ''; el.closest('.co-field').classList.remove('co-field--error'); }
-  });
+  signupRole = 'customer';
+  renderSignupForm();
 
   document.getElementById('sn-signupOverlay').classList.add('active');
   document.getElementById('sn-signupModal').classList.add('active');
@@ -1125,6 +1511,89 @@ function closeSignupModal() {
   document.getElementById('sn-signupOverlay').classList.remove('active');
   document.getElementById('sn-signupModal').classList.remove('active');
   document.body.style.overflow = '';
+}
+
+// Switch the role selector without losing what's already typed //
+function selectSignupRole(role) {
+  var name = getVal('signup-name'), email = getVal('signup-email'),
+      pass = getVal('signup-password'), pass2 = getVal('signup-password2');
+  signupRole = role;
+  renderSignupForm();
+  setVal('signup-name', name); setVal('signup-email', email);
+  setVal('signup-password', pass); setVal('signup-password2', pass2);
+}
+
+function roleCardHtml(role, icon, label) {
+  var active = signupRole === role;
+  return '<div class="signup-role-card" onclick="selectSignupRole(\'' + role + '\')" ' +
+    'style="flex:1;text-align:center;padding:14px 6px;border-radius:10px;cursor:pointer;' +
+    'border:2px solid ' + (active ? 'var(--primary,#22C55E)' : '#e5e5e5') + ';' +
+    'background:' + (active ? '#F0FFF4' : '#fff') + ';">' +
+    '<i class="fas ' + icon + '" style="font-size:20px;color:' + (active ? 'var(--primary,#22C55E)' : '#999') + ';"></i>' +
+    '<p style="margin:6px 0 0;font-size:12.5px;font-weight:' + (active ? '700' : '500') + ';color:' + (active ? '#111' : '#777') + ';">' + label + '</p>' +
+    '</div>';
+}
+
+function renderSignupForm() {
+  var body = document.getElementById('sn-signup-body');
+  if (!body) return;
+
+  var roleCards = '<div style="display:flex;gap:10px;margin-bottom:18px;">' +
+    roleCardHtml('customer', 'fa-user', 'Customer') +
+    roleCardHtml('merchant', 'fa-store', 'Merchant') +
+    roleCardHtml('rider', 'fa-motorcycle', 'Rider') +
+    '</div>';
+
+  var roleFields = '';
+  if (signupRole === 'merchant') {
+    roleFields =
+      '<div class="co-field"><label>Store Name <span class="co-required">*</span></label>' +
+      '<input type="text" id="signup-store-name" placeholder="e.g. Aling Nena\'s Vegetable Stall"/>' +
+      '<span class="co-field-error">Store name is required</span></div>' +
+      '<div class="co-field"><label>Business Classification <span class="co-required">*</span></label>' +
+      '<select id="signup-business-type">' +
+      BUSINESS_TYPES.map(function(b) { return '<option value="' + b.value + '">' + b.label + '</option>'; }).join('') +
+      '</select></div>';
+  } else if (signupRole === 'rider') {
+    roleFields =
+      '<div class="co-field"><label>Vehicle Type <span class="co-required">*</span></label>' +
+      '<select id="signup-vehicle-type">' +
+      VEHICLE_TYPES.map(function(v) { return '<option value="' + v.value + '">' + v.label + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div class="co-field"><label>Plate Number <span class="co-required">*</span></label>' +
+      '<input type="text" id="signup-plate-number" placeholder="e.g. NBC 1234"/>' +
+      '<span class="co-field-error">Plate number is required</span></div>';
+  }
+
+  body.innerHTML =
+    '<div class="login-icon"><i class="fas fa-user-plus"></i></div>' +
+    '<h2>Create Your Account</h2>' +
+    '<p class="login-sub">Choose how you\'ll use HomeWeb</p>' +
+    roleCards +
+    '<div class="co-field"><label>Full Name <span class="co-required">*</span></label>' +
+    '<input type="text" id="signup-name" placeholder="Juan Dela Cruz"/>' +
+    '<span class="co-field-error">Full name is required</span></div>' +
+    '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
+    '<input type="email" id="signup-email" placeholder="you@example.com"/>' +
+    '<span class="co-field-error">Enter a valid email address</span></div>' +
+    '<div class="co-field"><label>Password <span class="co-required">*</span></label>' +
+    '<input type="password" id="signup-password" placeholder="At least 6 characters"/>' +
+    '<span class="co-field-error">Password must be at least 6 characters</span></div>' +
+    '<div class="co-field"><label>Confirm Password <span class="co-required">*</span></label>' +
+    '<input type="password" id="signup-password2" placeholder="Re-enter your password"/>' +
+    '<span class="co-field-error">Passwords do not match</span></div>' +
+    roleFields +
+    '<button class="co-btn co-btn--next login-submit" id="signup-submit-btn" onclick="submitSignup()">Sign Up <i class="fas fa-arrow-right"></i></button>' +
+    '<p class="login-signup">Already have an account? <a href="#" onclick="closeSignupModal(); openLoginModal(event); return false;">Log In</a></p>';
+
+  ['signup-name', 'signup-email', 'signup-password', 'signup-password2', 'signup-store-name', 'signup-plate-number'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', function() {
+      this.closest('.co-field').classList.remove('co-field--error');
+    });
+    el.addEventListener('keydown', function(e2) { if (e2.key === 'Enter') submitSignup(); });
+  });
 }
 
 function validateSignupForm() {
@@ -1151,6 +1620,14 @@ function validateSignupForm() {
   markError(passEl, passEl.value.length >= 6);
   markError(pass2El, pass2El.value === passEl.value && pass2El.value.length >= 6);
 
+  if (signupRole === 'merchant') {
+    var storeNameEl = document.getElementById('signup-store-name');
+    markError(storeNameEl, storeNameEl.value.trim().length > 0);
+  } else if (signupRole === 'rider') {
+    var plateEl = document.getElementById('signup-plate-number');
+    markError(plateEl, plateEl.value.trim().length > 0);
+  }
+
   if (firstInvalidEl) firstInvalidEl.focus();
   return isValid;
 }
@@ -1165,13 +1642,22 @@ async function submitSignup() {
   const email = document.getElementById('signup-email').value.trim();
   const password = document.getElementById('signup-password').value;
 
+  var metadata = { full_name: name, role: signupRole };
+  if (signupRole === 'merchant') {
+    metadata.store_name = document.getElementById('signup-store-name').value.trim();
+    metadata.business_type = document.getElementById('signup-business-type').value;
+  } else if (signupRole === 'rider') {
+    metadata.vehicle_type = document.getElementById('signup-vehicle-type').value;
+    metadata.plate_number = document.getElementById('signup-plate-number').value.trim();
+  }
+
   const btn = document.getElementById('signup-submit-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Creating account...'; }
 
   const { data, error } = await supabase.auth.signUp({
     email: email,
     password: password,
-    options: { data: { full_name: name } }
+    options: { data: metadata }
   });
 
   if (btn) { btn.disabled = false; btn.innerHTML = 'Sign Up <i class="fas fa-arrow-right"></i>'; }
@@ -1181,11 +1667,10 @@ async function submitSignup() {
     return;
   }
 
-  // If "Confirm email" is turned off in Supabase settings, data.session
-  // will already be set and the user is logged in immediately.
   if (data.session) {
     currentUser = data.user;
     closeSignupModal();
+    await fetchUserRoles();
     updateAuthUI();
     showToast('Account created! Welcome, ' + name.split(' ')[0] + '!');
   } else {
@@ -1199,14 +1684,91 @@ async function restoreSession() {
   const { data } = await supabase.auth.getSession();
   if (data.session) {
     currentUser = data.session.user;
+    await fetchUserRoles();
     updateAuthUI();
+    updateNotifBadge();
   }
 
   supabase.auth.onAuthStateChange(function(event, session) {
     currentUser = session ? session.user : null;
     updateAuthUI();
+    updateNotifBadge();
   });
 }
+
+// ============================================================
+// ACCOUNT ROLES (customer / merchant / rider) & switching
+// ============================================================
+
+var ROLE_LABELS = { customer: 'Customer', merchant: 'Merchant', rider: 'Rider' };
+var ROLE_ICONS = { customer: 'fa-user', merchant: 'fa-store', rider: 'fa-motorcycle' };
+
+function activeRoleKey() {
+  return currentUser ? ('homeweb_active_role_' + currentUser.id) : null;
+}
+
+async function fetchUserRoles() {
+  if (!currentUser) { userRoles = []; return; }
+
+  const { data, error } = await supabase
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', currentUser.id);
+
+  if (error || !data) { userRoles = ['customer']; return; }
+
+  userRoles = data.map(function(r) { return r.role; });
+  if (!userRoles.length) userRoles = ['customer'];
+
+  var savedRole = localStorage.getItem(activeRoleKey());
+  activeRole = (savedRole && userRoles.indexOf(savedRole) !== -1) ? savedRole : userRoles[0];
+}
+
+function switchActiveRole(role) {
+  if (userRoles.indexOf(role) === -1) return;
+  activeRole = role;
+  localStorage.setItem(activeRoleKey(), role);
+  showToast('Switched to ' + ROLE_LABELS[role] + ' account \uD83D\uDD04');
+  if (document.getElementById('sn-profileModal').classList.contains('active')) {
+    openProfileModal();
+  }
+}
+
+// Register an additional role (merchant or rider) on the existing account //
+async function addAccountRole(role) {
+  if (userRoles.indexOf(role) !== -1) {
+    showToast('You already have a ' + ROLE_LABELS[role] + ' account', 'info');
+    return;
+  }
+
+  if (role === 'merchant') {
+    var storeName = prompt('Store name:');
+    if (!storeName) return;
+    var businessType = prompt('Business classification (vegetable, meat, seafood, sarisari, drinks, other):', 'other') || 'other';
+
+    const { error: merchErr } = await supabase.from('merchants').insert({
+      user_id: currentUser.id, store_name: storeName, business_type: businessType
+    });
+    if (merchErr) { showToast('Could not create merchant account: ' + merchErr.message, 'error'); return; }
+
+  } else if (role === 'rider') {
+    var vehicle = prompt('Vehicle type (motorcycle, tricycle, bicycle):', 'motorcycle') || 'motorcycle';
+    var plate = prompt('Plate number:');
+    if (!plate) return;
+
+    const { error: riderErr } = await supabase.from('riders').insert({
+      user_id: currentUser.id, vehicle_type: vehicle, plate_number: plate
+    });
+    if (riderErr) { showToast('Could not create rider account: ' + riderErr.message, 'error'); return; }
+  }
+
+  await supabase.from('user_roles').insert({ user_id: currentUser.id, role: role }).select();
+  await fetchUserRoles();
+  switchActiveRole(role);
+  showToast(ROLE_LABELS[role] + ' account added \u2705');
+  openProfileModal();
+}
+
 
 // Update topbar login link //
 function updateAuthUI() {
@@ -1338,25 +1900,8 @@ function injectModals() {
     '<div id="sn-signupOverlay" class="sn-overlay" onclick="closeSignupModal()"></div>' +
     '<div id="sn-signupModal" class="sn-login-modal">' +
     '<button class="pm-close" onclick="closeSignupModal()"><i class="fas fa-times"></i></button>' +
-    '<div class="login-body">' +
-    '<div class="login-icon"><i class="fas fa-user-plus"></i></div>' +
-    '<h2>Create Your Account</h2>' +
-    '<p class="login-sub">Sign up to start shopping on HomeWeb</p>' +
-    '<div class="co-field"><label>Full Name <span class="co-required">*</span></label>' +
-    '<input type="text" id="signup-name" placeholder="Juan Dela Cruz"/>' +
-    '<span class="co-field-error">Full name is required</span></div>' +
-    '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
-    '<input type="email" id="signup-email" placeholder="you@example.com"/>' +
-    '<span class="co-field-error">Enter a valid email address</span></div>' +
-    '<div class="co-field"><label>Password <span class="co-required">*</span></label>' +
-    '<input type="password" id="signup-password" placeholder="At least 6 characters"/>' +
-    '<span class="co-field-error">Password must be at least 6 characters</span></div>' +
-    '<div class="co-field"><label>Confirm Password <span class="co-required">*</span></label>' +
-    '<input type="password" id="signup-password2" placeholder="Re-enter your password"/>' +
-    '<span class="co-field-error">Passwords do not match</span></div>' +
-    '<button class="co-btn co-btn--next login-submit" id="signup-submit-btn" onclick="submitSignup()">Sign Up <i class="fas fa-arrow-right"></i></button>' +
-    '<p class="login-signup">Already have an account? <a href="#" onclick="closeSignupModal(); openLoginModal(event); return false;">Log In</a></p>' +
-    '</div></div>' +
+    '<div class="login-body" id="sn-signup-body"></div>' +
+    '</div>' +
 
     // GCash mock payment overlay + modal
     '<div id="sn-gcashOverlay" class="sn-overlay" onclick="cancelGcashPayment()"></div>' +
@@ -1370,6 +1915,33 @@ function injectModals() {
     '<div id="sn-profileModal" class="sn-tracking-modal">' +
     '<button class="pm-close" onclick="closeProfileModal()"><i class="fas fa-times"></i></button>' +
     '<div id="sn-profile-body" style="padding:8px 4px;"></div>' +
+    '</div>' +
+
+    // Merchant dashboard overlay + modal
+    '<div id="sn-merchantOverlay" class="sn-overlay" onclick="closeMerchantDashboard()"></div>' +
+    '<div id="sn-merchantModal" class="sn-tracking-modal">' +
+    '<button class="pm-close" onclick="closeMerchantDashboard()"><i class="fas fa-times"></i></button>' +
+    '<div id="sn-merchant-body" style="padding:8px 4px;"></div>' +
+    '</div>' +
+
+    // Rider dashboard overlay + modal
+    '<div id="sn-riderDashOverlay" class="sn-overlay" onclick="closeRiderDashboard()"></div>' +
+    '<div id="sn-riderDashModal" class="sn-tracking-modal">' +
+    '<button class="pm-close" onclick="closeRiderDashboard()"><i class="fas fa-times"></i></button>' +
+    '<div id="sn-rider-dash-body" style="padding:8px 4px;"></div>' +
+    '</div>' +
+
+    // Notifications overlay + modal
+    '<div id="sn-notifOverlay" class="sn-overlay" onclick="closeNotificationsModal()"></div>' +
+    '<div id="sn-notifModal" class="sn-tracking-modal">' +
+    '<button class="pm-close" onclick="closeNotificationsModal()"><i class="fas fa-times"></i></button>' +
+    '<div id="sn-notif-body" style="padding:8px 4px;"><h3 style="margin:0 0 16px;">Notifications</h3><div id="sn-notif-list"></div></div>' +
+    '</div>' +
+
+    // Rider search overlay + modal
+    '<div id="sn-riderOverlay" class="sn-overlay" onclick="closeRiderModal()"></div>' +
+    '<div id="sn-riderModal" class="sn-login-modal">' +
+    '<div class="login-body" id="sn-rider-body"></div>' +
     '</div>';
 
   var div = document.createElement('div');
@@ -1378,8 +1950,131 @@ function injectModals() {
 }
 
 // ============================================================
-// PROFILE
+// NOTIFICATIONS (summarizes order status history for this user)
 // ============================================================
+
+var NOTIF_ICON_MAP = {
+  'placed':           'fa-receipt',
+  'preparing':        'fa-box-open',
+  'out_for_delivery': 'fa-truck',
+  'delivered':        'fa-check-circle'
+};
+
+function notifSeenKey() {
+  return currentUser ? ('homeweb_notif_seen_' + currentUser.id) : null;
+}
+
+// Relative time like "5m ago", "2h ago", "3d ago" //
+function timeAgo(isoString) {
+  var diffMs = Date.now() - new Date(isoString).getTime();
+  var mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  var hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  var days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
+
+async function fetchNotifications() {
+  const { data, error } = await supabase
+    .from('order_status_history')
+    .select('*, orders!inner(order_code, user_id)')
+    .eq('orders.user_id', currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  if (error) return [];
+  return data || [];
+}
+
+async function openNotificationsModal(e) {
+  if (e) e.preventDefault();
+
+  if (!currentUser) {
+    showToast('Please log in to view notifications', 'info');
+    openLoginModal();
+    return;
+  }
+
+  document.getElementById('sn-notifOverlay').classList.add('active');
+  document.getElementById('sn-notifModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var list = document.getElementById('sn-notif-list');
+  list.innerHTML = '<div class="track-empty"><p>Loading notifications...</p></div>';
+
+  const notifs = await fetchNotifications();
+  renderNotifications(notifs);
+
+  // Mark as seen: remember the timestamp of the newest notification
+  if (notifs.length) {
+    localStorage.setItem(notifSeenKey(), notifs[0].created_at);
+  }
+  updateNotifBadge();
+}
+
+function closeNotificationsModal() {
+  document.getElementById('sn-notifOverlay').classList.remove('active');
+  document.getElementById('sn-notifModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderNotifications(notifs) {
+  var list = document.getElementById('sn-notif-list');
+  if (!notifs.length) {
+    list.innerHTML = '<div class="track-empty"><p>No notifications yet. They will show up here as your orders progress.</p></div>';
+    return;
+  }
+
+  list.innerHTML = notifs.map(function(n) {
+    var icon = NOTIF_ICON_MAP[n.status] || 'fa-bell';
+    return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;cursor:pointer;" ' +
+      'onclick="closeNotificationsModal(); viewOrderNow(\'' + n.order_id + '\');">' +
+      '<div style="flex-shrink:0;width:36px;height:36px;border-radius:50%;background:#F0FFF4;color:var(--primary,#22C55E);display:flex;align-items:center;justify-content:center;"><i class="fas ' + icon + '"></i></div>' +
+      '<div style="flex:1;">' +
+      '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + n.orders.order_code + ' — ' + n.label + '</p>' +
+      '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + n.description + '</p>' +
+      '<p style="margin:4px 0 0;color:#aaa;font-size:11.5px;">' + timeAgo(n.created_at) + '</p>' +
+      '</div></div>';
+  }).join('');
+}
+
+// Show/hide the red dot on the bell icon based on unseen notifications //
+async function updateNotifBadge() {
+  var badges = document.querySelectorAll('.notif-badge');
+  if (!currentUser) {
+    badges.forEach(function(b) { b.style.display = 'none'; });
+    return;
+  }
+
+  const { data } = await supabase
+    .from('order_status_history')
+    .select('created_at, orders!inner(user_id)')
+    .eq('orders.user_id', currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (!data || !data.length) {
+    badges.forEach(function(b) { b.style.display = 'none'; });
+    return;
+  }
+
+  var latest = data[0].created_at;
+  var seen = localStorage.getItem(notifSeenKey());
+  var isUnseen = !seen || new Date(latest) > new Date(seen);
+  badges.forEach(function(b) { b.style.display = isUnseen ? 'inline-block' : 'none'; });
+}
+
+// Open the tracking modal directly on a specific order's detail view //
+function viewOrderNow(orderId) {
+  document.getElementById('sn-trackingOverlay').classList.add('active');
+  document.getElementById('sn-trackingModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+  openTrackingDetail(orderId);
+}
+
+
 
 async function openProfileModal(e) {
   if (e) e.preventDefault();
@@ -1396,6 +2091,8 @@ async function openProfileModal(e) {
 
   var body = document.getElementById('sn-profile-body');
   body.innerHTML = '<div class="track-empty"><p>Loading your profile...</p></div>';
+
+  if (!userRoles.length) await fetchUserRoles();
 
   const { data: profile, error } = await supabase
     .from('profiles')
@@ -1421,11 +2118,40 @@ function renderProfileForm(profile) {
   var body = document.getElementById('sn-profile-body');
   var initial = (profile.full_name || currentUser.email || '?').trim().charAt(0).toUpperCase();
 
+  var roleChips = '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:10px 0 4px;">' +
+    userRoles.map(function(r) {
+      var active = r === activeRole;
+      return '<span onclick="switchActiveRole(\'' + r + '\')" style="cursor:pointer;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;' +
+        'background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#555') + ';">' +
+        '<i class="fas ' + ROLE_ICONS[r] + '"></i> ' + ROLE_LABELS[r] + (active ? ' \u2713' : '') + '</span>';
+    }).join('') + '</div>';
+
+  var dashboardButton = '';
+  if (userRoles.indexOf('merchant') !== -1) {
+    dashboardButton += '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:10px;" onclick="closeProfileModal(); openMerchantDashboard();">' +
+      '<i class="fas fa-store"></i> My Store Dashboard</button>';
+  }
+  if (userRoles.indexOf('rider') !== -1) {
+    dashboardButton += '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:10px;" onclick="closeProfileModal(); openRiderDashboard();">' +
+      '<i class="fas fa-motorcycle"></i> My Deliveries</button>';
+  }
+
+  var addRoleButtons = '';
+  if (userRoles.indexOf('merchant') === -1) {
+    addRoleButtons += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-bottom:8px;" onclick="addAccountRole(\'merchant\')">' +
+      '<i class="fas fa-store"></i> Register as Merchant</button>';
+  }
+  if (userRoles.indexOf('rider') === -1) {
+    addRoleButtons += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-bottom:8px;" onclick="addAccountRole(\'rider\')">' +
+      '<i class="fas fa-motorcycle"></i> Register as Rider</button>';
+  }
+
   body.innerHTML =
-    '<div style="text-align:center;margin-bottom:20px;">' +
+    '<div style="text-align:center;margin-bottom:12px;">' +
     '<div style="width:64px;height:64px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;">' + initial + '</div>' +
     '<h2 style="margin:0;">' + (profile.full_name || 'HomeWeb Shopper') + '</h2>' +
     '<p style="color:#888;margin:4px 0 0;">' + currentUser.email + '</p>' +
+    roleChips +
     '</div>' +
 
     '<div class="co-field"><label>Full Name</label>' +
@@ -1437,6 +2163,9 @@ function renderProfileForm(profile) {
     '<button class="co-btn co-btn--next" id="profile-save-btn" onclick="saveProfileChanges()">Save Changes</button>' +
 
     '<div style="margin:20px 0;border-top:1px solid #eee;"></div>' +
+
+    dashboardButton +
+    addRoleButtons +
 
     '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-bottom:10px;" onclick="closeProfileModal(); openOrderTracking();">' +
     '<i class="fas fa-receipt"></i> View Order History</button>' +
@@ -1467,6 +2196,455 @@ async function saveProfileChanges() {
   showToast('Profile updated \u2705');
 }
 
+// ============================================================
+// MERCHANT DASHBOARD (Phase 2: tenant product management)
+// ============================================================
+
+let myMerchantId = null;
+let myMerchantProducts = [];
+let myMerchantSales = null;
+let merchantDashboardView = 'products'; // 'products' | 'sales'
+let editingProductId = null;
+
+async function openMerchantDashboard(e) {
+  if (e) e.preventDefault();
+
+  if (!currentUser) {
+    showToast('Please log in first', 'info');
+    openLoginModal();
+    return;
+  }
+  if (userRoles.indexOf('merchant') === -1) {
+    showToast('You need a Merchant account first — register one from your profile', 'info');
+    openProfileModal();
+    return;
+  }
+
+  if (activeRole !== 'merchant') switchActiveRole('merchant');
+
+  document.getElementById('sn-merchantOverlay').classList.add('active');
+  document.getElementById('sn-merchantModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var body = document.getElementById('sn-merchant-body');
+  body.innerHTML = '<div class="track-empty"><p>Loading your store...</p></div>';
+
+  if (!myMerchantId) {
+    const { data: merchant, error } = await supabase
+      .from('merchants').select('id').eq('user_id', currentUser.id).single();
+    if (error || !merchant) {
+      body.innerHTML = '<div class="track-empty"><p>Could not load your merchant profile.</p></div>';
+      return;
+    }
+    myMerchantId = merchant.id;
+  }
+
+  await loadMyMerchantProducts();
+  renderMerchantDashboard();
+}
+
+function closeMerchantDashboard() {
+  document.getElementById('sn-merchantOverlay').classList.remove('active');
+  document.getElementById('sn-merchantModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+async function loadMyMerchantProducts() {
+  const { data, error } = await supabase
+    .from('products')
+    .select('*')
+    .eq('merchant_id', myMerchantId)
+    .order('created_at', { ascending: false });
+  myMerchantProducts = error ? [] : (data || []);
+}
+
+// Pull every order_item that belongs to one of this merchant's products,
+// along with the parent order's status/date/payment — then aggregate client-side.
+async function fetchMerchantSales() {
+  const { data, error } = await supabase
+    .from('order_items')
+    .select('qty, price, product_id, products!inner(name, merchant_id), orders(status, created_at, payment_method)')
+    .eq('products.merchant_id', myMerchantId);
+
+  if (error) {
+    myMerchantSales = { error: error.message };
+    return myMerchantSales;
+  }
+
+  var rows = data || [];
+  var totalRevenue = 0, totalItems = 0;
+  var orderIds = {};
+  var byProduct = {};
+
+  rows.forEach(function(r) {
+    var lineTotal = r.price * r.qty;
+    totalRevenue += lineTotal;
+    totalItems += r.qty;
+
+    var pname = r.products ? r.products.name : 'Unknown product';
+    if (!byProduct[pname]) byProduct[pname] = { name: pname, qty: 0, revenue: 0 };
+    byProduct[pname].qty += r.qty;
+    byProduct[pname].revenue += lineTotal;
+  });
+
+  rows.forEach(function(r) { if (r.orders) orderIds[JSON.stringify(r.orders.created_at) + r.price] = true; });
+
+  var topProducts = Object.values(byProduct).sort(function(a, b) { return b.revenue - a.revenue; }).slice(0, 5);
+
+  var recentOrders = rows
+    .filter(function(r) { return r.orders; })
+    .sort(function(a, b) { return new Date(b.orders.created_at) - new Date(a.orders.created_at); })
+    .slice(0, 8);
+
+  myMerchantSales = {
+    totalRevenue: totalRevenue,
+    totalItems: totalItems,
+    lineCount: rows.length,
+    topProducts: topProducts,
+    recentOrders: recentOrders
+  };
+  return myMerchantSales;
+}
+
+function renderMerchantSalesView() {
+  var body = document.getElementById('sn-merchant-body');
+  var tabs = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;" onclick="switchMerchantView(\'products\')">Products</button>' +
+    '<button class="co-btn" style="flex:1;background:var(--primary,#22C55E);color:#fff;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '</div>';
+
+  if (!myMerchantSales || myMerchantSales.error) {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+      '<div class="track-empty"><p>Could not load sales report' + (myMerchantSales && myMerchantSales.error ? ': ' + myMerchantSales.error : '') + '.</p></div>';
+    return;
+  }
+
+  var s = myMerchantSales;
+
+  var summaryCards = '<div style="display:flex;gap:10px;margin-bottom:20px;">' +
+    '<div style="flex:1;background:#F0FFF4;border-radius:10px;padding:14px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Total Revenue</p>' +
+    '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:var(--primary,#22C55E);">' + fmt(s.totalRevenue) + '</p></div>' +
+    '<div style="flex:1;background:#F0F8FF;border-radius:10px;padding:14px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Items Sold</p>' +
+    '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#3B82F6;">' + s.totalItems + '</p></div>' +
+    '<div style="flex:1;background:#FFFBEB;border-radius:10px;padding:14px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Order Lines</p>' +
+    '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#F59E0B;">' + s.lineCount + '</p></div>' +
+    '</div>';
+
+  var topProductsHtml = s.topProducts.length
+    ? s.topProducts.map(function(p, i) {
+        return '<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<span style="font-size:13px;">' + (i + 1) + '. ' + p.name + '</span>' +
+          '<span style="font-size:13px;color:#777;">' + p.qty + ' sold \u2022 ' + fmt(p.revenue) + '</span></div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No sales yet.</p>';
+
+  var recentOrdersHtml = s.recentOrders.length
+    ? s.recentOrders.map(function(r) {
+        return '<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #f0f0f0;font-size:12.5px;">' +
+          '<span>' + formatDate(r.orders.created_at) + '</span>' +
+          '<span style="color:#777;">' + r.orders.status + ' \u2022 ' + (r.orders.payment_method === 'cod' ? 'COD' : 'GCash') + '</span></div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+    summaryCards +
+    '<h3 style="margin:0 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
+    '<h3 style="margin:16px 0 8px;font-size:14px;">Recent Order Activity</h3>' + recentOrdersHtml;
+}
+
+function renderMerchantDashboard() {
+  var body = document.getElementById('sn-merchant-body');
+
+  var tabs = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+    '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'products' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'products' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'products\')">Products</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'sales' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'sales' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '</div>';
+
+  if (merchantDashboardView === 'sales') {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading sales report...</p></div>';
+    fetchMerchantSales().then(renderMerchantSalesView);
+    return;
+  }
+
+  renderMerchantProductsView(tabs);
+}
+
+async function switchMerchantView(view) {
+  merchantDashboardView = view;
+  renderMerchantDashboard();
+}
+
+function renderMerchantProductsView(tabs) {
+  var body = document.getElementById('sn-merchant-body');
+
+  var rows = myMerchantProducts.map(function(p) {
+    var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
+    return '<div style="display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<div style="flex-shrink:0;width:44px;height:44px;border-radius:8px;background:' + meta.bg + ';display:flex;align-items:center;justify-content:center;overflow:hidden;">' +
+      (p.image_url ? '<img src="' + p.image_url + '" style="width:100%;height:100%;object-fit:cover;"/>' : '<i class="fas ' + meta.icon + '" style="color:' + meta.color + ';"></i>') +
+      '</div>' +
+      '<div style="flex:1;min-width:0;">' +
+      '<p style="margin:0;font-weight:600;font-size:13.5px;">' + p.name + (p.is_active ? '' : ' <span style="color:#DC2626;font-size:11px;">(inactive)</span>') + '</p>' +
+      '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + meta.title + '</p>' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;flex-shrink:0;">' +
+      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="stockInPrompt(\'' + p.id + '\')" title="Stock in"><i class="fas fa-plus"></i></button>' +
+      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="openProductForm(\'' + p.id + '\')" title="Edit"><i class="fas fa-edit"></i></button>' +
+      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="toggleProductActive(\'' + p.id + '\', ' + !p.is_active + ')" title="' + (p.is_active ? 'Deactivate' : 'Activate') + '"><i class="fas fa-' + (p.is_active ? 'eye-slash' : 'eye') + '"></i></button>' +
+      '<button class="co-btn" style="padding:6px 10px;background:#FEE2E2;color:#DC2626;" onclick="deleteMyProduct(\'' + p.id + '\')" title="Delete"><i class="fas fa-trash"></i></button>' +
+      '</div></div>';
+  }).join('');
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 4px;">My Store</h2>' +
+    tabs +
+    '<p class="login-sub" style="margin:0 0 16px;">' + myMerchantProducts.length + ' product(s) listed</p>' +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:14px;" onclick="openProductForm(null)"><i class="fas fa-plus"></i> Add Product</button>' +
+    (rows || '<div class="track-empty"><p>No products yet. Add your first one above.</p></div>');
+}
+
+// Add/Edit product form (shown inline in the same dashboard body) //
+function openProductForm(productId) {
+  editingProductId = productId;
+  var body = document.getElementById('sn-merchant-body');
+  var p = productId ? myMerchantProducts.find(function(x) { return x.id === productId; }) : null;
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 16px;">' + (p ? 'Edit Product' : 'Add Product') + '</h2>' +
+    '<div class="co-field"><label>Product Name <span class="co-required">*</span></label>' +
+    '<input type="text" id="pf-name" value="' + (p ? p.name : '') + '"/>' +
+    '<span class="co-field-error">Name is required</span></div>' +
+    '<div class="co-field"><label>Description</label>' +
+    '<input type="text" id="pf-desc" value="' + (p && p.description ? p.description : '') + '"/></div>' +
+    '<div class="co-field"><label>Price (\u20B1) <span class="co-required">*</span></label>' +
+    '<input type="number" id="pf-price" min="0" step="0.01" value="' + (p ? p.price : '') + '"/>' +
+    '<span class="co-field-error">Enter a valid price</span></div>' +
+    '<div class="co-field"><label>Category</label>' +
+    '<select id="pf-category">' +
+    Object.keys(CATEGORY_META).filter(function(k) { return k !== 'other'; }).concat(['other']).map(function(k) {
+      return '<option value="' + k + '"' + (p && p.category === k ? ' selected' : '') + '>' + CATEGORY_META[k].title + '</option>';
+    }).join('') +
+    '</select></div>' +
+    '<div class="co-field"><label>Image URL (optional)</label>' +
+    '<input type="text" id="pf-image" placeholder="https://..." value="' + (p && p.image_url ? p.image_url : '') + '"/></div>' +
+    (p ? '' :
+      '<div class="co-field"><label>Initial Stock <span class="co-required">*</span></label>' +
+      '<input type="number" id="pf-stock" min="0" value="0"/>' +
+      '<span class="co-field-error">Enter a starting stock quantity</span></div>') +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
+    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="renderMerchantDashboard()">Cancel</button>';
+
+  ['pf-name', 'pf-price', 'pf-stock'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', function() { this.closest('.co-field').classList.remove('co-field--error'); });
+  });
+}
+
+async function saveProduct() {
+  var name = document.getElementById('pf-name').value.trim();
+  var price = parseFloat(document.getElementById('pf-price').value);
+  var category = document.getElementById('pf-category').value;
+  var desc = document.getElementById('pf-desc').value.trim();
+  var image = document.getElementById('pf-image').value.trim();
+
+  var ok = true;
+  if (!name) { document.getElementById('pf-name').closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (!(price >= 0)) { document.getElementById('pf-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (!ok) { showToast('Please fix the errors above', 'info'); return; }
+
+  if (editingProductId) {
+    const { error } = await supabase.from('products').update({
+      name: name, description: desc, price: price, category: category, image_url: image || null, updated_at: new Date().toISOString()
+    }).eq('id', editingProductId);
+    if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
+    showToast('Product updated \u2705');
+  } else {
+    var stockEl = document.getElementById('pf-stock');
+    var stock = stockEl ? parseInt(stockEl.value, 10) || 0 : 0;
+
+    const { data: newProduct, error } = await supabase.from('products').insert({
+      merchant_id: myMerchantId, name: name, description: desc, price: price,
+      category: category, image_url: image || null, stock_qty: stock
+    }).select().single();
+    if (error) { showToast('Could not add product: ' + error.message, 'error'); return; }
+
+    if (stock > 0) {
+      await supabase.from('stock_movements').insert({
+        product_id: newProduct.id, type: 'in', quantity: stock, reason: 'Initial stock'
+      });
+    }
+    showToast('Product added \u2705');
+  }
+
+  await loadMyMerchantProducts();
+  renderMerchantDashboard();
+  await loadProducts();
+  renderHomeProducts();
+  renderCategoryPage();
+}
+
+async function stockInPrompt(productId) {
+  var qty = parseInt(prompt('How many units to add?'), 10);
+  if (!qty || qty <= 0) return;
+  var reason = prompt('Reason (optional):', 'Restock') || 'Restock';
+
+  var product = myMerchantProducts.find(function(x) { return x.id === productId; });
+  if (!product) return;
+
+  const { error } = await supabase.from('products')
+    .update({ stock_qty: product.stock_qty + qty, updated_at: new Date().toISOString() })
+    .eq('id', productId);
+  if (error) { showToast('Could not update stock: ' + error.message, 'error'); return; }
+
+  await supabase.from('stock_movements').insert({ product_id: productId, type: 'in', quantity: qty, reason: reason });
+
+  showToast('Added ' + qty + ' units \u2705');
+  await loadMyMerchantProducts();
+  renderMerchantDashboard();
+  await loadProducts();
+  renderHomeProducts();
+  renderCategoryPage();
+}
+
+async function toggleProductActive(productId, newState) {
+  const { error } = await supabase.from('products').update({ is_active: newState }).eq('id', productId);
+  if (error) { showToast('Could not update: ' + error.message, 'error'); return; }
+  await loadMyMerchantProducts();
+  renderMerchantDashboard();
+  await loadProducts();
+  renderHomeProducts();
+  renderCategoryPage();
+}
+
+async function deleteMyProduct(productId) {
+  if (!confirm('Delete this product? This cannot be undone.')) return;
+
+  const { error } = await supabase.from('products').delete().eq('id', productId);
+  if (error) {
+    showToast('Could not delete — it may already have orders. Try deactivating it instead.', 'error');
+    return;
+  }
+  showToast('Product deleted', 'info');
+  await loadMyMerchantProducts();
+  renderMerchantDashboard();
+  await loadProducts();
+  renderHomeProducts();
+  renderCategoryPage();
+}
+
+
+
+// ============================================================
+// RIDER DASHBOARD
+// ============================================================
+
+let myRiderProfile = null;
+let myAssignedOrders = [];
+
+async function openRiderDashboard(e) {
+  if (e) e.preventDefault();
+
+  if (!currentUser) {
+    showToast('Please log in first', 'info');
+    openLoginModal();
+    return;
+  }
+  if (userRoles.indexOf('rider') === -1) {
+    showToast('You need a Rider account first — register one from your profile', 'info');
+    openProfileModal();
+    return;
+  }
+
+  if (activeRole !== 'rider') switchActiveRole('rider');
+
+  document.getElementById('sn-riderDashOverlay').classList.add('active');
+  document.getElementById('sn-riderDashModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var body = document.getElementById('sn-rider-dash-body');
+  body.innerHTML = '<div class="track-empty"><p>Loading your deliveries...</p></div>';
+
+  const { data: riderRow } = await supabase.from('riders').select('*').eq('user_id', currentUser.id).single();
+  myRiderProfile = riderRow;
+
+  await loadMyAssignedOrders();
+  renderRiderDashboard();
+}
+
+function closeRiderDashboard() {
+  document.getElementById('sn-riderDashOverlay').classList.remove('active');
+  document.getElementById('sn-riderDashModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+async function loadMyAssignedOrders() {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*, order_items(*)')
+    .eq('rider_user_id', currentUser.id)
+    .order('created_at', { ascending: false });
+  myAssignedOrders = error ? [] : (data || []);
+}
+
+async function toggleMyAvailability(newState) {
+  const { error } = await supabase.from('riders').update({ is_available: newState }).eq('user_id', currentUser.id);
+  if (error) { showToast('Could not update availability: ' + error.message, 'error'); return; }
+  myRiderProfile.is_available = newState;
+  showToast(newState ? 'You\'re now available for deliveries' : 'You\'re now offline', 'info');
+  renderRiderDashboard();
+}
+
+function renderRiderDashboard() {
+  var body = document.getElementById('sn-rider-dash-body');
+  var available = myRiderProfile ? myRiderProfile.is_available : false;
+
+  var toggleHtml = '<div style="display:flex;align-items:center;justify-content:space-between;background:#F9FAFB;border-radius:10px;padding:12px 16px;margin-bottom:18px;">' +
+    '<span style="font-weight:600;font-size:13.5px;">' + (available ? 'Available for deliveries' : 'Offline') + '</span>' +
+    '<button class="co-btn" style="padding:6px 14px;background:' + (available ? '#FEE2E2' : 'var(--primary,#22C55E)') + ';color:' + (available ? '#DC2626' : '#fff') + ';" onclick="toggleMyAvailability(' + !available + ')">' +
+    (available ? 'Go Offline' : 'Go Online') + '</button></div>';
+
+  var activeOrders = myAssignedOrders.filter(function(o) { return o.status !== 'delivered'; });
+  var pastOrders = myAssignedOrders.filter(function(o) { return o.status === 'delivered'; });
+
+  function orderCardHtml(o) {
+    var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+    var statusInfo = getOrderStatusInfo(o.status);
+    var actionBtn = '';
+    if (o.status === 'preparing') {
+      actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'out_for_delivery\')">Mark Picked Up</button>';
+    } else if (o.status === 'out_for_delivery') {
+      actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'delivered\')">Mark Delivered</button>';
+    }
+
+    return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + statusInfo.label + '</p>' +
+      '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
+      '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
+      actionBtn +
+      '</div>';
+  }
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
+    '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed</p>' +
+    toggleHtml +
+    '<h3 style="margin:0 0 8px;font-size:14px;">Active Deliveries</h3>' +
+    (activeOrders.length ? activeOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No active deliveries right now.</p>') +
+    '<h3 style="margin:16px 0 8px;font-size:14px;">Completed</h3>' +
+    (pastOrders.length ? pastOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No completed deliveries yet.</p>');
+}
+
+async function riderAdvanceOrder(orderId, newStatus) {
+  await advanceOrderStatus(orderId, newStatus);
+  showToast(newStatus === 'delivered' ? 'Order marked delivered \u2705' : 'Order marked picked up \uD83D\uDEF5');
+  await loadMyAssignedOrders();
+  renderRiderDashboard();
+}
+
 
 // CART ICON CLICK //
 function initCartClick() {
@@ -1479,13 +2657,15 @@ function initCartClick() {
 }
 
 // INIT //
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
   injectModals();
-  injectProductIds();
-  attachCardClicks();
   initCartClick();
   initLoginModal();
   updateCartBadge();
   initSearch();
   restoreSession();
+
+  await loadProducts();
+  renderHomeProducts();
+  renderCategoryPage();
 });

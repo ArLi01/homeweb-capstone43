@@ -13,11 +13,13 @@
 <!-- TOP BAR -->
 <div class="topbar">
 	<div class="topbar-inner">
-		<span>Download App</span>
 		<div class="topbar-right">
-			<a href="#"><i class="fas fa-bell"></i> Notifications</a>
+			<a href="#" class="sn-notif-link" onclick="openNotificationsModal(event); return false;">
+				<i class="fas fa-bell"></i> Notifications
+				<span class="notif-badge" id="notif-badge" style="display:none;"></span>
+			</a>
 			<a href="#"><i class="fas fa-question-circle"></i> Help</a>
-			<a href="#"><i class="fas fa-user"></i> Sign Up</a>
+			<a href="#" class="sn-signup-link" onclick="openSignupModal(event); return false;"><i class="fas fa-user"></i> Sign Up</a>
 			<a href="#" class="sn-login-link"><i class="fas fa-sign-in-alt"></i> Log In</a>
 		</div>
 	</div>
@@ -110,81 +112,5 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="supabase-client.js"></script>
 <script src="shop.js"></script>
-<script>
-	const CATEGORY_META = {
-		vegetable: { title: 'Vegetable',     bg: '#F0FFF4', color: '#22C55E' },
-		meat:      { title: 'Meat',          bg: '#FFF0F0', color: '#EF4444' },
-		seafood:   { title: 'Sea Food',      bg: '#F0F8FF', color: '#3B82F6' },
-		sarisari:  { title: 'Sari-sari Store', bg: '#FFFBEB', color: '#F59E0B' },
-		drinks:    { title: 'Drinks',        bg: '#EFF6FF', color: '#0EA5E9' }
-	};
-
-	const DEFAULT_META = { bg: '#F9F9F9', color: '#CBD5E1' };
-
-	function fmtPrice(n) {
-		return '\u20B1' + Number(n).toLocaleString();
-	}
-
-	function starsHTML(n) {
-		var s = '';
-		for (var i = 1; i <= 5; i++) {
-			s += '<i class="' + (i <= n ? 'fas' : 'far') + ' fa-star"></i>';
-		}
-		return s;
-	}
-
-	document.addEventListener('DOMContentLoaded', function() {
-		var params = new URLSearchParams(window.location.search);
-		var cat = params.get('cat');
-	
-		// show all product //
-		var showAll = !cat;
-		var meta = showAll ? { title: 'All Products' } : (CATEGORY_META[cat] || { title: 'All Products' });
-
-		document.getElementById('cat-title').textContent = meta.title;
-
-		// filter or show all //
-		var list = showAll ? products.slice() : products.filter(function(p) { return p.category === cat; });
-		var grid = document.getElementById('cat-product-grid');
-		var empty = document.getElementById('cat-empty');
-
-		if (!list.length) {
-			empty.style.display = 'block';
-			return;
-		}
-
-		// render cards //
-		grid.innerHTML = list.map(function(p) {
-			var itemMeta = CATEGORY_META[p.category] || DEFAULT_META;
-			var badge = p.discount
-				? '<div class="product-badge sale-badge">-' + p.discount + '%</div>'
-				: '';
-			var oldPrice = p.oldPrice
-				? '<span class="price-old">' + fmtPrice(p.oldPrice) + '</span>'
-				: '';
-
-			return '<div class="product-card" data-product-id="' + p.id + '">' +
-				badge +
-				'<div class="wishlist-btn"><i class="far fa-heart"></i></div>' +
-				(function() {
-					var catImgSrc = typeof getProductImage === 'function' ? getProductImage(p.id) : null;
-					if (catImgSrc) {
-						return '<div class="product-img" style="background:' + itemMeta.bg + ';"><img src="' + catImgSrc + '" alt="' + p.name + '" /></div>';
-					}
-					return '<div class="product-img" style="background:' + itemMeta.bg + ';"><i class="fas ' + p.icon + '" style="color:' + itemMeta.color + ';"></i></div>';
-				})() +
-				'<div class="product-info">' +
-					'<p class="product-name">' + p.name + '</p>' +
-					'<div class="product-prices">' +
-						'<span class="price-now">' + fmtPrice(p.price) + '</span>' +
-						oldPrice +
-					'</div>' +
-					'<div class="product-stars">' + starsHTML(p.rating) + '<span>(' + p.sold + ')</span></div>' +
-					'<p class="product-location"><i class="fas fa-map-marker-alt"></i> ' + p.location + '</p>' +
-				'</div></div>';
-		}).join('');
-		attachCardClicks();
-	});
-</script>
 </body>
 </html>

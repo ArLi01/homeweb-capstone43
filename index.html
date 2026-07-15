@@ -13,9 +13,11 @@
 <!-- TOP BAR -->
 <div class="topbar">
 	<div class="topbar-inner">
-		<span>Download App</span>
 		<div class="topbar-right">
-			<a href="#"><i class="fas fa-bell"></i> Notifications</a>
+			<a href="#" class="sn-notif-link" onclick="openNotificationsModal(event); return false;">
+				<i class="fas fa-bell"></i> Notifications
+				<span class="notif-badge" id="notif-badge" style="display:none;"></span>
+			</a>
 			<a href="#"><i class="fas fa-question-circle"></i> Help</a>
 			<a href="#" class="sn-signup-link" onclick="openSignupModal(event); return false;"><i class="fas fa-user"></i> Sign Up</a>
 			<a href="#" class="sn-login-link"><i class="fas fa-sign-in-alt"></i> Log In</a>
@@ -119,138 +121,12 @@
 			<h2 class="section-title">Recommended For You</h2>
 			<a href="category.html" class="see-all">See All <i class="fas fa-chevron-right"></i></a>
 		</div>
-		<div class="product-grid">
-
-			<!-- Vegetable -->
-			<div class="product-card" data-product-id="101">
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/kangkong2.jpg" alt="Fresh Kangkong Bundle" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Fresh Kangkong Bundle</p>
-					<div class="product-prices">
-						<span class="price-now">₱25</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i>
-						<span>(320)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
-			<!-- Meat -->
-			<div class="product-card" data-product-id="201">
-				<div class="product-badge sale-badge">-16%</div>
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/pork-liempo.webp" alt="Pork Liempo (Belly) 500g" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Pork Liempo (Belly) 500g</p>
-					<div class="product-prices">
-						<span class="price-now">₱185</span>
-						<span class="price-old">₱220</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
-						<span>(890)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
-			<!-- Sea Food -->
-			<div class="product-card" data-product-id="301">
-				<div class="product-badge sale-badge">-20%</div>
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/bangus.jpg" alt="Bangus (Milkfish) 500g" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Bangus (Milkfish) 500g</p>
-					<div class="product-prices">
-						<span class="price-now">₱120</span>
-						<span class="price-old">₱150</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
-						<span>(1.1k)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
-			<!-- Sari-sari -->
-			<div class="product-card" data-product-id="401">
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/lucky_me1.jpg" alt="Lucky Me Pancit Canton 5-pack" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Lucky Me Pancit Canton 5-pack</p>
-					<div class="product-prices">
-						<span class="price-now">₱55</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
-						<span>(2.3k)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
-			<!-- Drinks -->
-			<div class="product-card" data-product-id="501">
-				<div class="product-badge sale-badge">-18%</div>
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/wilkins mineral.jpg" alt="Wilkins Mineral Water 1L x6" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Wilkins Mineral Water 1L x6</p>
-					<div class="product-prices">
-						<span class="price-now">₱99</span>
-						<span class="price-old">₱120</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
-						<span>(1.5k)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
-			<!-- Vegetable 2 -->
-			<div class="product-card" data-product-id="103">
-				<div class="product-badge sale-badge">-20%</div>
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/tomato.jpg" alt="Tomato 1kg Pack" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Tomato 1kg Pack</p>
-					<div class="product-prices">
-						<span class="price-now">₱80</span>
-						<span class="price-old">₱100</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i>
-						<span>(540)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
-			<!-- Sari-sari 2 -->
-			<div class="product-card" data-product-id="404">
-				<div class="wishlist-btn"><i class="far fa-heart"></i></div>
-				<div class="product-img"><img src="images/Milo1.jpg" alt="Milo 300g Pack" loading="lazy"/></div>
-				<div class="product-info">
-					<p class="product-name">Milo 300g Pack</p>
-					<div class="product-prices">
-						<span class="price-now">₱120</span>
-					</div>
-					<div class="product-stars">
-						<i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="far fa-star"></i>
-						<span>(950)</span>
-					</div>
-					<p class="product-location"><i class="fas fa-map-marker-alt"></i> Sta. Barbara</p>
-				</div>
-			</div>
-
+		<div class="product-grid" id="home-product-grid">
+			<p style="color:#999;padding:2rem;">Loading products...</p>
 		</div>
 	</div>
 </section>
+
 
 <!-- FOOTER -->
 <footer class="footer">
@@ -293,16 +169,5 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="supabase-client.js"></script>
 <script src="shop.js"></script>
-<script>
-	const categoryProducts = [
-	{ id:101, name:'Fresh Kangkong Bundle',         price:25,  oldPrice:null, discount:0,  rating:5, sold:'320',  icon:'fa-carrot',          location:'Sta. Barbara', category:'vegetable' },
-	{ id:103, name:'Tomato 1kg Pack',               price:80,  oldPrice:100,  discount:20, rating:5, sold:'540',  icon:'fa-carrot',          location:'Sta. Barbara', category:'vegetable' },
-	{ id:201, name:'Pork Liempo (Belly) 500g',      price:185, oldPrice:220,  discount:16, rating:4, sold:'890',  icon:'fa-drumstick-bite', location:'Sta. Barbara', category:'meat' },
-	{ id:301, name:'Bangus (Milkfish) 500g',        price:120, oldPrice:150,  discount:20, rating:4, sold:'1.1k', icon:'fa-fish-fins',      location:'Sta. Barbara', category:'seafood' },
-	{ id:401, name:'Lucky Me Pancit Canton 5-pack', price:55,  oldPrice:null, discount:0,  rating:4, sold:'2.3k', icon:'fa-storefront',     location:'Sta. Barbara', category:'sarisari' },
-	{ id:404, name:'Milo 300g Pack',                price:120, oldPrice:null, discount:0,  rating:4, sold:'950',  icon:'fa-storefront',          location:'Sta. Barbara', category:'sarisari' },
-	{ id:501, name:'Wilkins Mineral Water 1L x6',   price:99,  oldPrice:120,  discount:18, rating:4, sold:'1.5k', icon:'fa-bottle-water',   location:'Sta. Barbara', category:'drinks' },
-	];
-</script>
 </body>
 </html>
