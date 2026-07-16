@@ -379,6 +379,8 @@ function reviewRowHtml(r) {
     '</div></div>';
 }
 
+let currentProductReviews = [];
+
 async function loadAndRenderReviews(productId) {
   var container = document.getElementById('pm-reviews');
   if (!container) return;
@@ -389,16 +391,34 @@ async function loadAndRenderReviews(productId) {
     .select('rating, comment, created_at, is_anonymous, reviewer_name, reviewer_avatar_url')
     .eq('product_id', productId)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(50);
 
   if (error || !data || !data.length) {
+    currentProductReviews = [];
     container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews</h3><p style="color:#999;font-size:12.5px;">No reviews yet.</p>';
     return;
   }
 
-  var rowsHtml = data.map(reviewRowHtml).join('');
+  currentProductReviews = data;
+  renderReviewsList(false);
+}
 
-  container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' + rowsHtml;
+function renderReviewsList(showAll) {
+  var container = document.getElementById('pm-reviews');
+  if (!container) return;
+  var data = currentProductReviews;
+
+  var visible = showAll ? data : data.slice(0, 3);
+  var rowsHtml = visible.map(reviewRowHtml).join('');
+
+  var toggleHtml = '';
+  if (!showAll && data.length > 3) {
+    toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(true)">Show all ' + data.length + ' reviews</button>';
+  } else if (showAll && data.length > 3) {
+    toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(false)">Show fewer reviews</button>';
+  }
+
+  container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' + rowsHtml + toggleHtml;
 }
 
 function closeProductModal() {
@@ -487,10 +507,10 @@ function renderCheckout() {
         '<div class="co-cart-icon">' + cartIconHtml + '</div>' +
         '<div class="co-cart-info"><p class="co-cart-name">' + item.name + '</p>' +
         '<div class="co-cart-controls">' +
-        '<button onclick="changeCartQty(' + item.id + ',-1)">&#8722;</button>' +
+        '<button onclick="changeCartQty(\'' + item.id + '\',-1)">&#8722;</button>' +
         '<span>' + item.qty + '</span>' +
-        '<button onclick="changeCartQty(' + item.id + ',1)">+</button>' +
-        '<button class="co-remove" onclick="removeCartItem(' + item.id + ')"><i class="fas fa-trash"></i></button>' +
+        '<button onclick="changeCartQty(\'' + item.id + '\',1)">+</button>' +
+        '<button class="co-remove" onclick="removeCartItem(\'' + item.id + '\')"><i class="fas fa-trash"></i></button>' +
         '</div></div>' +
         '<div class="co-cart-price">' + fmt(item.price * item.qty) + '</div></div>';
     }).join('');
@@ -900,6 +920,7 @@ async function placeOrder() {
     label: ORDER_STATUS_MAP.placed.label,
     description: ORDER_STATUS_MAP.placed.desc
   });
+  updateNotifBadge();
 
   // Rider search + realistic status progression begins here
   // (advanceOrderStatus/assignRider chain the rest of the timeline)
@@ -1635,6 +1656,7 @@ async function logout() {
   currentUser = null;
   userRoles = [];
   activeRole = 'customer';
+  stopRiderAlertPolling();
   updateAuthUI();
   showToast('Logged out', 'info');
 }
@@ -1861,12 +1883,14 @@ async function restoreSession() {
     await fetchUserRoles();
     updateAuthUI();
     updateNotifBadge();
+    startRiderAlertPolling();
   }
 
   supabase.auth.onAuthStateChange(function(event, session) {
     currentUser = session ? session.user : null;
     updateAuthUI();
     updateNotifBadge();
+    if (currentUser) startRiderAlertPolling(); else stopRiderAlertPolling();
   });
 }
 
@@ -1939,6 +1963,7 @@ async function addAccountRole(role) {
   await supabase.from('user_roles').insert({ user_id: currentUser.id, role: role }).select();
   await fetchUserRoles();
   switchActiveRole(role);
+  if (role === 'rider') startRiderAlertPolling();
   showToast(ROLE_LABELS[role] + ' account added \u2705');
   openProfileModal();
 }
@@ -2107,6 +2132,12 @@ function injectModals() {
     '<div id="sn-rider-dash-body" style="padding:8px 4px;"></div>' +
     '</div>' +
 
+    // Rider order-alert overlay + modal (pops up regardless of screen while online)
+    '<div id="sn-riderAlertOverlay" class="sn-overlay"></div>' +
+    '<div id="sn-riderAlertModal" class="sn-login-modal">' +
+    '<div class="login-body" id="sn-rider-alert-body"></div>' +
+    '</div>' +
+
     // Notifications overlay + modal
     '<div id="sn-notifOverlay" class="sn-overlay" onclick="closeNotificationsModal()"></div>' +
     '<div id="sn-notifModal" class="sn-tracking-modal">' +
@@ -2160,7 +2191,7 @@ async function fetchNotifications() {
     .order('created_at', { ascending: false })
     .limit(30);
 
-  if (error) return [];
+  if (error) { console.error('fetchNotifications error:', error); return []; }
   return data || [];
 }
 
@@ -2224,19 +2255,14 @@ async function updateNotifBadge() {
     return;
   }
 
-  const { data } = await supabase
-    .from('order_status_history')
-    .select('created_at, orders!inner(user_id)')
-    .eq('orders.user_id', currentUser.id)
-    .order('created_at', { ascending: false })
-    .limit(1);
+  var notifs = await fetchNotifications();
 
-  if (!data || !data.length) {
+  if (!notifs.length) {
     badges.forEach(function(b) { b.style.display = 'none'; });
     return;
   }
 
-  var latest = data[0].created_at;
+  var latest = notifs[0].created_at;
   var seen = localStorage.getItem(notifSeenKey());
   var isUnseen = !seen || new Date(latest) > new Date(seen);
   badges.forEach(function(b) { b.style.display = isUnseen ? 'inline-block' : 'none'; });
@@ -2281,7 +2307,29 @@ async function openProfileModal(e) {
     return;
   }
 
-  renderProfileForm(profile);
+  // Pull role-specific stats to show on the profile //
+  var roleStats = {};
+  if (userRoles.indexOf('merchant') !== -1) {
+    const { data: merchant } = await supabase.from('merchants').select('id, store_name, business_type').eq('user_id', currentUser.id).single();
+    if (merchant) {
+      const { data: myProducts } = await supabase.from('products').select('rating_avg, rating_count').eq('merchant_id', merchant.id);
+      var totalReviews = 0, weightedSum = 0;
+      (myProducts || []).forEach(function(p) { totalReviews += p.rating_count; weightedSum += p.rating_avg * p.rating_count; });
+      roleStats.merchant = {
+        storeName: merchant.store_name,
+        businessType: merchant.business_type,
+        productCount: (myProducts || []).length,
+        ratingAvg: totalReviews > 0 ? (weightedSum / totalReviews).toFixed(1) : 0,
+        ratingCount: totalReviews
+      };
+    }
+  }
+  if (userRoles.indexOf('rider') !== -1) {
+    const { data: rider } = await supabase.from('riders').select('vehicle_type, plate_number, rating_avg, rating_count, is_available, rejection_penalty').eq('user_id', currentUser.id).single();
+    if (rider) roleStats.rider = rider;
+  }
+
+  renderProfileForm(profile, roleStats);
 }
 
 function closeProfileModal() {
@@ -2290,9 +2338,10 @@ function closeProfileModal() {
   document.body.style.overflow = '';
 }
 
-function renderProfileForm(profile) {
+function renderProfileForm(profile, roleStats) {
   var body = document.getElementById('sn-profile-body');
   var initial = (profile.full_name || currentUser.email || '?').trim().charAt(0).toUpperCase();
+  roleStats = roleStats || {};
 
   var roleChips = '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:10px 0 4px;">' +
     userRoles.map(function(r) {
@@ -2322,6 +2371,28 @@ function renderProfileForm(profile) {
       '<i class="fas fa-motorcycle"></i> Register as Rider</button>';
   }
 
+  var statsHtml = '';
+  if (roleStats.merchant) {
+    var m = roleStats.merchant;
+    statsHtml += '<div style="background:#F0FFF4;border-radius:10px;padding:14px;margin-bottom:10px;">' +
+      '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-store"></i> ' + m.storeName + '</p>' +
+      '<p style="margin:4px 0 0;font-size:12px;color:#666;">' + (CATEGORY_META[m.businessType] ? CATEGORY_META[m.businessType].title : m.businessType) + ' \u2022 ' + m.productCount + ' product(s)</p>' +
+      '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
+      (m.ratingCount > 0 ? stars(Math.round(m.ratingAvg)) + ' ' + m.ratingAvg + ' (' + m.ratingCount + ' reviews)' : 'No reviews yet') +
+      '</p></div>';
+  }
+  if (roleStats.rider) {
+    var r = roleStats.rider;
+    var rEffectiveRating = Math.max(0, r.rating_avg - (r.rejection_penalty || 0));
+    statsHtml += '<div style="background:#F0F8FF;border-radius:10px;padding:14px;margin-bottom:10px;">' +
+      '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + (r.vehicle_type.charAt(0).toUpperCase() + r.vehicle_type.slice(1)) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</p>' +
+      '<p style="margin:4px 0 0;font-size:12px;color:' + (r.is_available ? '#22C55E' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</p>' +
+      '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
+      (r.rating_count > 0 ? stars(Math.round(rEffectiveRating)) + ' ' + rEffectiveRating.toFixed(1) + ' (' + r.rating_count + ' ratings)' : 'New rider, no ratings yet') +
+      (r.rejection_penalty > 0 ? '<span style="color:#DC2626;"> \u2014 ' + r.rejection_penalty.toFixed(1) + ' rejection penalty</span>' : '') +
+      '</p></div>';
+  }
+
   var avatarHtml = profile.avatar_url
     ? '<img src="' + profile.avatar_url + '" style="width:100%;height:100%;object-fit:cover;"/>'
     : initial;
@@ -2348,6 +2419,7 @@ function renderProfileForm(profile) {
 
     '<div style="margin:20px 0;border-top:1px solid #eee;"></div>' +
 
+    statsHtml +
     dashboardButton +
     addRoleButtons +
 
@@ -2806,11 +2878,131 @@ async function deleteMyProduct(productId) {
 
 
 // ============================================================
-// RIDER DASHBOARD
+// RIDER ORDER ALERTS — first-accept-first-served popup that shows
+// regardless of what screen the rider is on, while they're online
 // ============================================================
 
-let myRiderProfile = null;
-let myAssignedOrders = [];
+let riderAlertPollIntervalId = null;
+let riderAlertShownOrderIds = {}; // session-only, avoids re-popping the same dismissed order
+let riderAlertCurrentOrderId = null;
+
+function startRiderAlertPolling() {
+  if (riderAlertPollIntervalId) return; // already running
+  riderAlertPollIntervalId = setInterval(checkForRiderOrderAlert, 8000);
+  checkForRiderOrderAlert(); // also check immediately, don't wait for the first interval
+}
+
+function stopRiderAlertPolling() {
+  if (riderAlertPollIntervalId) { clearInterval(riderAlertPollIntervalId); riderAlertPollIntervalId = null; }
+  riderAlertShownOrderIds = {};
+  riderAlertCurrentOrderId = null;
+  var overlay = document.getElementById('sn-riderAlertOverlay');
+  if (overlay) { overlay.classList.remove('active'); document.getElementById('sn-riderAlertModal').classList.remove('active'); }
+}
+
+async function checkForRiderOrderAlert() {
+  if (!currentUser || userRoles.indexOf('rider') === -1) return;
+  if (riderAlertCurrentOrderId) return; // already showing one, don't stack alerts
+
+  const { data: riderRow } = await supabase.from('riders').select('is_available').eq('user_id', currentUser.id).single();
+  if (!riderRow || !riderRow.is_available) return;
+
+  const { data: candidates } = await supabase
+    .from('orders')
+    .select('*, order_items(*)')
+    .eq('status', 'placed')
+    .is('rider_user_id', null)
+    .order('created_at', { ascending: true })
+    .limit(5);
+
+  if (!candidates || !candidates.length) return;
+  var order = candidates.find(function(o) { return !riderAlertShownOrderIds[o.id]; });
+  if (!order) return;
+
+  showRiderOrderAlert(order);
+}
+
+async function showRiderOrderAlert(order) {
+  riderAlertCurrentOrderId = order.id;
+  var body = document.getElementById('sn-rider-alert-body');
+  var itemsSummary = (order.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+
+  const { count: rejectionsToday } = await supabase
+    .from('rider_rejections')
+    .select('id', { count: 'exact', head: true })
+    .eq('rider_user_id', currentUser.id)
+    .gte('created_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
+
+  var rejectionsLeft = Math.max(0, 3 - (rejectionsToday || 0));
+
+  body.innerHTML =
+    '<div style="text-align:center;">' +
+    '<div class="login-icon" style="color:var(--primary,#22C55E);"><i class="fas fa-bell"></i></div>' +
+    '<h2 style="margin:6px 0;">New Delivery Available!</h2>' +
+    '<p class="login-sub">First to accept gets it</p>' +
+    '</div>' +
+    '<div style="background:#F9FAFB;border-radius:10px;padding:14px;margin:12px 0;">' +
+    '<p style="margin:0;font-weight:700;">Order #' + order.order_code + ' \u2014 ' + fmt(order.total) + '</p>' +
+    '<p style="margin:6px 0 0;font-size:12.5px;color:#666;">' + itemsSummary + '</p>' +
+    '<p style="margin:6px 0 0;font-size:12.5px;color:#666;"><i class="fas fa-map-marker-alt"></i> ' + (order.shipping_street || '') + ', ' + (order.shipping_city || '') + '</p>' +
+    '</div>' +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:10px;" onclick="acceptOrderFromAlert(\'' + order.id + '\')">Accept Delivery</button>' +
+    (rejectionsLeft > 0
+      ? '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;" onclick="rejectOrderAlert(\'' + order.id + '\')">Reject (' + rejectionsLeft + ' left today)</button>'
+      : '<p style="text-align:center;color:#999;font-size:12px;margin:0;">Daily rejection limit reached \u2014 accept or dismiss to wait for the next one</p>') +
+    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="dismissRiderAlert(\'' + order.id + '\')">Not Now</button>';
+
+  document.getElementById('sn-riderAlertOverlay').classList.add('active');
+  document.getElementById('sn-riderAlertModal').classList.add('active');
+}
+
+function dismissRiderAlert(orderId) {
+  riderAlertShownOrderIds[orderId] = true;
+  riderAlertCurrentOrderId = null;
+  document.getElementById('sn-riderAlertOverlay').classList.remove('active');
+  document.getElementById('sn-riderAlertModal').classList.remove('active');
+}
+
+async function acceptOrderFromAlert(orderId) {
+  dismissRiderAlert(orderId);
+  await acceptOrder(orderId);
+  if (document.getElementById('sn-riderDashModal').classList.contains('active')) {
+    await loadMyAssignedOrders();
+    await loadAvailableOrders();
+    renderRiderDashboard();
+  }
+}
+
+async function rejectOrderAlert(orderId) {
+  var reason = prompt('Why are you rejecting this delivery? (required)');
+  if (!reason || !reason.trim()) { showToast('A reason is required to reject an order', 'info'); return; }
+
+  const { count: rejectionsToday } = await supabase
+    .from('rider_rejections')
+    .select('id', { count: 'exact', head: true })
+    .eq('rider_user_id', currentUser.id)
+    .gte('created_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
+
+  if ((rejectionsToday || 0) >= 3) {
+    showToast('Daily rejection limit reached (3/3)', 'error');
+    dismissRiderAlert(orderId);
+    return;
+  }
+
+  const { error } = await supabase.from('rider_rejections').insert({
+    rider_user_id: currentUser.id, order_id: orderId, reason: reason.trim()
+  });
+
+  if (error) {
+    showToast('Could not log rejection: ' + error.message, 'error');
+    return;
+  }
+
+  showToast('Order rejected. This affects your rating slightly \u2014 ' + (2 - (rejectionsToday || 0)) + ' rejections left today.', 'info');
+  dismissRiderAlert(orderId);
+}
+
+
 let availableOrders = [];
 
 async function openRiderDashboard(e) {
@@ -2884,7 +3076,7 @@ async function acceptOrder(orderId) {
       rider_phone: (myProfile && myProfile.phone) || '',
       rider_vehicle: myRiderProfile ? (myRiderProfile.vehicle_type.charAt(0).toUpperCase() + myRiderProfile.vehicle_type.slice(1)) : 'Motorcycle',
       rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
-      rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? myRiderProfile.rating_avg : null,
+      rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)).toFixed(1) : null,
       updated_at: new Date().toISOString()
     })
     .eq('id', orderId)
@@ -2925,7 +3117,7 @@ async function toggleMyAvailability(newState) {
   if (error) { showToast('Could not update availability: ' + error.message, 'error'); return; }
   myRiderProfile.is_available = newState;
   showToast(newState ? 'You\'re now available for deliveries' : 'You\'re now offline', 'info');
-  if (newState) await loadAvailableOrders();
+  if (newState) { await loadAvailableOrders(); checkForRiderOrderAlert(); }
   renderRiderDashboard();
 }
 
@@ -2973,12 +3165,15 @@ function renderRiderDashboard() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders waiting for a rider right now.</p>';
 
+  var myEffectiveRating = myRiderProfile ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)) : 0;
+
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
     '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed' +
     (myRiderProfile && myRiderProfile.rating_count > 0
-      ? ' \u2022 <span style="color:#F59E0B;">' + stars(Math.round(myRiderProfile.rating_avg)) + '</span> ' + myRiderProfile.rating_avg + ' (' + myRiderProfile.rating_count + ')'
+      ? ' \u2022 <span style="color:#F59E0B;">' + stars(Math.round(myEffectiveRating)) + '</span> ' + myEffectiveRating.toFixed(1) + ' (' + myRiderProfile.rating_count + ')'
       : ' \u2022 New rider, no ratings yet') +
+    (myRiderProfile && myRiderProfile.rejection_penalty > 0 ? ' \u2022 <span style="color:#DC2626;">' + myRiderProfile.rejection_penalty.toFixed(1) + ' rejection penalty</span>' : '') +
     '</p>' +
     toggleHtml +
     (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="loadAvailableOrders().then(renderRiderDashboard)"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
