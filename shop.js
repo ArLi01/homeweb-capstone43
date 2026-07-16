@@ -3188,6 +3188,12 @@ async function rejectOrderAlert(orderId) {
 }
 
 
+// ============================================================
+// RIDER DASHBOARD
+// ============================================================
+
+let myRiderProfile = null;
+let myAssignedOrders = [];
 let availableOrders = [];
 
 async function openRiderDashboard(e) {
