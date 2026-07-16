@@ -353,7 +353,7 @@ function openProductModal(id) {
   const disc = m.querySelector('.pm-discount');
   disc.textContent = p.discount ? '-' + p.discount + '%' : '';
   disc.style.display = p.discount ? 'inline' : 'none';
-  m.querySelector('.pm-location').innerHTML = '<i class="fas fa-map-marker-alt"></i> Ships from ' + p.location;
+  m.querySelector('.pm-location').innerHTML = '<i class="fas fa-store"></i> Sold by <span onclick="closeProductModal(); openMerchantStorefront(\'' + p.merchant_id + '\')" style="text-decoration:underline;cursor:pointer;color:var(--primary,#22C55E);font-weight:600;">' + p.location + '</span> <i class="fas fa-chevron-right" style="font-size:10px;color:#999;"></i>';
   m.querySelector('.pm-qty-val').textContent = 1;
 
   document.getElementById('sn-overlay').classList.add('active');
@@ -418,7 +418,88 @@ function renderReviewsList(showAll) {
     toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(false)">Show fewer reviews</button>';
   }
 
-  container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' + rowsHtml + toggleHtml;
+  // Scrollable box for the review rows themselves — keeps the product info
+  // above from getting pushed out of view when there are many/long reviews.
+  // The toggle button sits outside this box so it's always reachable
+  // without needing to scroll to the bottom first.
+  container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' +
+    '<div style="max-height:280px;overflow-y:auto;">' + rowsHtml + '</div>' +
+    toggleHtml;
+}
+
+// ============================================================
+// MERCHANT STOREFRONT (customer-facing view of a seller's shop)
+// ============================================================
+
+async function openMerchantStorefront(merchantId) {
+  if (!merchantId) { showToast('This product has no store information', 'info'); return; }
+
+  document.getElementById('sn-storeOverlay').classList.add('active');
+  document.getElementById('sn-storeModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var body = document.getElementById('sn-store-body');
+  body.innerHTML = '<div class="track-empty"><p>Loading store...</p></div>';
+
+  const { data: merchant, error } = await supabase.from('merchants').select('*').eq('id', merchantId).single();
+  if (error || !merchant) {
+    body.innerHTML = '<div class="track-empty"><p>Could not load this store.</p></div>';
+    return;
+  }
+
+  const { data: storeProducts } = await supabase
+    .from('products')
+    .select('*')
+    .eq('merchant_id', merchantId)
+    .eq('is_active', true)
+    .order('created_at', { ascending: false });
+
+  var mapped = (storeProducts || []).map(function(p) {
+    var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
+    return {
+      id: p.id, name: p.name, price: p.price, oldPrice: null, discount: 0,
+      rating: Math.round(p.rating_avg || 0) || 0, ratingAvg: p.rating_avg || 0,
+      sold: (p.rating_count || 0) + (p.rating_count === 1 ? ' review' : ' reviews'),
+      icon: meta.icon, location: merchant.store_name, category: p.category,
+      image_url: p.image_url, stock_qty: p.stock_qty, merchant_id: p.merchant_id
+    };
+  });
+
+  // Merge into the global products cache so clicking a card here can
+  // reuse the normal openProductModal lookup by id //
+  mapped.forEach(function(p) {
+    if (!products.find(function(x) { return x.id === p.id; })) products.push(p);
+  });
+
+  var totalReviews = 0, weightedSum = 0;
+  (storeProducts || []).forEach(function(p) { totalReviews += p.rating_count; weightedSum += p.rating_avg * p.rating_count; });
+  var storeRatingAvg = totalReviews > 0 ? (weightedSum / totalReviews).toFixed(1) : 0;
+
+  var productsHtml = mapped.length
+    ? '<div class="product-grid">' + mapped.map(renderProductCardHtml).join('') + '</div>'
+    : '<p style="color:#999;padding:1rem 0;">This store has no products listed yet.</p>';
+
+  body.innerHTML =
+    '<div style="text-align:center;margin-bottom:16px;">' +
+    '<div style="width:64px;height:64px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;"><i class="fas fa-store"></i></div>' +
+    '<h2 style="margin:0;">' + merchant.store_name + '</h2>' +
+    '<p style="color:#888;margin:4px 0 0;">' + (CATEGORY_META[merchant.business_type] ? CATEGORY_META[merchant.business_type].title : merchant.business_type) + '</p>' +
+    (merchant.store_description ? '<p style="color:#666;margin:8px 0 0;font-size:13px;">' + merchant.store_description + '</p>' : '') +
+    '<p style="margin:8px 0 0;color:#F59E0B;font-size:13px;">' +
+    (totalReviews > 0 ? stars(Math.round(storeRatingAvg)) + ' ' + storeRatingAvg + ' (' + totalReviews + ' reviews across ' + mapped.length + ' products)' : 'No reviews yet') +
+    '</p></div>' +
+    '<div style="border-top:1px solid #eee;padding-top:16px;">' +
+    '<h3 style="margin:0 0 12px;font-size:14px;">Products from this store (' + mapped.length + ')</h3>' +
+    productsHtml +
+    '</div>';
+
+  attachCardClicks();
+}
+
+function closeMerchantStorefront() {
+  document.getElementById('sn-storeOverlay').classList.remove('active');
+  document.getElementById('sn-storeModal').classList.remove('active');
+  document.body.style.overflow = '';
 }
 
 function closeProductModal() {
@@ -2138,6 +2219,13 @@ function injectModals() {
     '<div class="login-body" id="sn-rider-alert-body"></div>' +
     '</div>' +
 
+    // Merchant storefront overlay + modal
+    '<div id="sn-storeOverlay" class="sn-overlay" onclick="closeMerchantStorefront()"></div>' +
+    '<div id="sn-storeModal" class="sn-tracking-modal">' +
+    '<button class="pm-close" onclick="closeMerchantStorefront()"><i class="fas fa-times"></i></button>' +
+    '<div id="sn-store-body" style="padding:8px 4px;"></div>' +
+    '</div>' +
+
     // Notifications overlay + modal
     '<div id="sn-notifOverlay" class="sn-overlay" onclick="closeNotificationsModal()"></div>' +
     '<div id="sn-notifModal" class="sn-tracking-modal">' +
@@ -2964,13 +3052,13 @@ function dismissRiderAlert(orderId) {
 }
 
 async function acceptOrderFromAlert(orderId) {
-  dismissRiderAlert(orderId);
+  var btn = document.querySelector('#sn-rider-alert-body .co-btn--next');
+  if (btn) { btn.disabled = true; btn.textContent = 'Accepting...'; }
+
   await acceptOrder(orderId);
-  if (document.getElementById('sn-riderDashModal').classList.contains('active')) {
-    await loadMyAssignedOrders();
-    await loadAvailableOrders();
-    renderRiderDashboard();
-  }
+  // acceptOrder() already shows the correct toast for success / too-late / error,
+  // and already refreshes the dashboard lists regardless of whether it's open.
+  dismissRiderAlert(orderId);
 }
 
 async function rejectOrderAlert(orderId) {
@@ -3065,6 +3153,13 @@ async function loadAvailableOrders() {
 // Claim an unassigned order for this rider (handles the race where
 // someone else — or the auto-assign fallback — grabbed it first) //
 async function acceptOrder(orderId) {
+  // If the rider accepted straight from the alert popup without ever opening
+  // "My Deliveries" this session, myRiderProfile won't be cached yet — fetch it. //
+  if (!myRiderProfile) {
+    const { data: riderRow } = await supabase.from('riders').select('*').eq('user_id', currentUser.id).single();
+    myRiderProfile = riderRow;
+  }
+
   const { data: myProfile } = await supabase.from('profiles').select('full_name, phone').eq('id', currentUser.id).single();
 
   const { data, error } = await supabase
@@ -3084,16 +3179,18 @@ async function acceptOrder(orderId) {
     .is('rider_user_id', null)
     .select();
 
+  console.log('acceptOrder result for', orderId, { data, error });
+
   if (error) {
     showToast('Could not accept order: ' + error.message, 'error');
     console.error('acceptOrder error:', error);
-    return;
+    return false;
   }
   if (!data || !data.length) {
     showToast('Too late — another rider already claimed this order', 'info');
     await loadAvailableOrders();
-    renderRiderDashboard();
-    return;
+    if (document.getElementById('sn-riderDashModal').classList.contains('active')) renderRiderDashboard();
+    return false;
   }
 
   await supabase.from('order_status_history').insert({
@@ -3110,6 +3207,7 @@ async function acceptOrder(orderId) {
   await loadMyAssignedOrders();
   await loadAvailableOrders();
   renderRiderDashboard();
+  return true;
 }
 
 async function toggleMyAvailability(newState) {
