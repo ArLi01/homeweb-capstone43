@@ -339,6 +339,14 @@ function openProductModal(id) {
   if (!p) return;
   currentProduct = Object.assign({}, p, { qty: 1 });
 
+  // If opened from within a store view, hide it first so the product
+  // modal is never stuck stacking behind it //
+  var storeModal = document.getElementById('sn-storeModal');
+  if (storeModal && storeModal.classList.contains('active')) {
+    document.getElementById('sn-storeOverlay').classList.remove('active');
+    storeModal.classList.remove('active');
+  }
+
   const m = document.getElementById('sn-productModal');
   var imgSrc = getProductImage(p.id);
   if (imgSrc) {
@@ -476,20 +484,28 @@ async function openMerchantStorefront(merchantId) {
   var storeRatingAvg = totalReviews > 0 ? (weightedSum / totalReviews).toFixed(1) : 0;
 
   var productsHtml = mapped.length
-    ? '<div class="product-grid">' + mapped.map(renderProductCardHtml).join('') + '</div>'
-    : '<p style="color:#999;padding:1rem 0;">This store has no products listed yet.</p>';
+    ? '<div class="store-product-grid">' + mapped.map(renderProductCardHtml).join('') + '</div>'
+    : '<p style="color:#999;padding:1rem 0;text-align:center;">This store has no products listed yet.</p>';
+
+  var verifiedBadge = (totalReviews >= 5 && storeRatingAvg >= 4)
+    ? '<span style="display:inline-block;background:#F0FFF4;color:var(--primary,#22C55E);font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin-top:8px;"><i class="fas fa-shield-check"></i> Trusted Seller</span>'
+    : '';
+
+  document.getElementById('sn-storeModal').style.width = 'min(820px, 95vw)';
 
   body.innerHTML =
-    '<div style="text-align:center;margin-bottom:16px;">' +
-    '<div style="width:64px;height:64px;border-radius:50%;background:var(--primary,#22C55E);color:#fff;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;"><i class="fas fa-store"></i></div>' +
-    '<h2 style="margin:0;">' + merchant.store_name + '</h2>' +
-    '<p style="color:#888;margin:4px 0 0;">' + (CATEGORY_META[merchant.business_type] ? CATEGORY_META[merchant.business_type].title : merchant.business_type) + '</p>' +
-    (merchant.store_description ? '<p style="color:#666;margin:8px 0 0;font-size:13px;">' + merchant.store_description + '</p>' : '') +
-    '<p style="margin:8px 0 0;color:#F59E0B;font-size:13px;">' +
-    (totalReviews > 0 ? stars(Math.round(storeRatingAvg)) + ' ' + storeRatingAvg + ' (' + totalReviews + ' reviews across ' + mapped.length + ' products)' : 'No reviews yet') +
-    '</p></div>' +
-    '<div style="border-top:1px solid #eee;padding-top:16px;">' +
-    '<h3 style="margin:0 0 12px;font-size:14px;">Products from this store (' + mapped.length + ')</h3>' +
+    '<div style="text-align:center;margin:-8px -4px 20px;padding:28px 20px 22px;background:linear-gradient(135deg, var(--primary,#22C55E), #16A34A);border-radius:16px 16px 0 0;color:#fff;">' +
+    '<div style="width:72px;height:72px;border-radius:50%;background:rgba(255,255,255,0.15);border:3px solid rgba(255,255,255,0.4);color:#fff;font-size:28px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;"><i class="fas fa-store"></i></div>' +
+    '<h2 style="margin:0;color:#fff;">' + merchant.store_name + '</h2>' +
+    '<p style="color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:13px;">' + (CATEGORY_META[merchant.business_type] ? CATEGORY_META[merchant.business_type].title : merchant.business_type) + '</p>' +
+    (merchant.store_description ? '<p style="color:rgba(255,255,255,0.9);margin:10px auto 0;font-size:13px;max-width:420px;">' + merchant.store_description + '</p>' : '') +
+    '<div style="margin-top:10px;color:#FEF3C7;font-size:13px;font-weight:600;">' +
+    (totalReviews > 0 ? stars(Math.round(storeRatingAvg)) + ' ' + storeRatingAvg + ' <span style="color:rgba(255,255,255,0.85);font-weight:400;">(' + totalReviews + ' reviews)</span>' : '<span style="color:rgba(255,255,255,0.85);font-weight:400;">No reviews yet</span>') +
+    '</div>' +
+    verifiedBadge +
+    '</div>' +
+    '<div style="padding:0 4px;">' +
+    '<h3 style="margin:0 0 14px;font-size:14.5px;display:flex;align-items:center;gap:8px;"><i class="fas fa-shopping-basket" style="color:var(--primary,#22C55E);"></i> ' + mapped.length + ' Product' + (mapped.length === 1 ? '' : 's') + ' Available</h3>' +
     productsHtml +
     '</div>';
 
@@ -1071,6 +1087,32 @@ async function confirmDelivery(orderDbId) {
   openTrackingDetail(orderDbId);
 }
 
+// Customer reports non-delivery after the grace period — this does NOT
+// change the order's core status (still awaiting_confirmation), it just
+// flags it prominently for the merchant and rider to see and follow up. //
+async function reportNotArrived(orderDbId) {
+  const { data: existing } = await supabase.from('orders').select('status, order_code, not_arrived_reported_at').eq('id', orderDbId).single();
+  if (!existing || existing.status !== 'awaiting_confirmation') {
+    showToast('This order isn\'t eligible to report right now', 'info');
+    return;
+  }
+  if (existing.not_arrived_reported_at) {
+    showToast('You already reported this order', 'info');
+    return;
+  }
+  if (!confirm('Report Order #' + existing.order_code + ' as not received? This notifies the seller and rider.')) return;
+
+  await supabase.from('orders').update({ not_arrived_reported_at: new Date().toISOString() }).eq('id', orderDbId);
+  await supabase.from('order_status_history').insert({
+    order_id: orderDbId, status: 'awaiting_confirmation',
+    label: 'Customer Reported Non-Delivery',
+    description: 'The customer reported not having received this order. The seller and rider have been notified.'
+  });
+
+  showToast('Reported. The seller and rider have been notified.', 'info');
+  openTrackingDetail(orderDbId);
+}
+
 // Mark order as delivered (manual override, e.g. for demo purposes) //
 // ============================================================
 // REVIEWS & RATINGS
@@ -1612,10 +1654,23 @@ function renderTrackingDetail(order) {
   // marked it delivered, never at any earlier status. This is the only
   // way an order finalizes as 'delivered' and unlocks reviews.
   if (order.status === 'awaiting_confirmation') {
+    var elapsedSinceDelivered = Date.now() - new Date(order.updated_at).getTime();
+    var gracePeriodPassed = elapsedSinceDelivered >= CONFIRMATION_GRACE_PERIOD_MS;
+
     html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
       '<p style="margin:0 0 10px;font-size:13px;color:#92400E;"><i class="fas fa-info-circle"></i> Your rider marked this order as delivered. Please confirm you actually received it.</p>' +
-      '<button class="co-btn co-btn--next track-mark-delivered" onclick="confirmDelivery(\'' + order.id + '\')">Confirm Receipt</button>' +
-      '</div>';
+      '<button class="co-btn co-btn--next track-mark-delivered" onclick="confirmDelivery(\'' + order.id + '\')">Confirm Receipt</button>';
+
+    if (order.not_arrived_reported_at) {
+      html += '<p style="margin:10px 0 0;font-size:12px;color:#DC2626;"><i class="fas fa-flag"></i> You reported this order as not received. The seller and rider have been notified.</p>';
+    } else if (gracePeriodPassed) {
+      html += '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-top:10px;" onclick="reportNotArrived(\'' + order.id + '\')">Did Not Arrive Yet</button>';
+    } else {
+      var minsLeft = Math.ceil((CONFIRMATION_GRACE_PERIOD_MS - elapsedSinceDelivered) / 1000 / 60) || 1;
+      html += '<p style="margin:10px 0 0;font-size:11.5px;color:#92400E;">Didn\'t receive it? You can report this in about ' + minsLeft + ' minute' + (minsLeft === 1 ? '' : 's') + '.</p>';
+    }
+
+    html += '</div>';
   }
 
   container.innerHTML = html;
@@ -2249,11 +2304,14 @@ function injectModals() {
 // ============================================================
 
 var NOTIF_ICON_MAP = {
-  'placed':           'fa-receipt',
-  'preparing':        'fa-box-open',
-  'out_for_delivery': 'fa-truck',
-  'delivered':        'fa-check-circle'
+  'placed':                'fa-receipt',
+  'preparing':              'fa-box-open',
+  'out_for_delivery':        'fa-truck',
+  'awaiting_confirmation':   'fa-clock',
+  'delivered':              'fa-check-circle'
 };
+
+var CONFIRMATION_GRACE_PERIOD_MS = 60000; // 1 minute grace period before nudging the customer
 
 function notifSeenKey() {
   return currentUser ? ('homeweb_notif_seen_' + currentUser.id) : null;
@@ -2280,7 +2338,32 @@ async function fetchNotifications() {
     .limit(30);
 
   if (error) { console.error('fetchNotifications error:', error); return []; }
-  return data || [];
+  var notifs = data || [];
+
+  // Reminder: nudge the customer if any of their orders have been sitting
+  // in "awaiting confirmation" past the grace period without action. //
+  const { data: pendingOrders } = await supabase
+    .from('orders')
+    .select('id, order_code, updated_at')
+    .eq('user_id', currentUser.id)
+    .eq('status', 'awaiting_confirmation');
+
+  (pendingOrders || []).forEach(function(o) {
+    var elapsed = Date.now() - new Date(o.updated_at).getTime();
+    if (elapsed >= CONFIRMATION_GRACE_PERIOD_MS) {
+      notifs.unshift({
+        order_id: o.id,
+        status: 'awaiting_confirmation',
+        label: 'Please Confirm Your Order',
+        description: 'Your rider marked Order #' + o.order_code + ' as delivered. Please confirm you received it, or let us know if it hasn\'t arrived.',
+        created_at: o.updated_at,
+        orders: { order_code: o.order_code }
+      });
+    }
+  });
+
+  notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
+  return notifs;
 }
 
 async function openNotificationsModal(e) {
@@ -2304,7 +2387,8 @@ async function openNotificationsModal(e) {
 
   // Mark as seen: remember the timestamp of the newest notification
   if (notifs.length) {
-    localStorage.setItem(notifSeenKey(), notifs[0].created_at);
+    var newestTimestamp = notifs.reduce(function(max, n) { return new Date(n.created_at) > new Date(max) ? n.created_at : max; }, notifs[0].created_at);
+    localStorage.setItem(notifSeenKey(), newestTimestamp);
   }
   updateNotifBadge();
 }
@@ -2350,7 +2434,7 @@ async function updateNotifBadge() {
     return;
   }
 
-  var latest = notifs[0].created_at;
+  var latest = notifs.reduce(function(max, n) { return new Date(n.created_at) > new Date(max) ? n.created_at : max; }, notifs[0].created_at);
   var seen = localStorage.getItem(notifSeenKey());
   var isUnseen = !seen || new Date(latest) > new Date(seen);
   badges.forEach(function(b) { b.style.display = isUnseen ? 'inline-block' : 'none'; });
@@ -2629,7 +2713,7 @@ async function loadMyMerchantProducts() {
 async function fetchMerchantSales() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, products!inner(name, merchant_id), orders(status, created_at, payment_method)')
+    .select('qty, price, product_id, products!inner(name, merchant_id), orders(status, created_at, payment_method, order_code, not_arrived_reported_at)')
     .eq('products.merchant_id', myMerchantId);
 
   if (error) {
@@ -2709,9 +2793,12 @@ function renderMerchantSalesView() {
 
   var recentOrdersHtml = s.recentOrders.length
     ? s.recentOrders.map(function(r) {
-        return '<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #f0f0f0;font-size:12.5px;">' +
+        return '<div style="padding:8px 4px;border-bottom:1px solid #f0f0f0;font-size:12.5px;">' +
+          '<div style="display:flex;justify-content:space-between;">' +
           '<span>' + formatDate(r.orders.created_at) + '</span>' +
-          '<span style="color:#777;">' + r.orders.status + ' \u2022 ' + (r.orders.payment_method === 'cod' ? 'COD' : 'GCash') + '</span></div>';
+          '<span style="color:#777;">' + r.orders.status + ' \u2022 ' + (r.orders.payment_method === 'cod' ? 'COD' : 'GCash') + '</span></div>' +
+          (r.orders.not_arrived_reported_at ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Order #' + r.orders.order_code + ': customer reports non-delivery</p>' : '') +
+          '</div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
 
@@ -3055,10 +3142,15 @@ async function acceptOrderFromAlert(orderId) {
   var btn = document.querySelector('#sn-rider-alert-body .co-btn--next');
   if (btn) { btn.disabled = true; btn.textContent = 'Accepting...'; }
 
-  await acceptOrder(orderId);
-  // acceptOrder() already shows the correct toast for success / too-late / error,
-  // and already refreshes the dashboard lists regardless of whether it's open.
-  dismissRiderAlert(orderId);
+  try {
+    await acceptOrder(orderId);
+    // acceptOrder() already shows the correct toast for success / too-late / error,
+    // and already refreshes the dashboard lists regardless of whether it's open.
+  } finally {
+    // Guaranteed to run even if acceptOrder somehow throws — the popup can
+    // never get stuck on "Accepting..." forever. //
+    dismissRiderAlert(orderId);
+  }
 }
 
 async function rejectOrderAlert(orderId) {
@@ -3153,61 +3245,71 @@ async function loadAvailableOrders() {
 // Claim an unassigned order for this rider (handles the race where
 // someone else — or the auto-assign fallback — grabbed it first) //
 async function acceptOrder(orderId) {
-  // If the rider accepted straight from the alert popup without ever opening
-  // "My Deliveries" this session, myRiderProfile won't be cached yet — fetch it. //
-  if (!myRiderProfile) {
-    const { data: riderRow } = await supabase.from('riders').select('*').eq('user_id', currentUser.id).single();
-    myRiderProfile = riderRow;
-  }
+  try {
+    // If the rider accepted straight from the alert popup without ever opening
+    // "My Deliveries" this session, myRiderProfile won't be cached yet — fetch it. //
+    if (!myRiderProfile) {
+      const { data: riderRow, error: riderErr } = await supabase.from('riders').select('*').eq('user_id', currentUser.id).single();
+      if (riderErr) console.error('acceptOrder: could not load own rider profile:', riderErr);
+      myRiderProfile = riderRow;
+    }
 
-  const { data: myProfile } = await supabase.from('profiles').select('full_name, phone').eq('id', currentUser.id).single();
+    const { data: myProfile } = await supabase.from('profiles').select('full_name, phone').eq('id', currentUser.id).single();
 
-  const { data, error } = await supabase
-    .from('orders')
-    .update({
+    const { data, error } = await supabase
+      .from('orders')
+      .update({
+        status: 'preparing',
+        rider_user_id: currentUser.id,
+        rider_name: (myProfile && myProfile.full_name) || 'Rider',
+        rider_phone: (myProfile && myProfile.phone) || '',
+        rider_vehicle: myRiderProfile ? (myRiderProfile.vehicle_type.charAt(0).toUpperCase() + myRiderProfile.vehicle_type.slice(1)) : 'Motorcycle',
+        rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
+        rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)).toFixed(1) : null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', orderId)
+      .eq('status', 'placed')
+      .is('rider_user_id', null)
+      .select();
+
+    console.log('acceptOrder result for', orderId, { data: data, error: error });
+
+    if (error) {
+      showToast('Could not accept order: ' + error.message, 'error');
+      console.error('acceptOrder error:', error);
+      return false;
+    }
+    if (!data || !data.length) {
+      showToast('Too late — another rider already claimed this order', 'info');
+      await loadAvailableOrders();
+      if (document.getElementById('sn-riderDashModal').classList.contains('active')) renderRiderDashboard();
+      return false;
+    }
+
+    await supabase.from('order_status_history').insert({
+      order_id: orderId,
       status: 'preparing',
-      rider_user_id: currentUser.id,
-      rider_name: (myProfile && myProfile.full_name) || 'Rider',
-      rider_phone: (myProfile && myProfile.phone) || '',
-      rider_vehicle: myRiderProfile ? (myRiderProfile.vehicle_type.charAt(0).toUpperCase() + myRiderProfile.vehicle_type.slice(1)) : 'Motorcycle',
-      rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
-      rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)).toFixed(1) : null,
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', orderId)
-    .eq('status', 'placed')
-    .is('rider_user_id', null)
-    .select();
+      label: 'Preparing Your Order',
+      description: 'Your order has been accepted by a rider and is being prepared for pickup.'
+    });
 
-  console.log('acceptOrder result for', orderId, { data, error });
+    await supabase.from('riders').update({ is_available: false }).eq('user_id', currentUser.id);
+    if (myRiderProfile) myRiderProfile.is_available = false;
 
-  if (error) {
-    showToast('Could not accept order: ' + error.message, 'error');
-    console.error('acceptOrder error:', error);
-    return false;
-  }
-  if (!data || !data.length) {
-    showToast('Too late — another rider already claimed this order', 'info');
+    showToast('Order accepted \uD83D\uDEF5');
+    await loadMyAssignedOrders();
     await loadAvailableOrders();
-    if (document.getElementById('sn-riderDashModal').classList.contains('active')) renderRiderDashboard();
+    renderRiderDashboard();
+    return true;
+
+  } catch (ex) {
+    // Guarantees the caller's UI (e.g. the alert popup's "Accepting..." button)
+    // can never get stuck forever, no matter what goes wrong here. //
+    console.error('acceptOrder threw an unexpected error:', ex);
+    showToast('Something went wrong accepting this order. Please try again.', 'error');
     return false;
   }
-
-  await supabase.from('order_status_history').insert({
-    order_id: orderId,
-    status: 'preparing',
-    label: 'Preparing Your Order',
-    description: 'Your order has been accepted by a rider and is being prepared for pickup.'
-  });
-
-  await supabase.from('riders').update({ is_available: false }).eq('user_id', currentUser.id);
-  if (myRiderProfile) myRiderProfile.is_available = false;
-
-  showToast('Order accepted \uD83D\uDEF5');
-  await loadMyAssignedOrders();
-  await loadAvailableOrders();
-  renderRiderDashboard();
-  return true;
 }
 
 async function toggleMyAvailability(newState) {
@@ -3247,6 +3349,7 @@ function renderRiderDashboard() {
       '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + statusInfo.label + '</p>' +
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
+      (o.not_arrived_reported_at ? '<p style="margin:8px 0 0;background:#FEE2E2;color:#DC2626;padding:8px;border-radius:6px;font-size:12px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reports this was NOT received. Please follow up.</p>' : '') +
       actionBtn +
       '</div>';
   }
