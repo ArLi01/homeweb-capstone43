@@ -47,7 +47,7 @@
   background: #fff;
   border-radius: 16px;
   width: min(560px, 95vw);
-  z-index: 300;
+  z-index: 350;
   box-shadow: 0 20px 60px rgba(0,0,0,0.2);
   transition: transform 0.25s ease, opacity 0.25s ease;
   opacity: 0;

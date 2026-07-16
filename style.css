@@ -71,6 +71,16 @@ img { display: block; max-width: 100%; }
 
 .topbar-right { display: flex; align-items: right; }
 
+.notif-badge {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #EF4444;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
 /* HEADER */
 .header {
   background: var(--primary);
@@ -558,6 +568,15 @@ img { display: block; max-width: 100%; }
 .product-grid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+}
+
+/* Used inside narrower modals (like the merchant storefront) where the
+   viewport-based breakpoints on .product-grid don't apply correctly
+   since the modal itself, not the viewport, constrains the width. */
+.store-product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   gap: 12px;
 }
 
