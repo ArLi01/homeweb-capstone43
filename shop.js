@@ -43,7 +43,8 @@ async function loadProducts() {
       discount: 0,
       rating: Math.round(p.rating_avg || 0) || 0,
       ratingAvg: p.rating_avg || 0,
-      sold: (p.rating_count || 0) + (p.rating_count === 1 ? ' review' : ' reviews'),
+      ratingCount: p.rating_count || 0,
+      soldCount: p.sold_count || 0,
       icon: meta.icon,
       location: (p.merchants && p.merchants.store_name) || 'HomeWeb Seller',
       category: p.category,
@@ -52,6 +53,14 @@ async function loadProducts() {
       merchant_id: p.merchant_id
     };
   });
+}
+
+// Shared label for a product's social proof: rating + review count + units sold //
+function productStatsLabel(p) {
+  var parts = [];
+  if (p.ratingCount > 0) parts.push(p.ratingAvg + ' (' + p.ratingCount + ')');
+  parts.push((p.soldCount || 0) + ' sold');
+  return parts.join(' \u2022 ');
 }
 
 function fmtPrice(n) {
@@ -87,7 +96,7 @@ function renderProductCardHtml(p) {
     '<div class="product-info">' +
     '<p class="product-name">' + p.name + '</p>' +
     '<div class="product-prices"><span class="price-now">' + fmtPrice(p.price) + '</span>' + oldPriceHtml + '</div>' +
-    '<div class="product-stars">' + starsHTML(p.rating) + '<span>' + (p.ratingAvg > 0 ? p.ratingAvg + ' \u2022 ' : '') + p.sold + '</span></div>' +
+    '<div class="product-stars">' + starsHTML(p.rating) + '<span>' + productStatsLabel(p) + '</span></div>' +
     stockNote +
     '</div></div>';
 }
@@ -355,7 +364,7 @@ function openProductModal(id) {
     m.querySelector('.pm-icon').innerHTML = '<i class="fas ' + p.icon + '"></i>';
   }
   m.querySelector('.pm-name').textContent = p.name;
-  m.querySelector('.pm-stars').innerHTML = stars(p.rating) + '<span>' + (p.ratingAvg > 0 ? p.ratingAvg + ' \u2022 ' : '') + p.sold + '</span>';
+  m.querySelector('.pm-stars').innerHTML = stars(p.rating) + '<span>' + productStatsLabel(p) + '</span>';
   m.querySelector('.pm-price-now').textContent = fmt(p.price);
   m.querySelector('.pm-price-old').textContent = p.oldPrice ? fmt(p.oldPrice) : '';
   const disc = m.querySelector('.pm-discount');
@@ -369,6 +378,40 @@ function openProductModal(id) {
   document.body.style.overflow = 'hidden'; 
 
   loadAndRenderReviews(p.id);
+  refreshProductStats(p.id);
+}
+
+// The global `products` cache is loaded once at page load, so ratings and
+// sold counts go stale as soon as anyone else reviews or buys the item.
+// Re-fetch the live numbers whenever a product is actually opened. //
+async function refreshProductStats(productId) {
+  const { data, error } = await supabase
+    .from('products')
+    .select('rating_avg, rating_count, sold_count, stock_qty, price')
+    .eq('id', productId)
+    .single();
+
+  if (error || !data) return;
+
+  var cached = products.find(function(x) { return x.id === productId; });
+  if (cached) {
+    cached.rating = Math.round(data.rating_avg || 0) || 0;
+    cached.ratingAvg = data.rating_avg || 0;
+    cached.ratingCount = data.rating_count || 0;
+    cached.soldCount = data.sold_count || 0;
+    cached.stock_qty = data.stock_qty;
+    cached.price = data.price;
+  }
+
+  // Only update the DOM if this product's modal is still the one open //
+  if (!currentProduct || currentProduct.id !== productId) return;
+  currentProduct.rating = Math.round(data.rating_avg || 0) || 0;
+  currentProduct.ratingAvg = data.rating_avg || 0;
+  currentProduct.ratingCount = data.rating_count || 0;
+  currentProduct.soldCount = data.sold_count || 0;
+
+  var starsEl = document.querySelector('#sn-productModal .pm-stars');
+  if (starsEl) starsEl.innerHTML = stars(currentProduct.rating) + '<span>' + productStatsLabel(currentProduct) + '</span>';
 }
 
 function reviewRowHtml(r) {
@@ -465,9 +508,9 @@ async function openMerchantStorefront(merchantId) {
   var mapped = (storeProducts || []).map(function(p) {
     var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
     return {
-      id: p.id, name: p.name, price: p.price, oldPrice: null, discount: 0,
+      id: p.id, name: p.name, description: p.description, price: p.price, oldPrice: null, discount: 0,
       rating: Math.round(p.rating_avg || 0) || 0, ratingAvg: p.rating_avg || 0,
-      sold: (p.rating_count || 0) + (p.rating_count === 1 ? ' review' : ' reviews'),
+      ratingCount: p.rating_count || 0, soldCount: p.sold_count || 0,
       icon: meta.icon, location: merchant.store_name, category: p.category,
       image_url: p.image_url, stock_qty: p.stock_qty, merchant_id: p.merchant_id
     };
@@ -2867,7 +2910,7 @@ function renderMerchantProductsView(tabs) {
       '</div>' +
       '<div style="flex:1;min-width:0;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">' + p.name + (p.is_active ? '' : ' <span style="color:#DC2626;font-size:11px;">(inactive)</span>') + '</p>' +
-      '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + meta.title + '</p>' +
+      '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + (p.sold_count || 0) + ' sold \u2022 ' + meta.title + '</p>' +
       '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(Math.round(p.rating_avg || 0)) + ' ' + (p.rating_avg > 0 ? p.rating_avg + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-shrink:0;">' +
