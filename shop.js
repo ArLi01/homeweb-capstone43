@@ -941,6 +941,11 @@ function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function capitalize(str) {
+  if (!str) return 'Motorcycle';
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
 var MOCK_RIDER_NAMES = ['Jomar Santos', 'Kevin Reyes', 'Angelo Cruz', 'Mark Villanueva', 'Rico Fernandez', 'Paolo Ramos', 'Jayson Dela Peña', 'Nico Aquino'];
 var MOCK_RIDER_VEHICLES = ['Motorcycle', 'Motorcycle', 'Motorcycle', 'Tricycle'];
 
@@ -2557,7 +2562,7 @@ function renderProfileForm(profile, roleStats) {
     var r = roleStats.rider;
     var rEffectiveRating = Math.max(0, r.rating_avg - (r.rejection_penalty || 0));
     statsHtml += '<div style="background:#F0F8FF;border-radius:10px;padding:14px;margin-bottom:10px;">' +
-      '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + (r.vehicle_type.charAt(0).toUpperCase() + r.vehicle_type.slice(1)) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</p>' +
+      '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + capitalize(r.vehicle_type) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:' + (r.is_available ? '#22C55E' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
       (r.rating_count > 0 ? stars(Math.round(rEffectiveRating)) + ' ' + rEffectiveRating.toFixed(1) + ' (' + r.rating_count + ' ratings)' : 'New rider, no ratings yet') +
@@ -3263,7 +3268,7 @@ async function acceptOrder(orderId) {
         rider_user_id: currentUser.id,
         rider_name: (myProfile && myProfile.full_name) || 'Rider',
         rider_phone: (myProfile && myProfile.phone) || '',
-        rider_vehicle: myRiderProfile ? (myRiderProfile.vehicle_type.charAt(0).toUpperCase() + myRiderProfile.vehicle_type.slice(1)) : 'Motorcycle',
+        rider_vehicle: myRiderProfile ? capitalize(myRiderProfile.vehicle_type) : 'Motorcycle',
         rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
         rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)).toFixed(1) : null,
         updated_at: new Date().toISOString()
@@ -3307,7 +3312,7 @@ async function acceptOrder(orderId) {
     // Guarantees the caller's UI (e.g. the alert popup's "Accepting..." button)
     // can never get stuck forever, no matter what goes wrong here. //
     console.error('acceptOrder threw an unexpected error:', ex);
-    showToast('Something went wrong accepting this order. Please try again.', 'error');
+    showToast('Could not accept order: ' + (ex && ex.message ? ex.message : 'unknown error') + '. Please try again.', 'error');
     return false;
   }
 }
