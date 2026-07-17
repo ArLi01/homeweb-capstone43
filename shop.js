@@ -18,11 +18,29 @@ function getProductImage(id) {
   return (p && p.image_url) ? p.image_url : null;
 }
 
+var DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+var DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Bolanteros stores only trade on specific days; permanent stores are open daily //
+function isStoreOpenToday(merchant) {
+  if (!merchant) return true;
+  if (merchant.merchant_type !== 'bolanteros') return true;
+  var days = merchant.open_days || [];
+  return days.indexOf(new Date().getDay()) !== -1;
+}
+
+function openDaysLabel(merchant) {
+  if (!merchant || merchant.merchant_type !== 'bolanteros') return 'Open daily';
+  var days = (merchant.open_days || []).slice().sort(function(a, b) { return a - b; });
+  if (!days.length) return 'No open days set';
+  return 'Open ' + days.map(function(d) { return DAY_SHORT[d]; }).join(', ');
+}
+
 // Fetch all active products (with seller info) from Supabase //
 async function loadProducts() {
   const { data, error } = await supabase
     .from('products')
-    .select('*, merchants(store_name)')
+    .select('*, merchants(id, store_name, merchant_type, open_days)')
     .eq('is_active', true)
     .order('created_at', { ascending: false });
 
@@ -32,7 +50,12 @@ async function loadProducts() {
     return;
   }
 
-  products = (data || []).map(function(p) {
+  products = (data || [])
+    .filter(function(p) {
+      // Bolanteros stores disappear from the storefront on their closed days //
+      return isStoreOpenToday(p.merchants);
+    })
+    .map(function(p) {
     var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
     return {
       id: p.id,
@@ -85,9 +108,7 @@ function renderProductCardHtml(p) {
     ? '<div class="product-img" style="background:' + meta.bg + ';"><img src="' + imgSrc + '" alt="' + p.name + '" loading="lazy"/></div>'
     : '<div class="product-img" style="background:' + meta.bg + ';"><i class="fas ' + p.icon + '" style="color:' + meta.color + ';font-size:32px;"></i></div>';
 
-  var stockNote = (typeof p.stock_qty === 'number' && p.stock_qty <= 0)
-    ? '<p class="product-location" style="color:#DC2626;"><i class="fas fa-ban"></i> Out of stock</p>'
-    : '<p class="product-location"><i class="fas fa-store"></i> ' + p.location + '</p>';
+  var stockNote = stockLabelHtml(p.stock_qty);
 
   return '<div class="product-card" data-product-id="' + p.id + '">' +
     badge +
@@ -97,8 +118,24 @@ function renderProductCardHtml(p) {
     '<p class="product-name">' + p.name + '</p>' +
     '<div class="product-prices"><span class="price-now">' + fmtPrice(p.price) + '</span>' + oldPriceHtml + '</div>' +
     '<div class="product-stars">' + starsHTML(p.rating) + '<span>' + productStatsLabel(p) + '</span></div>' +
+    '<p class="product-location"><i class="fas fa-store"></i> ' + p.location + '</p>' +
     stockNote +
     '</div></div>';
+}
+
+// Shared stock indicator — used on cards, in the product modal, and in store views //
+function stockLabelHtml(qty) {
+  if (typeof qty !== 'number') return '';
+  if (qty <= 0) {
+    return '<p class="product-location" style="color:#DC2626;font-weight:600;"><i class="fas fa-ban"></i> Out of stock</p>';
+  }
+  if (qty <= 5) {
+    return '<p class="product-location" style="color:#DC2626;font-weight:600;"><i class="fas fa-box"></i> Only ' + qty + ' left</p>';
+  }
+  if (qty <= 20) {
+    return '<p class="product-location" style="color:#B45309;"><i class="fas fa-box"></i> ' + qty + ' left in stock</p>';
+  }
+  return '<p class="product-location" style="color:#15803D;"><i class="fas fa-box"></i> ' + qty + ' in stock</p>';
 }
 
 // Render the homepage "Recommended For You" grid //
@@ -373,6 +410,9 @@ function openProductModal(id) {
   m.querySelector('.pm-location').innerHTML = '<i class="fas fa-store"></i> Sold by <span onclick="closeProductModal(); openMerchantStorefront(\'' + p.merchant_id + '\')" style="text-decoration:underline;cursor:pointer;color:var(--primary,#22C55E);font-weight:600;">' + p.location + '</span> <i class="fas fa-chevron-right" style="font-size:10px;color:#999;"></i>';
   m.querySelector('.pm-qty-val').textContent = 1;
 
+  var pmStock = m.querySelector('.pm-stock');
+  if (pmStock) pmStock.innerHTML = stockLabelHtml(p.stock_qty);
+
   document.getElementById('sn-overlay').classList.add('active');
   m.classList.add('active');
   document.body.style.overflow = 'hidden'; 
@@ -412,6 +452,10 @@ async function refreshProductStats(productId) {
 
   var starsEl = document.querySelector('#sn-productModal .pm-stars');
   if (starsEl) starsEl.innerHTML = stars(currentProduct.rating) + '<span>' + productStatsLabel(currentProduct) + '</span>';
+
+  currentProduct.stock_qty = data.stock_qty;
+  var stockEl = document.querySelector('#sn-productModal .pm-stock');
+  if (stockEl) stockEl.innerHTML = stockLabelHtml(data.stock_qty);
 }
 
 function reviewRowHtml(r) {
@@ -534,6 +578,19 @@ async function openMerchantStorefront(merchantId) {
     ? '<span style="display:inline-block;background:#F0FFF4;color:var(--primary,#22C55E);font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin-top:8px;"><i class="fas fa-shield-check"></i> Trusted Seller</span>'
     : '';
 
+  var openToday = isStoreOpenToday(merchant);
+  var scheduleBadge = '<div style="margin-top:10px;">' +
+    '<span style="display:inline-block;background:rgba(255,255,255,0.18);color:#fff;font-size:11.5px;font-weight:600;padding:4px 12px;border-radius:999px;">' +
+    '<i class="fas ' + (merchant.merchant_type === 'bolanteros' ? 'fa-calendar-days' : 'fa-shop') + '"></i> ' +
+    (merchant.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + ' \u2022 ' + openDaysLabel(merchant) +
+    '</span>' +
+    (merchant.merchant_type === 'bolanteros'
+      ? '<p style="margin:8px 0 0;font-size:12px;color:' + (openToday ? '#DCFCE7' : '#FEE2E2') + ';font-weight:600;">' +
+        (openToday ? '<i class="fas fa-circle-check"></i> Open today (' + DAY_NAMES[new Date().getDay()] + ')'
+                   : '<i class="fas fa-circle-xmark"></i> Closed today (' + DAY_NAMES[new Date().getDay()] + ')') + '</p>'
+      : '') +
+    '</div>';
+
   document.getElementById('sn-storeModal').style.width = 'min(820px, 95vw)';
 
   body.innerHTML =
@@ -546,6 +603,7 @@ async function openMerchantStorefront(merchantId) {
     (totalReviews > 0 ? stars(Math.round(storeRatingAvg)) + ' ' + storeRatingAvg + ' <span style="color:rgba(255,255,255,0.85);font-weight:400;">(' + totalReviews + ' reviews)</span>' : '<span style="color:rgba(255,255,255,0.85);font-weight:400;">No reviews yet</span>') +
     '</div>' +
     verifiedBadge +
+    scheduleBadge +
     '</div>' +
     '<div style="padding:0 4px;">' +
     '<h3 style="margin:0 0 14px;font-size:14.5px;display:flex;align-items:center;gap:8px;"><i class="fas fa-shopping-basket" style="color:var(--primary,#22C55E);"></i> ' + mapped.length + ' Product' + (mapped.length === 1 ? '' : 's') + ' Available</h3>' +
@@ -1850,6 +1908,48 @@ async function logout() {
 // ============================================================
 
 let signupRole = 'customer';
+let signupMerchantType = 'permanent';
+let signupOpenDays = [2, 3, 5];
+
+function merchantTypeCardHtml(type, icon, label, sub) {
+  var active = signupMerchantType === type;
+  return '<div onclick="selectMerchantType(\'' + type + '\')" ' +
+    'style="flex:1;text-align:center;padding:12px 6px;border-radius:10px;cursor:pointer;user-select:none;' +
+    'border:2px solid ' + (active ? 'var(--primary,#22C55E)' : '#e5e5e5') + ';' +
+    'background:' + (active ? '#F0FFF4' : '#fff') + ';">' +
+    '<i class="fas ' + icon + '" style="font-size:17px;color:' + (active ? 'var(--primary,#22C55E)' : '#999') + ';"></i>' +
+    '<p style="margin:5px 0 0;font-size:12.5px;font-weight:' + (active ? '700' : '500') + ';color:' + (active ? '#111' : '#777') + ';">' + label + '</p>' +
+    '<p style="margin:2px 0 0;font-size:10.5px;color:#999;">' + sub + '</p>' +
+    '</div>';
+}
+
+function selectMerchantType(type) {
+  var keep = {
+    name: getVal('signup-name'), email: getVal('signup-email'),
+    pass: getVal('signup-password'), pass2: getVal('signup-password2'),
+    store: getVal('signup-store-name'), biz: getVal('signup-business-type')
+  };
+  signupMerchantType = type;
+  renderSignupForm();
+  setVal('signup-name', keep.name); setVal('signup-email', keep.email);
+  setVal('signup-password', keep.pass); setVal('signup-password2', keep.pass2);
+  setVal('signup-store-name', keep.store); setVal('signup-business-type', keep.biz);
+}
+
+function toggleSignupDay(dayIndex) {
+  var i = signupOpenDays.indexOf(dayIndex);
+  if (i === -1) signupOpenDays.push(dayIndex); else signupOpenDays.splice(i, 1);
+
+  var keep = {
+    name: getVal('signup-name'), email: getVal('signup-email'),
+    pass: getVal('signup-password'), pass2: getVal('signup-password2'),
+    store: getVal('signup-store-name'), biz: getVal('signup-business-type')
+  };
+  renderSignupForm();
+  setVal('signup-name', keep.name); setVal('signup-email', keep.email);
+  setVal('signup-password', keep.pass); setVal('signup-password2', keep.pass2);
+  setVal('signup-store-name', keep.store); setVal('signup-business-type', keep.biz);
+}
 
 var BUSINESS_TYPES = [
   { value: 'vegetable', label: 'Vegetable' },
@@ -1933,7 +2033,24 @@ function renderSignupForm() {
       '<div class="co-field"><label>Business Classification <span class="co-required">*</span></label>' +
       '<select id="signup-business-type">' +
       BUSINESS_TYPES.map(function(b) { return '<option value="' + b.value + '">' + b.label + '</option>'; }).join('') +
-      '</select></div>';
+      '</select></div>' +
+      '<div class="co-field"><label>Merchant Type <span class="co-required">*</span></label>' +
+      '<div style="display:flex;gap:10px;">' +
+      merchantTypeCardHtml('permanent', 'fa-shop', 'Permanent', 'Open 7 days a week') +
+      merchantTypeCardHtml('bolanteros', 'fa-calendar-days', 'Bolanteros', 'Open on selected days') +
+      '</div></div>' +
+      (signupMerchantType === 'bolanteros'
+        ? '<div class="co-field"><label>Open Days <span class="co-required">*</span></label>' +
+          '<div id="signup-open-days" style="display:flex;gap:6px;flex-wrap:wrap;">' +
+          DAY_SHORT.map(function(d, i) {
+            var on = signupOpenDays.indexOf(i) !== -1;
+            return '<span onclick="toggleSignupDay(' + i + ')" style="cursor:pointer;user-select:none;padding:7px 11px;border-radius:8px;font-size:12px;font-weight:600;' +
+              'border:2px solid ' + (on ? 'var(--primary,#22C55E)' : '#e5e5e5') + ';' +
+              'background:' + (on ? '#F0FFF4' : '#fff') + ';color:' + (on ? '#15803D' : '#888') + ';">' + d + '</span>';
+          }).join('') +
+          '</div>' +
+          '<span class="co-field-error">Pick at least one open day</span></div>'
+        : '');
   } else if (signupRole === 'rider') {
     roleFields =
       '<div class="co-field"><label>Vehicle Type <span class="co-required">*</span></label>' +
@@ -2003,6 +2120,12 @@ function validateSignupForm() {
   if (signupRole === 'merchant') {
     var storeNameEl = document.getElementById('signup-store-name');
     markError(storeNameEl, storeNameEl.value.trim().length > 0);
+    if (signupMerchantType === 'bolanteros' && !signupOpenDays.length) {
+      isValid = false;
+      var daysField = document.getElementById('signup-open-days');
+      if (daysField) daysField.closest('.co-field').classList.add('co-field--error');
+      showToast('Bolanteros stores need at least one open day', 'info');
+    }
   } else if (signupRole === 'rider') {
     var plateEl = document.getElementById('signup-plate-number');
     markError(plateEl, plateEl.value.trim().length > 0);
@@ -2026,6 +2149,10 @@ async function submitSignup() {
   if (signupRole === 'merchant') {
     metadata.store_name = document.getElementById('signup-store-name').value.trim();
     metadata.business_type = document.getElementById('signup-business-type').value;
+    metadata.merchant_type = signupMerchantType;
+    metadata.open_days = signupMerchantType === 'bolanteros'
+      ? signupOpenDays.slice().sort(function(a, b) { return a - b; })
+      : [0, 1, 2, 3, 4, 5, 6];
   } else if (signupRole === 'rider') {
     metadata.vehicle_type = document.getElementById('signup-vehicle-type').value;
     metadata.plate_number = document.getElementById('signup-plate-number').value.trim();
@@ -2219,6 +2346,7 @@ function injectModals() {
     '<span class="pm-discount"></span>' +
     '</div>' +
     '<p class="pm-location"></p>' +
+    '<p class="pm-stock"></p>' +
     '<div class="pm-qty">' +
     '<span>Quantity:</span>' +
     '<button onclick="changeQty(-1)">&#8722;</button>' +
@@ -2410,8 +2538,74 @@ async function fetchNotifications() {
     }
   });
 
+  // Merchant-side: status updates on any order containing this merchant's
+  // products — rider assignment, pickup, delivery, and disputes. //
+  if (userRoles.indexOf('merchant') !== -1) {
+    var merchantNotifs = await fetchMerchantNotifications();
+    notifs = notifs.concat(merchantNotifs);
+  }
+
   notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
   return notifs;
+}
+
+async function fetchMerchantNotifications() {
+  const { data: merchant } = await supabase.from('merchants').select('id').eq('user_id', currentUser.id).single();
+  if (!merchant) return [];
+
+  const { data: lineItems, error: liErr } = await supabase
+    .from('order_items')
+    .select('order_id, products!inner(merchant_id), orders(order_code)')
+    .eq('products.merchant_id', merchant.id);
+
+  if (liErr) { console.error('fetchMerchantNotifications items error:', liErr); return []; }
+
+  var codeByOrder = {};
+  (lineItems || []).forEach(function(li) {
+    if (li.orders) codeByOrder[li.order_id] = li.orders.order_code;
+  });
+  var orderIds = Object.keys(codeByOrder);
+  if (!orderIds.length) return [];
+
+  const { data: statusRows, error: shErr } = await supabase
+    .from('order_status_history')
+    .select('order_id, status, label, description, created_at')
+    .in('order_id', orderIds)
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  if (shErr) { console.error('fetchMerchantNotifications status error:', shErr); return []; }
+
+  return (statusRows || []).map(function(s) {
+    return {
+      order_id: s.order_id,
+      status: s.status,
+      label: '[Your Store] ' + s.label,
+      description: merchantNotifDescription(s, codeByOrder[s.order_id]),
+      created_at: s.created_at,
+      orders: { order_code: codeByOrder[s.order_id] },
+      isMerchantNotif: true
+    };
+  });
+}
+
+// Reword customer-facing status copy from the seller's point of view //
+function merchantNotifDescription(s, orderCode) {
+  var code = orderCode || '';
+  switch (s.status) {
+    case 'placed':
+      return 'New order #' + code + ' was placed for your products.';
+    case 'preparing':
+      return 'A rider accepted order #' + code + ' and is heading over for pickup.';
+    case 'out_for_delivery':
+      return 'Order #' + code + ' has been picked up and is on the way to the customer.';
+    case 'awaiting_confirmation':
+      return 'Order #' + code + ' was marked delivered by the rider, awaiting customer confirmation.';
+    case 'delivered':
+      return 'Order #' + code + ' was confirmed received by the customer.';
+    default:
+      return s.description;
+  }
 }
 
 async function openNotificationsModal(e) {
@@ -2530,7 +2724,7 @@ async function openProfileModal(e) {
   // Pull role-specific stats to show on the profile //
   var roleStats = {};
   if (userRoles.indexOf('merchant') !== -1) {
-    const { data: merchant } = await supabase.from('merchants').select('id, store_name, business_type').eq('user_id', currentUser.id).single();
+    const { data: merchant } = await supabase.from('merchants').select('id, store_name, business_type, merchant_type, open_days').eq('user_id', currentUser.id).single();
     if (merchant) {
       const { data: myProducts } = await supabase.from('products').select('rating_avg, rating_count').eq('merchant_id', merchant.id);
       var totalReviews = 0, weightedSum = 0;
@@ -2538,6 +2732,10 @@ async function openProfileModal(e) {
       roleStats.merchant = {
         storeName: merchant.store_name,
         businessType: merchant.business_type,
+        merchantType: merchant.merchant_type,
+        openDays: merchant.open_days,
+        openToday: isStoreOpenToday(merchant),
+        scheduleLabel: openDaysLabel(merchant),
         productCount: (myProducts || []).length,
         ratingAvg: totalReviews > 0 ? (weightedSum / totalReviews).toFixed(1) : 0,
         ratingCount: totalReviews
@@ -2597,6 +2795,12 @@ function renderProfileForm(profile, roleStats) {
     statsHtml += '<div style="background:#F0FFF4;border-radius:10px;padding:14px;margin-bottom:10px;">' +
       '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-store"></i> ' + m.storeName + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:#666;">' + (CATEGORY_META[m.businessType] ? CATEGORY_META[m.businessType].title : m.businessType) + ' \u2022 ' + m.productCount + ' product(s)</p>' +
+      '<p style="margin:4px 0 0;font-size:12px;color:#666;"><i class="fas ' + (m.merchantType === 'bolanteros' ? 'fa-calendar-days' : 'fa-shop') + '"></i> ' +
+      (m.merchantType === 'bolanteros' ? 'Bolanteros' : 'Permanent') + ' \u2022 ' + m.scheduleLabel + '</p>' +
+      (m.merchantType === 'bolanteros'
+        ? '<p style="margin:4px 0 0;font-size:12px;font-weight:600;color:' + (m.openToday ? '#15803D' : '#DC2626') + ';">' +
+          (m.openToday ? 'Your store is visible today' : 'Your store is hidden today (closed)') + '</p>'
+        : '') +
       '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
       (m.ratingCount > 0 ? stars(Math.round(m.ratingAvg)) + ' ' + m.ratingAvg + ' (' + m.ratingCount + ' reviews)' : 'No reviews yet') +
       '</p></div>';
@@ -2761,8 +2965,10 @@ async function loadMyMerchantProducts() {
 async function fetchMerchantSales() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, products!inner(name, merchant_id), orders(status, created_at, payment_method, order_code, not_arrived_reported_at)')
+    .select('qty, price, product_id, products!inner(name, merchant_id), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at)')
     .eq('products.merchant_id', myMerchantId);
+
+  console.log('fetchMerchantSales:', { merchantId: myMerchantId, rows: data, error: error });
 
   if (error) {
     myMerchantSales = { error: error.message };
@@ -2771,8 +2977,8 @@ async function fetchMerchantSales() {
 
   var rows = data || [];
   var totalRevenue = 0, totalItems = 0;
-  var orderIds = {};
   var byProduct = {};
+  var orderIdSet = {};
 
   rows.forEach(function(r) {
     var lineTotal = r.price * r.qty;
@@ -2783,25 +2989,91 @@ async function fetchMerchantSales() {
     if (!byProduct[pname]) byProduct[pname] = { name: pname, qty: 0, revenue: 0 };
     byProduct[pname].qty += r.qty;
     byProduct[pname].revenue += lineTotal;
+
+    if (r.orders) orderIdSet[r.orders.id] = r.orders.order_code;
   });
 
-  rows.forEach(function(r) { if (r.orders) orderIds[JSON.stringify(r.orders.created_at) + r.price] = true; });
-
   var topProducts = Object.values(byProduct).sort(function(a, b) { return b.revenue - a.revenue; }).slice(0, 5);
+  var orderIds = Object.keys(orderIdSet);
 
-  var recentOrders = rows
-    .filter(function(r) { return r.orders; })
-    .sort(function(a, b) { return new Date(b.orders.created_at) - new Date(a.orders.created_at); })
-    .slice(0, 8);
+  var activity = await fetchMerchantActivity(orderIds, orderIdSet);
 
   myMerchantSales = {
     totalRevenue: totalRevenue,
     totalItems: totalItems,
-    lineCount: rows.length,
+    orderCount: orderIds.length,
     topProducts: topProducts,
-    recentOrders: recentOrders
+    activity: activity
   };
   return myMerchantSales;
+}
+
+// Build a merged, chronological log of everything that happened across this
+// merchant's store: order status changes, stock in/out, and new reviews. //
+async function fetchMerchantActivity(orderIds, orderCodeMap) {
+  var events = [];
+
+  if (orderIds.length) {
+    const { data: statusRows, error: statusErr } = await supabase
+      .from('order_status_history')
+      .select('order_id, status, label, description, created_at')
+      .in('order_id', orderIds)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (statusErr) console.error('activity: order_status_history error', statusErr);
+
+    (statusRows || []).forEach(function(s) {
+      events.push({
+        type: 'order',
+        icon: NOTIF_ICON_MAP[s.status] || 'fa-receipt',
+        color: '#854F0B',
+        title: 'Order #' + (orderCodeMap[s.order_id] || '') + ' — ' + s.label,
+        detail: s.description,
+        at: s.created_at
+      });
+    });
+  }
+
+  const { data: stockRows, error: stockErr } = await supabase
+    .from('stock_movements')
+    .select('type, quantity, reason, created_at, products!inner(name, merchant_id)')
+    .eq('products.merchant_id', myMerchantId)
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (stockErr) console.error('activity: stock_movements error', stockErr);
+
+  (stockRows || []).forEach(function(s) {
+    events.push({
+      type: 'stock',
+      icon: s.type === 'in' ? 'fa-arrow-up' : 'fa-arrow-down',
+      color: s.type === 'in' ? '#15803D' : '#B45309',
+      title: (s.type === 'in' ? 'Stock in' : 'Stock out') + ' — ' + s.products.name,
+      detail: (s.type === 'in' ? '+' : '−') + s.quantity + ' units' + (s.reason ? ' (' + s.reason + ')' : ''),
+      at: s.created_at
+    });
+  });
+
+  const { data: reviewRows, error: reviewErr } = await supabase
+    .from('reviews')
+    .select('rating, comment, created_at, is_anonymous, reviewer_name, products!inner(name, merchant_id)')
+    .eq('products.merchant_id', myMerchantId)
+    .order('created_at', { ascending: false })
+    .limit(50);
+  if (reviewErr) console.error('activity: reviews error', reviewErr);
+
+  (reviewRows || []).forEach(function(r) {
+    events.push({
+      type: 'review',
+      icon: 'fa-star',
+      color: '#F59E0B',
+      title: 'New ' + r.rating + '-star review — ' + r.products.name,
+      detail: (r.is_anonymous ? 'Anonymous Customer' : (r.reviewer_name || 'A customer')) + (r.comment ? ': "' + r.comment + '"' : ''),
+      at: r.created_at
+    });
+  });
+
+  events.sort(function(a, b) { return new Date(b.at) - new Date(a.at); });
+  return events.slice(0, 60);
 }
 
 function renderMerchantSalesView() {
@@ -2827,8 +3099,8 @@ function renderMerchantSalesView() {
     '<p style="margin:0;font-size:11px;color:#666;">Items Sold</p>' +
     '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#3B82F6;">' + s.totalItems + '</p></div>' +
     '<div style="flex:1;background:#FFFBEB;border-radius:10px;padding:14px;text-align:center;">' +
-    '<p style="margin:0;font-size:11px;color:#666;">Order Lines</p>' +
-    '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#F59E0B;">' + s.lineCount + '</p></div>' +
+    '<p style="margin:0;font-size:11px;color:#666;">Orders</p>' +
+    '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#F59E0B;">' + s.orderCount + '</p></div>' +
     '</div>';
 
   var topProductsHtml = s.topProducts.length
@@ -2839,23 +3111,27 @@ function renderMerchantSalesView() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No sales yet.</p>';
 
-  var recentOrdersHtml = s.recentOrders.length
-    ? s.recentOrders.map(function(r) {
-        return '<div style="padding:8px 4px;border-bottom:1px solid #f0f0f0;font-size:12.5px;">' +
-          '<div style="display:flex;justify-content:space-between;">' +
-          '<span>' + formatDate(r.orders.created_at) + '</span>' +
-          '<span style="color:#777;">' + r.orders.status + ' \u2022 ' + (r.orders.payment_method === 'cod' ? 'COD' : 'GCash') + '</span></div>' +
-          (r.orders.not_arrived_reported_at ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Order #' + r.orders.order_code + ': customer reports non-delivery</p>' : '') +
-          '</div>';
+  var activityHtml = (s.activity && s.activity.length)
+    ? s.activity.map(function(e) {
+        return '<div style="display:flex;gap:10px;padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:#F5F5F3;color:' + e.color + ';display:flex;align-items:center;justify-content:center;font-size:12px;"><i class="fas ' + e.icon + '"></i></div>' +
+          '<div style="flex:1;min-width:0;">' +
+          '<p style="margin:0;font-size:12.5px;font-weight:600;">' + e.title + '</p>' +
+          (e.detail ? '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + e.detail + '</p>' : '') +
+          '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(e.at) + ' \u2022 ' + timeAgo(e.at) + '</p>' +
+          '</div></div>';
       }).join('')
-    : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
+    : '<p style="color:#999;font-size:13px;">No activity yet. Sales, stock changes, and reviews will appear here.</p>';
 
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
     summaryCards +
     '<h3 style="margin:0 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
-    '<h3 style="margin:16px 0 8px;font-size:14px;">Recent Order Activity</h3>' + recentOrdersHtml;
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Store Activity Log</h3>' +
+    '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">Orders, stock movements, and reviews across all your products</p>' +
+    activityHtml;
 }
+
 
 function renderMerchantDashboard() {
   var body = document.getElementById('sn-merchant-body');
