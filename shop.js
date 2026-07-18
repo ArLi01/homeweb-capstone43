@@ -578,7 +578,7 @@ async function openMerchantStorefront(merchantId) {
     ? '<div class="store-product-grid">' + mapped.map(renderProductCardHtml).join('') + '</div>'
     : '<p style="color:#999;padding:1rem 0;text-align:center;">This store has no products listed yet.</p>';
 
-  var verifiedBadge = (totalReviews >= 5 && storeRatingAvg >= 4)
+  var verifiedBadge = (merchant.is_verified && totalReviews >= 5 && storeRatingAvg >= 4)
     ? '<span style="display:inline-block;background:#F0FFF4;color:var(--primary,#22C55E);font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin-top:8px;"><i class="fas fa-shield-check"></i> Trusted Seller</span>'
     : '';
 
