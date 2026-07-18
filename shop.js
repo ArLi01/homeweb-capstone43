@@ -1056,27 +1056,6 @@ function capitalize(str) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
-var MOCK_RIDER_NAMES = ['Jomar Santos', 'Kevin Reyes', 'Angelo Cruz', 'Mark Villanueva', 'Rico Fernandez', 'Paolo Ramos', 'Jayson Dela Peña', 'Nico Aquino'];
-var MOCK_RIDER_VEHICLES = ['Motorcycle', 'Motorcycle', 'Motorcycle', 'Tricycle'];
-
-function generateMockRider() {
-  var name = MOCK_RIDER_NAMES[Math.floor(Math.random() * MOCK_RIDER_NAMES.length)];
-  var vehicle = MOCK_RIDER_VEHICLES[Math.floor(Math.random() * MOCK_RIDER_VEHICLES.length)];
-  var plateLetters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26));
-  var plateNumbers = randomBetween(1000, 9999);
-  var phone = '09' + randomBetween(100000000, 999999999);
-  var eta = randomBetween(15, 30);
-  return {
-    name: name,
-    vehicle: vehicle,
-    plate: plateLetters + ' ' + plateNumbers,
-    phone: phone,
-    rating: null, // no real account behind a mock rider, so no genuine rating exists
-    ratingCount: 0,
-    eta: eta
-  };
-}
-
 // Place order — writes to Supabase (orders, order_items, order_status_history) //
 async function placeOrder() {
   if (!currentUser) {
@@ -1134,8 +1113,8 @@ async function placeOrder() {
   });
   updateNotifBadge();
 
-  // Rider search + realistic status progression begins here
-  // (advanceOrderStatus/assignRider chain the rest of the timeline)
+  // A real rider now needs to claim this order — see openRiderSearchModal()
+  // and acceptOrder() for how that happens.
 
   // Clear cart
   closeCheckout();
@@ -1152,6 +1131,7 @@ async function advanceOrderStatus(orderDbId, newStatus) {
 
   const { data: existing } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderDbId).single();
   if (!existing || existing.status === 'delivered') return;
+  if (existing.status === newStatus) return; // already in this status — don't log a duplicate
 
   await supabase.from('orders').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', orderDbId);
   await supabase.from('order_status_history').insert({
@@ -1172,13 +1152,6 @@ async function advanceOrderStatus(orderDbId, newStatus) {
   }
   var listEl = document.getElementById('sn-tracking-list');
   if (listEl && listEl.style.display !== 'none') renderOrderList();
-
-  // Chain the next automatic step, spaced out to feel realistic //
-  // Note: this stops at awaiting_confirmation, NOT delivered — the
-  // customer must separately confirm receipt to finalize the order.
-  if (newStatus === 'out_for_delivery') {
-    setTimeout(function() { advanceOrderStatus(orderDbId, 'awaiting_confirmation'); }, randomBetween(15000, 20000));
-  }
 }
 
 // Customer confirms they actually received the order — this is the
@@ -1329,8 +1302,11 @@ function showOrderSuccess(orderCode) {
 }
 
 // ============================================================
-// MOCK RIDER SEARCH
-// (Simulated — no real logistics/dispatch integration)
+// RIDER SEARCH
+// Real riders only — assignment happens exclusively through a rider
+// manually accepting via the alert popup or "Available Orders" list
+// (see acceptOrder()). This modal just waits and polls for that to
+// happen; it never assigns anyone itself.
 // ============================================================
 
 let riderSearchOrderId = null;
@@ -1347,12 +1323,9 @@ function openRiderSearchModal(orderId, orderCode) {
   document.getElementById('sn-riderModal').classList.add('active');
   document.body.style.overflow = 'hidden';
 
-  var searchDelay = randomBetween(30000, 60000);
-  setTimeout(function() { assignRider(orderId, orderCode); }, searchDelay);
-
-  // Poll for a rider claiming this order from a different session (e.g. a
-  // real rider accepting it from their own dashboard) — there's no live
-  // realtime connection here, so this is how we catch that update. //
+  // Poll for a rider claiming this order — from their own dashboard or the
+  // alert popup, on a different device/session. No live realtime
+  // connection here, so polling is how this screen catches that update. //
   if (riderPollIntervalId) clearInterval(riderPollIntervalId);
   riderPollIntervalId = setInterval(async function() {
     if (riderSearchStep !== 1 || riderSearchOrderId !== orderId) {
@@ -1382,71 +1355,6 @@ function closeRiderModal() {
   document.getElementById('sn-riderModal').classList.remove('active');
   document.body.style.overflow = '';
   if (riderPollIntervalId) { clearInterval(riderPollIntervalId); riderPollIntervalId = null; }
-}
-
-async function assignRider(orderId, orderCode) {
-  // Skip auto-assign entirely if a real rider already claimed this order,
-  // or if it's no longer sitting in 'placed' status for some other reason //
-  const { data: currentOrder } = await supabase.from('orders').select('rider_user_id, status').eq('id', orderId).single();
-  if (!currentOrder || currentOrder.rider_user_id || currentOrder.status !== 'placed') return;
-
-  // If real riders are online, give them a fair chance to claim it manually
-  // instead of racing them with a mock assignment. Keep deferring and
-  // re-checking until either a real rider claims it, or nobody's online. //
-  const { count: onlineRiders } = await supabase
-    .from('riders')
-    .select('user_id', { count: 'exact', head: true })
-    .eq('is_available', true);
-
-  if (onlineRiders && onlineRiders > 0) {
-    setTimeout(function() { assignRider(orderId, orderCode); }, randomBetween(20000, 30000));
-    return;
-  }
-
-  // No real riders online — fall back to the mock generator (demo purposes only) //
-  var rider = generateMockRider();
-
-  var updatePayload = {
-    status: 'preparing',
-    rider_name: rider.name,
-    rider_phone: rider.phone,
-    rider_vehicle: rider.vehicle,
-    rider_plate: rider.plate,
-    rider_rating: rider.rating,
-    updated_at: new Date().toISOString()
-  };
-  if (rider.isReal) updatePayload.rider_user_id = rider.user_id;
-
-  await supabase.from('orders').update(updatePayload).eq('id', orderId);
-
-  if (rider.isReal) {
-    await supabase.from('riders').update({ is_available: false }).eq('user_id', rider.user_id);
-  }
-
-  await supabase.from('order_status_history').insert({
-    order_id: orderId,
-    status: 'preparing',
-    label: 'Preparing Your Order',
-    description: rider.name + ' has been assigned to your order and is heading to the seller for pickup.'
-  });
-
-  updateNotifBadge();
-
-  var listEl = document.getElementById('sn-tracking-list');
-  if (listEl && listEl.style.display !== 'none') renderOrderList();
-  if (currentTrackingOrder && currentTrackingOrder.id === orderId) openTrackingDetail(orderId);
-
-  // Only pop the "rider found" screen if the user still has this order's modal open //
-  if (riderSearchOrderId === orderId) {
-    riderSearchStep = 2;
-    renderRiderStep(orderCode, rider);
-  } else {
-    showToast(rider.name + ' has been assigned to Order #' + orderCode + '! \uD83D\uDEF5');
-  }
-
-  // Continue the realistic timeline: out for delivery in another 15-20s //
-  // (a real assigned rider can also do this manually from their dashboard)
-  setTimeout(function() { advanceOrderStatus(orderId, 'out_for_delivery'); }, randomBetween(15000, 20000));
 }
 
 function renderRiderStep(orderCode, rider) {
