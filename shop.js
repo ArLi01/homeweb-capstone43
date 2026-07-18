@@ -40,7 +40,7 @@ function openDaysLabel(merchant) {
 async function loadProducts() {
   const { data, error } = await supabase
     .from('products')
-    .select('*, merchants(id, store_name, merchant_type, open_days)')
+    .select('*, merchants(id, store_name, merchant_type, open_days, is_verified)')
     .eq('is_active', true)
     .order('created_at', { ascending: false });
 
@@ -73,7 +73,8 @@ async function loadProducts() {
       category: p.category,
       image_url: p.image_url,
       stock_qty: p.stock_qty,
-      merchant_id: p.merchant_id
+      merchant_id: p.merchant_id,
+      merchantVerified: !!(p.merchants && p.merchants.is_verified)
     };
   });
 }
@@ -407,7 +408,9 @@ function openProductModal(id) {
   const disc = m.querySelector('.pm-discount');
   disc.textContent = p.discount ? '-' + p.discount + '%' : '';
   disc.style.display = p.discount ? 'inline' : 'none';
-  m.querySelector('.pm-location').innerHTML = '<i class="fas fa-store"></i> Sold by <span onclick="closeProductModal(); openMerchantStorefront(\'' + p.merchant_id + '\')" style="text-decoration:underline;cursor:pointer;color:var(--primary,#22C55E);font-weight:600;">' + p.location + '</span> <i class="fas fa-chevron-right" style="font-size:10px;color:#999;"></i>';
+  m.querySelector('.pm-location').innerHTML = '<i class="fas fa-store"></i> Sold by <span onclick="closeProductModal(); openMerchantStorefront(\'' + p.merchant_id + '\')" style="text-decoration:underline;cursor:pointer;color:var(--primary,#22C55E);font-weight:600;">' + p.location + '</span>' +
+    (p.merchantVerified ? ' <i class="fas fa-badge-check" title="Verified Seller" style="color:var(--primary,#22C55E);"></i>' : '') +
+    ' <i class="fas fa-chevron-right" style="font-size:10px;color:#999;"></i>';
   m.querySelector('.pm-qty-val').textContent = 1;
 
   var pmStock = m.querySelector('.pm-stock');
@@ -596,7 +599,9 @@ async function openMerchantStorefront(merchantId) {
   body.innerHTML =
     '<div style="text-align:center;margin:-8px -4px 20px;padding:28px 20px 22px;background:linear-gradient(135deg, var(--primary,#22C55E), #16A34A);border-radius:16px 16px 0 0;color:#fff;">' +
     '<div style="width:72px;height:72px;border-radius:50%;background:rgba(255,255,255,0.15);border:3px solid rgba(255,255,255,0.4);color:#fff;font-size:28px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;"><i class="fas fa-store"></i></div>' +
-    '<h2 style="margin:0;color:#fff;">' + merchant.store_name + '</h2>' +
+    '<h2 style="margin:0;color:#fff;">' + merchant.store_name +
+    (merchant.is_verified ? ' <i class="fas fa-badge-check" title="Verified Seller" style="color:#93F6D2;"></i>' : '') +
+    '</h2>' +
     '<p style="color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:13px;">' + (CATEGORY_META[merchant.business_type] ? CATEGORY_META[merchant.business_type].title : merchant.business_type) + '</p>' +
     (merchant.store_description ? '<p style="color:rgba(255,255,255,0.9);margin:10px auto 0;font-size:13px;max-width:420px;">' + merchant.store_description + '</p>' : '') +
     '<div style="margin-top:10px;color:#FEF3C7;font-size:13px;font-weight:600;">' +
@@ -604,6 +609,9 @@ async function openMerchantStorefront(merchantId) {
     '</div>' +
     verifiedBadge +
     scheduleBadge +
+    (merchant.business_permit_url
+      ? '<a href="' + merchant.business_permit_url + '" target="_blank" style="display:inline-block;margin-top:10px;color:#fff;font-size:11.5px;text-decoration:underline;"><i class="fas fa-file-shield"></i> View Business Permit</a>'
+      : '') +
     '</div>' +
     '<div style="padding:0 4px;">' +
     '<h3 style="margin:0 0 14px;font-size:14.5px;display:flex;align-items:center;gap:8px;"><i class="fas fa-shopping-basket" style="color:var(--primary,#22C55E);"></i> ' + mapped.length + ' Product' + (mapped.length === 1 ? '' : 's') + ' Available</h3>' +
@@ -1176,6 +1184,25 @@ async function advanceOrderStatus(orderDbId, newStatus) {
 // ONLY way an order becomes fully 'delivered' and unlocks reviews.
 // Independent from the rider's "Mark Delivered" action on purpose,
 // so a rider can't unilaterally close out an order they never delivered.
+// Customer fetches a short-lived signed URL for their assigned rider's
+// license — RLS on storage only allows this if this rider is actually
+// assigned to one of this customer's orders, so access is enforced
+// server-side, not just hidden in the UI. //
+async function viewRiderLicenseForOrder(orderId) {
+  const { data: order, error: orderErr } = await supabase.from('orders').select('rider_license_path').eq('id', orderId).single();
+  if (orderErr || !order || !order.rider_license_path) {
+    showToast('No ID on file for this rider', 'info');
+    return;
+  }
+
+  const { data, error } = await supabase.storage.from('rider-docs').createSignedUrl(order.rider_license_path, 300);
+  if (error || !data) {
+    showToast('Could not open rider ID: ' + (error ? error.message : 'unknown error'), 'error');
+    return;
+  }
+  window.open(data.signedUrl, '_blank');
+}
+
 async function confirmDelivery(orderDbId) {
   const { data: existing } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderDbId).single();
   if (!existing || existing.status !== 'awaiting_confirmation') {
@@ -1333,7 +1360,7 @@ function openRiderSearchModal(orderId, orderCode) {
     }
     const { data: order } = await supabase
       .from('orders')
-      .select('rider_name, rider_phone, rider_vehicle, rider_plate, rider_rating')
+      .select('rider_name, rider_phone, rider_vehicle, rider_plate, rider_rating, rider_license_path')
       .eq('id', orderId)
       .single();
 
@@ -1342,7 +1369,8 @@ function openRiderSearchModal(orderId, orderCode) {
       riderSearchStep = 2;
       renderRiderStep(orderCode, {
         name: order.rider_name, phone: order.rider_phone, vehicle: order.rider_vehicle,
-        plate: order.rider_plate, rating: order.rider_rating, eta: randomBetween(15, 30)
+        plate: order.rider_plate, rating: order.rider_rating, eta: randomBetween(15, 30),
+        licensePath: order.rider_license_path
       });
     }
   }, 4000);
@@ -1454,7 +1482,10 @@ function renderRiderStep(orderCode, rider) {
       '<div class="track-summary-row"><span>Rider Phone</span><span>' + rider.phone + '</span></div>' +
       '<div class="track-summary-row"><span>Estimated Arrival</span><span>' + rider.eta + ' mins</span></div>' +
       '</div>' +
-      '<button class="co-btn co-btn--next" style="width:100%;margin-top:16px;" onclick="closeRiderModal(); viewOrderNow(\'' + riderSearchOrderId + '\');">Track This Order</button>' +
+      (rider.licensePath
+        ? '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:12px;padding:8px;" onclick="viewRiderLicenseForOrder(\'' + riderSearchOrderId + '\')"><i class="fas fa-id-card"></i> View Rider\'s ID for Safety Verification</button>'
+        : '') +
+      '<button class="co-btn co-btn--next" style="width:100%;margin-top:10px;" onclick="closeRiderModal(); viewOrderNow(\'' + riderSearchOrderId + '\');">Track This Order</button>' +
       '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal()">Continue Shopping</button>';
   }
 }
@@ -1734,7 +1765,11 @@ function renderTrackingDetail(order) {
       '<p style="margin:0;font-weight:600;">' + order.rider_name + '</p>' +
       '<p style="margin:2px 0;color:#777;font-size:13px;">' + order.rider_vehicle + ' \u2022 ' + order.rider_plate + ' \u2022 ' + (order.rider_rating ? '<i class="fas fa-star" style="color:#F59E0B;"></i> ' + order.rider_rating : 'New rider') + '</p>' +
       '<p style="margin:0;color:#777;font-size:13px;">' + order.rider_phone + '</p>' +
-      '</div></div></div>'
+      '</div></div>' +
+      (order.rider_license_path
+        ? '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;padding:8px;" onclick="viewRiderLicenseForOrder(\'' + order.id + '\')"><i class="fas fa-id-card"></i> View Rider\'s ID for Safety Verification</button>'
+        : '') +
+      '</div>'
     ) : '') +
 
     // Summary + Address
@@ -1893,6 +1928,218 @@ async function submitLogin() {
 }
 
 // Logout //
+// ============================================================
+// ADMIN (hidden — reached only via #admin in the URL)
+// ============================================================
+
+var ADMIN_EMAIL = 'admin@homeweb.internal';
+
+function openAdminLoginModal() {
+  var body = document.getElementById('sn-admin-login-body');
+  body.innerHTML =
+    '<div class="login-icon"><i class="fas fa-user-shield"></i></div>' +
+    '<h2>Admin Access</h2>' +
+    '<p class="login-sub">Restricted area</p>' +
+    '<div class="co-field"><label>Username</label>' +
+    '<input type="text" id="admin-username" autocomplete="off"/></div>' +
+    '<div class="co-field"><label>Password</label>' +
+    '<input type="password" id="admin-password"/></div>' +
+    '<button class="co-btn co-btn--next login-submit" id="admin-login-btn" onclick="submitAdminLogin()">Log In</button>';
+
+  document.getElementById('admin-password').addEventListener('keydown', function(e) { if (e.key === 'Enter') submitAdminLogin(); });
+
+  document.getElementById('sn-adminLoginOverlay').classList.add('active');
+  document.getElementById('sn-adminLoginModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeAdminLoginModal() {
+  document.getElementById('sn-adminLoginOverlay').classList.remove('active');
+  document.getElementById('sn-adminLoginModal').classList.remove('active');
+  document.body.style.overflow = '';
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+}
+
+async function submitAdminLogin() {
+  var username = document.getElementById('admin-username').value.trim().toLowerCase();
+  var password = document.getElementById('admin-password').value;
+  var btn = document.getElementById('admin-login-btn');
+
+  if (username !== 'admin') {
+    showToast('Invalid credentials', 'error');
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Logging in...'; }
+  const { data, error } = await supabase.auth.signInWithPassword({ email: ADMIN_EMAIL, password: password });
+  if (btn) { btn.disabled = false; btn.textContent = 'Log In'; }
+
+  if (error) {
+    showToast('Invalid credentials', 'error');
+    return;
+  }
+
+  currentUser = data.user;
+  await fetchUserRoles();
+
+  if (userRoles.indexOf('admin') === -1) {
+    showToast('This account is not authorized as admin', 'error');
+    await supabase.auth.signOut();
+    currentUser = null;
+    return;
+  }
+
+  closeAdminLoginModal();
+  updateAuthUI();
+  openAdminDashboard();
+}
+
+let adminView = 'overview'; // 'overview' | 'merchants' | 'riders'
+
+async function openAdminDashboard() {
+  document.getElementById('sn-adminOverlay').classList.add('active');
+  document.getElementById('sn-adminModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+  adminView = 'overview';
+  renderAdminDashboard();
+}
+
+function closeAdminDashboard() {
+  document.getElementById('sn-adminOverlay').classList.remove('active');
+  document.getElementById('sn-adminModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function adminTabsHtml() {
+  function tab(id, label) {
+    var active = adminView === id;
+    return '<button class="co-btn" style="flex:1;background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#333') + ';" onclick="switchAdminView(\'' + id + '\')">' + label + '</button>';
+  }
+  return '<div style="display:flex;gap:8px;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + '</div>';
+}
+
+function switchAdminView(view) {
+  adminView = view;
+  renderAdminDashboard();
+}
+
+async function renderAdminDashboard() {
+  var body = document.getElementById('sn-admin-body');
+  body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() + '<div class="track-empty"><p>Loading...</p></div>';
+
+  if (adminView === 'overview') return renderAdminOverview();
+  if (adminView === 'merchants') return renderAdminMerchants();
+  if (adminView === 'riders') return renderAdminRiders();
+}
+
+async function renderAdminOverview() {
+  var body = document.getElementById('sn-admin-body');
+
+  const [{ count: merchantCount }, { count: riderCount }, { count: customerCount }, { count: orderCount }, { count: productCount }, { count: pendingPermits }] = await Promise.all([
+    supabase.from('merchants').select('id', { count: 'exact', head: true }),
+    supabase.from('riders').select('id', { count: 'exact', head: true }),
+    supabase.from('user_roles').select('id', { count: 'exact', head: true }).eq('role', 'customer'),
+    supabase.from('orders').select('id', { count: 'exact', head: true }),
+    supabase.from('products').select('id', { count: 'exact', head: true }),
+    supabase.from('merchants').select('id', { count: 'exact', head: true }).not('business_permit_url', 'is', null).eq('is_verified', false)
+  ]);
+
+  function card(label, value, color) {
+    return '<div style="flex:1;min-width:110px;background:#F9FAFB;border-radius:10px;padding:14px;text-align:center;">' +
+      '<p style="margin:0;font-size:11px;color:#666;">' + label + '</p>' +
+      '<p style="margin:4px 0 0;font-weight:700;font-size:18px;color:' + color + ';">' + value + '</p></div>';
+  }
+
+  var body2 =
+    '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
+    '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">' +
+    card('Merchants', merchantCount || 0, '#15803D') +
+    card('Riders', riderCount || 0, '#3B82F6') +
+    card('Customers', customerCount || 0, '#854F0B') +
+    card('Products', productCount || 0, '#0F6E56') +
+    card('Orders', orderCount || 0, '#B45309') +
+    '</div>' +
+    (pendingPermits > 0
+      ? '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-bottom:10px;">' +
+        '<p style="margin:0;font-weight:700;color:#B45309;font-size:13px;"><i class="fas fa-clock"></i> ' + pendingPermits + ' business permit(s) awaiting review</p>' +
+        '<button class="co-btn" style="background:#fff;color:#B45309;margin-top:8px;padding:6px 12px;" onclick="switchAdminView(\'merchants\')">Review Now</button>' +
+        '</div>'
+      : '<p style="color:#999;font-size:13px;">No pending permit reviews.</p>');
+
+  body.innerHTML = body2;
+}
+
+async function renderAdminMerchants() {
+  var body = document.getElementById('sn-admin-body');
+  const { data: merchants, error } = await supabase.from('merchants').select('*').order('created_at', { ascending: false });
+
+  var rows = (error || !merchants || !merchants.length)
+    ? '<p style="color:#999;font-size:13px;">No merchants yet.</p>'
+    : merchants.map(function(m) {
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+          '<span style="font-weight:700;font-size:13px;">' + m.store_name + (m.is_verified ? ' <i class="fas fa-badge-check" style="color:var(--primary,#22C55E);"></i>' : '') + '</span>' +
+          '<span style="font-size:11px;color:#999;">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
+          '</div>' +
+          '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + (CATEGORY_META[m.business_type] ? CATEGORY_META[m.business_type].title : m.business_type) + '</p>' +
+          '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">' +
+          (m.business_permit_url
+            ? '<a href="' + m.business_permit_url + '" target="_blank" class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;text-decoration:none;font-size:12px;">View Permit</a>'
+            : '<span style="font-size:11.5px;color:#aaa;padding:6px 0;">No permit uploaded</span>') +
+          (m.business_permit_url
+            ? (m.is_verified
+                ? '<button class="co-btn" style="padding:6px 12px;background:#FEE2E2;color:#DC2626;font-size:12px;" onclick="adminSetMerchantVerified(\'' + m.id + '\', false)">Revoke Verification</button>'
+                : '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminSetMerchantVerified(\'' + m.id + '\', true)">Approve & Verify</button>')
+            : '') +
+          '</div></div>';
+      }).join('');
+
+  body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
+    '<h3 style="margin:0 0 8px;font-size:14px;">All Merchants (' + (merchants ? merchants.length : 0) + ')</h3>' + rows;
+}
+
+async function adminSetMerchantVerified(merchantId, verified) {
+  const { error } = await supabase.from('merchants').update({ is_verified: verified }).eq('id', merchantId);
+  if (error) { showToast('Could not update: ' + error.message, 'error'); return; }
+  showToast(verified ? 'Merchant verified \u2705' : 'Verification revoked', 'info');
+  renderAdminMerchants();
+}
+
+async function renderAdminRiders() {
+  var body = document.getElementById('sn-admin-body');
+  const { data: riders, error } = await supabase.from('riders').select('*').order('created_at', { ascending: false });
+
+  var rows = (error || !riders || !riders.length)
+    ? '<p style="color:#999;font-size:13px;">No riders yet.</p>'
+    : riders.map(function(r) {
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+          '<span style="font-weight:700;font-size:13px;">' + capitalize(r.vehicle_type) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</span>' +
+          '<span style="font-size:11px;color:' + (r.is_available ? '#15803D' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</span>' +
+          '</div>' +
+          '<p style="margin:4px 0 0;font-size:12px;color:#777;">' +
+          (r.rating_count > 0 ? r.rating_avg + ' \u2605 (' + r.rating_count + ')' : 'No ratings yet') +
+          (r.rejection_penalty > 0 ? ' \u2022 <span style="color:#DC2626;">-' + r.rejection_penalty.toFixed(1) + ' penalty</span>' : '') +
+          '</p>' +
+          (r.license_path
+            ? '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;margin-top:8px;" onclick="adminViewRiderLicense(\'' + r.user_id + '\')">View License</button>'
+            : '<span style="font-size:11.5px;color:#aaa;">No license uploaded</span>') +
+          '</div>';
+      }).join('');
+
+  body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
+    '<h3 style="margin:0 0 8px;font-size:14px;">All Riders (' + (riders ? riders.length : 0) + ')</h3>' + rows;
+}
+
+async function adminViewRiderLicense(riderUserId) {
+  const { data: riderRow } = await supabase.from('riders').select('license_path').eq('user_id', riderUserId).single();
+  if (!riderRow || !riderRow.license_path) { showToast('No license on file', 'info'); return; }
+
+  const { data, error } = await supabase.storage.from('rider-docs').createSignedUrl(riderRow.license_path, 300);
+  if (error || !data) { showToast('Could not open license: ' + (error ? error.message : 'unknown error'), 'error'); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
 async function logout() {
   await supabase.auth.signOut();
   currentUser = null;
@@ -2457,6 +2704,20 @@ function injectModals() {
     '<div id="sn-store-body" style="padding:8px 4px;"></div>' +
     '</div>' +
 
+    // Admin login overlay + modal (only ever opened via #admin URL hash)
+    '<div id="sn-adminLoginOverlay" class="sn-overlay" onclick="closeAdminLoginModal()"></div>' +
+    '<div id="sn-adminLoginModal" class="sn-login-modal">' +
+    '<button class="pm-close" onclick="closeAdminLoginModal()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body" id="sn-admin-login-body"></div>' +
+    '</div>' +
+
+    // Admin dashboard overlay + modal
+    '<div id="sn-adminOverlay" class="sn-overlay" onclick="closeAdminDashboard()"></div>' +
+    '<div id="sn-adminModal" class="sn-tracking-modal">' +
+    '<button class="pm-close" onclick="closeAdminDashboard()"><i class="fas fa-times"></i></button>' +
+    '<div id="sn-admin-body" style="padding:8px 4px;"></div>' +
+    '</div>' +
+
     // Notifications overlay + modal
     '<div id="sn-notifOverlay" class="sn-overlay" onclick="closeNotificationsModal()"></div>' +
     '<div id="sn-notifModal" class="sn-tracking-modal">' +
@@ -2965,7 +3226,7 @@ async function loadMyMerchantProducts() {
 async function fetchMerchantSales() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, products!inner(name, merchant_id), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at)')
+    .select('qty, price, product_id, product_name, products!inner(name, merchant_id), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at, user_id)')
     .eq('products.merchant_id', myMerchantId);
 
   console.log('fetchMerchantSales:', { merchantId: myMerchantId, rows: data, error: error });
@@ -2979,6 +3240,7 @@ async function fetchMerchantSales() {
   var totalRevenue = 0, totalItems = 0;
   var byProduct = {};
   var orderIdSet = {};
+  var byOrder = {};
 
   rows.forEach(function(r) {
     var lineTotal = r.price * r.qty;
@@ -2990,11 +3252,35 @@ async function fetchMerchantSales() {
     byProduct[pname].qty += r.qty;
     byProduct[pname].revenue += lineTotal;
 
-    if (r.orders) orderIdSet[r.orders.id] = r.orders.order_code;
+    if (r.orders) {
+      orderIdSet[r.orders.id] = r.orders.order_code;
+      if (!byOrder[r.orders.id]) {
+        byOrder[r.orders.id] = {
+          orderId: r.orders.id, orderCode: r.orders.order_code, status: r.orders.status,
+          createdAt: r.orders.created_at, paymentMethod: r.orders.payment_method,
+          notArrived: r.orders.not_arrived_reported_at, customerId: r.orders.user_id,
+          items: [], total: 0
+        };
+      }
+      byOrder[r.orders.id].items.push({ name: r.product_name || pname, qty: r.qty, price: r.price });
+      byOrder[r.orders.id].total += lineTotal;
+    }
   });
 
   var topProducts = Object.values(byProduct).sort(function(a, b) { return b.revenue - a.revenue; }).slice(0, 5);
   var orderIds = Object.keys(orderIdSet);
+
+  var recentOrders = Object.values(byOrder).sort(function(a, b) { return new Date(b.createdAt) - new Date(a.createdAt); }).slice(0, 15);
+
+  // Attach customer names — profiles isn't directly joinable from orders via
+  // PostgREST (sibling FKs to auth.users), so fetch them separately. //
+  var customerIds = Array.from(new Set(recentOrders.map(function(o) { return o.customerId; }).filter(Boolean)));
+  if (customerIds.length) {
+    const { data: custProfiles } = await supabase.from('profiles').select('id, full_name').in('id', customerIds);
+    var nameById = {};
+    (custProfiles || []).forEach(function(p) { nameById[p.id] = p.full_name; });
+    recentOrders.forEach(function(o) { o.customerName = nameById[o.customerId] || 'Customer'; });
+  }
 
   var activity = await fetchMerchantActivity(orderIds, orderIdSet);
 
@@ -3003,6 +3289,7 @@ async function fetchMerchantSales() {
     totalItems: totalItems,
     orderCount: orderIds.length,
     topProducts: topProducts,
+    recentOrders: recentOrders,
     activity: activity
   };
   return myMerchantSales;
@@ -3012,27 +3299,6 @@ async function fetchMerchantSales() {
 // merchant's store: order status changes, stock in/out, and new reviews. //
 async function fetchMerchantActivity(orderIds, orderCodeMap) {
   var events = [];
-
-  if (orderIds.length) {
-    const { data: statusRows, error: statusErr } = await supabase
-      .from('order_status_history')
-      .select('order_id, status, label, description, created_at')
-      .in('order_id', orderIds)
-      .order('created_at', { ascending: false })
-      .limit(100);
-    if (statusErr) console.error('activity: order_status_history error', statusErr);
-
-    (statusRows || []).forEach(function(s) {
-      events.push({
-        type: 'order',
-        icon: NOTIF_ICON_MAP[s.status] || 'fa-receipt',
-        color: '#854F0B',
-        title: 'Order #' + (orderCodeMap[s.order_id] || '') + ' — ' + s.label,
-        detail: s.description,
-        at: s.created_at
-      });
-    });
-  }
 
   const { data: stockRows, error: stockErr } = await supabase
     .from('stock_movements')
@@ -3111,6 +3377,23 @@ function renderMerchantSalesView() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No sales yet.</p>';
 
+  var recentOrdersHtml = (s.recentOrders && s.recentOrders.length)
+    ? s.recentOrders.map(function(o) {
+        var itemsList = o.items.map(function(it) { return it.name + ' \u00d7' + it.qty + ' (' + fmt(it.price) + ' ea)'; }).join('<br/>');
+        var statusInfo = getOrderStatusInfo(o.status);
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+          '<span style="font-weight:700;font-size:13px;">Order #' + o.orderCode + '</span>' +
+          '<span style="font-size:11.5px;color:#777;">' + statusInfo.label + ' \u2022 ' + (o.paymentMethod === 'cod' ? 'COD' : 'GCash') + '</span>' +
+          '</div>' +
+          '<p style="margin:4px 0 0;font-size:12px;color:#555;"><i class="fas fa-user"></i> ' + (o.customerName || 'Customer') + ' \u2022 ' + formatDate(o.createdAt) + '</p>' +
+          '<p style="margin:6px 0 0;font-size:12px;color:#555;line-height:1.6;">' + itemsList + '</p>' +
+          '<p style="margin:6px 0 0;font-size:12.5px;font-weight:700;color:var(--primary,#22C55E);">Total: ' + fmt(o.total) + '</p>' +
+          (o.notArrived ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reports non-delivery</p>' : '') +
+          '</div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
+
   var activityHtml = (s.activity && s.activity.length)
     ? s.activity.map(function(e) {
         return '<div style="display:flex;gap:10px;padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
@@ -3127,8 +3410,9 @@ function renderMerchantSalesView() {
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
     summaryCards +
     '<h3 style="margin:0 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
-    '<h3 style="margin:18px 0 8px;font-size:14px;">Store Activity Log</h3>' +
-    '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">Orders, stock movements, and reviews across all your products</p>' +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Recent Orders</h3>' + recentOrdersHtml +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Other Store Activity</h3>' +
+    '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">Stock changes and new reviews</p>' +
     activityHtml;
 }
 
@@ -3139,6 +3423,7 @@ function renderMerchantDashboard() {
   var tabs = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
     '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'products' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'products' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'products\')">Products</button>' +
     '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'sales' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'sales' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'verify' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'verify' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
   if (merchantDashboardView === 'sales') {
@@ -3147,11 +3432,80 @@ function renderMerchantDashboard() {
     return;
   }
 
+  if (merchantDashboardView === 'verify') {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading...</p></div>';
+    renderMerchantVerificationView(tabs);
+    return;
+  }
+
   renderMerchantProductsView(tabs);
 }
 
 async function switchMerchantView(view) {
   merchantDashboardView = view;
+  renderMerchantDashboard();
+}
+
+async function renderMerchantVerificationView(tabs) {
+  var body = document.getElementById('sn-merchant-body');
+
+  const { data: merchant, error } = await supabase.from('merchants').select('*').eq('id', myMerchantId).single();
+  if (error || !merchant) {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Could not load verification status.</p></div>';
+    return;
+  }
+
+  var statusBanner = merchant.is_verified
+    ? '<div style="background:#F0FFF4;border-radius:10px;padding:14px;margin-bottom:16px;">' +
+      '<p style="margin:0;font-weight:700;color:var(--primary,#22C55E);font-size:13.5px;"><i class="fas fa-badge-check"></i> Verified Seller</p>' +
+      '<p style="margin:6px 0 0;font-size:12.5px;color:#555;">Your business permit has been reviewed and approved. A verified badge now shows next to your store name.</p>' +
+      '</div>'
+    : (merchant.business_permit_url
+        ? '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-bottom:16px;">' +
+          '<p style="margin:0;font-weight:700;color:#B45309;font-size:13.5px;"><i class="fas fa-clock"></i> Pending Verification</p>' +
+          '<p style="margin:6px 0 0;font-size:12.5px;color:#555;">Your permit was submitted and is awaiting admin review.</p>' +
+          '</div>'
+        : '<div style="background:#F3F4F6;border-radius:10px;padding:14px;margin-bottom:16px;">' +
+          '<p style="margin:0;font-weight:700;color:#555;font-size:13.5px;"><i class="fas fa-circle-info"></i> Not Verified</p>' +
+          '<p style="margin:6px 0 0;font-size:12.5px;color:#666;">Upload your business permit below to apply for a verified badge. Customers will be able to view it on your store page.</p>' +
+          '</div>');
+
+  var permitPreview = merchant.business_permit_url
+    ? '<a href="' + merchant.business_permit_url + '" target="_blank" style="display:block;margin-bottom:12px;">' +
+      '<img src="' + merchant.business_permit_url + '" style="max-width:100%;border-radius:8px;border:1px solid #eee;"/></a>'
+    : '';
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+    '<h3 style="margin:16px 0 10px;font-size:14px;">Business Permit Verification</h3>' +
+    statusBanner +
+    permitPreview +
+    '<button type="button" class="co-btn" style="background:#F3F4F6;color:#333;width:100%;" onclick="document.getElementById(\'permit-file-input\').click()">' +
+    '<i class="fas fa-upload"></i> ' + (merchant.business_permit_url ? 'Replace Permit Photo' : 'Upload Business Permit') + '</button>' +
+    '<input type="file" id="permit-file-input" accept="image/*,application/pdf" style="display:none;" onchange="uploadBusinessPermit(this.files[0])"/>' +
+    '<p style="margin:10px 0 0;font-size:11.5px;color:#999;">Accepted: photo or scan of your DTI/BIR/Barangay business permit. Visible to customers and reviewed by HomeWeb admins.</p>';
+}
+
+async function uploadBusinessPermit(file) {
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) { showToast('File must be under 8MB', 'error'); return; }
+
+  showToast('Uploading permit...', 'info');
+  var ext = file.name.split('.').pop();
+  var path = 'permits/' + myMerchantId + '/' + Date.now() + '.' + ext;
+
+  const { error: uploadErr } = await supabase.storage.from('uploads').upload(path, file, { upsert: true });
+  if (uploadErr) { showToast('Could not upload permit: ' + uploadErr.message, 'error'); return; }
+
+  const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(path);
+
+  // Uploading a new permit resets verification — an admin needs to review the new document //
+  const { error: updateErr } = await supabase.from('merchants')
+    .update({ business_permit_url: urlData.publicUrl, is_verified: false })
+    .eq('id', myMerchantId);
+  if (updateErr) { showToast('Could not save permit: ' + updateErr.message, 'error'); return; }
+
+  showToast('Permit uploaded \u2705 Awaiting admin review');
   renderMerchantDashboard();
 }
 
@@ -3596,6 +3950,7 @@ async function acceptOrder(orderId) {
         rider_vehicle: myRiderProfile ? capitalize(myRiderProfile.vehicle_type) : 'Motorcycle',
         rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
         rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)).toFixed(1) : null,
+        rider_license_path: myRiderProfile ? (myRiderProfile.license_path || null) : null,
         updated_at: new Date().toISOString()
       })
       .eq('id', orderId)
@@ -3642,6 +3997,35 @@ async function acceptOrder(orderId) {
   }
 }
 
+async function uploadRiderLicense(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { showToast('Please upload a photo of your license', 'error'); return; }
+  if (file.size > 6 * 1024 * 1024) { showToast('Image must be under 6MB', 'error'); return; }
+
+  showToast('Uploading license...', 'info');
+  var ext = file.name.split('.').pop();
+  // Path must start with the rider's own auth uid — this is what the
+  // storage RLS policies check to control who can access it later. //
+  var path = currentUser.id + '/license-' + Date.now() + '.' + ext;
+
+  const { error: uploadErr } = await supabase.storage.from('rider-docs').upload(path, file, { upsert: true });
+  if (uploadErr) { showToast('Could not upload license: ' + uploadErr.message, 'error'); return; }
+
+  const { error: updateErr } = await supabase.from('riders').update({ license_path: path }).eq('user_id', currentUser.id);
+  if (updateErr) { showToast('Could not save license: ' + updateErr.message, 'error'); return; }
+
+  if (myRiderProfile) myRiderProfile.license_path = path;
+  showToast('License uploaded \u2705 (private — only you, admins, and matched customers can view it)');
+  renderRiderDashboard();
+}
+
+async function viewMyLicense() {
+  if (!myRiderProfile || !myRiderProfile.license_path) return;
+  const { data, error } = await supabase.storage.from('rider-docs').createSignedUrl(myRiderProfile.license_path, 300);
+  if (error || !data) { showToast('Could not open license: ' + (error ? error.message : 'unknown error'), 'error'); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
 async function toggleMyAvailability(newState) {
   const { error } = await supabase.from('riders').update({ is_available: newState }).eq('user_id', currentUser.id);
   if (error) { showToast('Could not update availability: ' + error.message, 'error'); return; }
@@ -3654,6 +4038,20 @@ async function toggleMyAvailability(newState) {
 function renderRiderDashboard() {
   var body = document.getElementById('sn-rider-dash-body');
   var available = myRiderProfile ? myRiderProfile.is_available : false;
+
+  var licenseHtml = myRiderProfile && myRiderProfile.license_path
+    ? '<div style="display:flex;align-items:center;justify-content:space-between;background:#F0FFF4;border-radius:10px;padding:12px 16px;margin-bottom:12px;">' +
+      '<span style="font-weight:600;font-size:13px;color:#15803D;"><i class="fas fa-id-card"></i> License on file (private)</span>' +
+      '<div style="display:flex;gap:6px;">' +
+      '<button class="co-btn" style="padding:6px 12px;background:#fff;color:#333;" onclick="viewMyLicense()">View</button>' +
+      '<button class="co-btn" style="padding:6px 12px;background:#fff;color:#333;" onclick="document.getElementById(\'license-file-input\').click()">Replace</button>' +
+      '</div></div>'
+    : '<div style="background:#FFFBEB;border-radius:10px;padding:12px 16px;margin-bottom:12px;">' +
+      '<p style="margin:0 0 8px;font-weight:600;font-size:13px;color:#B45309;"><i class="fas fa-triangle-exclamation"></i> Driver\'s license required</p>' +
+      '<p style="margin:0 0 8px;font-size:11.5px;color:#666;">Only visible to you, HomeWeb admins, and customers whose delivery you accept — for their safety verification.</p>' +
+      '<button class="co-btn co-btn--next" style="width:100%;" onclick="document.getElementById(\'license-file-input\').click()">Upload License</button>' +
+      '</div>';
+  licenseHtml += '<input type="file" id="license-file-input" accept="image/*" style="display:none;" onchange="uploadRiderLicense(this.files[0])"/>';
 
   var toggleHtml = '<div style="display:flex;align-items:center;justify-content:space-between;background:#F9FAFB;border-radius:10px;padding:12px 16px;margin-bottom:18px;">' +
     '<span style="font-weight:600;font-size:13.5px;">' + (available ? 'Available for deliveries' : 'Offline') + '</span>' +
@@ -3706,6 +4104,7 @@ function renderRiderDashboard() {
       : ' \u2022 New rider, no ratings yet') +
     (myRiderProfile && myRiderProfile.rejection_penalty > 0 ? ' \u2022 <span style="color:#DC2626;">' + myRiderProfile.rejection_penalty.toFixed(1) + ' rejection penalty</span>' : '') +
     '</p>' +
+    licenseHtml +
     toggleHtml +
     (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="loadAvailableOrders().then(renderRiderDashboard)"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Active Deliveries</h3>' +
@@ -3740,6 +4139,8 @@ document.addEventListener('DOMContentLoaded', async function() {
   updateCartBadge();
   initSearch();
   restoreSession();
+
+  if (window.location.hash === '#admin') openAdminLoginModal();
 
   await loadProducts();
   renderHomeProducts();
