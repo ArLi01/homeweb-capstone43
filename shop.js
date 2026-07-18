@@ -184,6 +184,7 @@ let currentProduct = null;
 let checkoutStep = 1;         
 let currentUser = null;      
 let userRoles = [];
+let currentNotifList = [];
 let activeRole = 'customer';
 let currentTrackingOrder = null; 
 let shippingInfo = {
@@ -2485,6 +2486,7 @@ function switchActiveRole(role) {
   activeRole = role;
   localStorage.setItem(activeRoleKey(), role);
   showToast('Switched to ' + ROLE_LABELS[role] + ' account \uD83D\uDD04');
+  updateNotifBadge();
   if (document.getElementById('sn-profileModal').classList.contains('active')) {
     openProfileModal();
   }
@@ -2751,7 +2753,7 @@ var NOTIF_ICON_MAP = {
 var CONFIRMATION_GRACE_PERIOD_MS = 60000; // 1 minute grace period before nudging the customer
 
 function notifSeenKey() {
-  return currentUser ? ('homeweb_notif_seen_' + currentUser.id) : null;
+  return currentUser ? ('homeweb_notif_seen_' + currentUser.id + '_' + activeRole) : null;
 }
 
 // Relative time like "5m ago", "2h ago", "3d ago" //
@@ -2766,7 +2768,16 @@ function timeAgo(isoString) {
   return days + 'd ago';
 }
 
+// Notifications are scoped to whichever role is currently active — a
+// customer/merchant/rider account only ever sees notifications relevant
+// to that role, never a mixed feed. //
 async function fetchNotifications() {
+  if (activeRole === 'merchant') return await fetchMerchantNotifications();
+  if (activeRole === 'rider') return await fetchRiderNotifications();
+  return await fetchCustomerNotifications();
+}
+
+async function fetchCustomerNotifications() {
   const { data, error } = await supabase
     .from('order_status_history')
     .select('*, orders!inner(order_code, user_id)')
@@ -2774,7 +2785,7 @@ async function fetchNotifications() {
     .order('created_at', { ascending: false })
     .limit(30);
 
-  if (error) { console.error('fetchNotifications error:', error); return []; }
+  if (error) { console.error('fetchCustomerNotifications error:', error); return []; }
   var notifs = data || [];
 
   // Reminder: nudge the customer if any of their orders have been sitting
@@ -2798,13 +2809,6 @@ async function fetchNotifications() {
       });
     }
   });
-
-  // Merchant-side: status updates on any order containing this merchant's
-  // products — rider assignment, pickup, delivery, and disputes. //
-  if (userRoles.indexOf('merchant') !== -1) {
-    var merchantNotifs = await fetchMerchantNotifications();
-    notifs = notifs.concat(merchantNotifs);
-  }
 
   notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
   return notifs;
@@ -2837,17 +2841,68 @@ async function fetchMerchantNotifications() {
 
   if (shErr) { console.error('fetchMerchantNotifications status error:', shErr); return []; }
 
-  return (statusRows || []).map(function(s) {
+  var notifs = (statusRows || []).map(function(s) {
     return {
       order_id: s.order_id,
       status: s.status,
-      label: '[Your Store] ' + s.label,
+      label: s.label,
       description: merchantNotifDescription(s, codeByOrder[s.order_id]),
       created_at: s.created_at,
       orders: { order_code: codeByOrder[s.order_id] },
       isMerchantNotif: true
     };
   });
+
+  notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
+  return notifs;
+}
+
+// Rider-side: status updates on deliveries they're assigned to, worded
+// from the rider's point of view, plus non-delivery disputes. //
+async function fetchRiderNotifications() {
+  const { data: statusRows, error } = await supabase
+    .from('order_status_history')
+    .select('*, orders!inner(order_code, rider_user_id)')
+    .eq('orders.rider_user_id', currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  if (error) { console.error('fetchRiderNotifications error:', error); return []; }
+
+  var notifs = (statusRows || []).map(function(s) {
+    return {
+      order_id: s.order_id,
+      status: s.status,
+      label: s.label,
+      description: riderNotifDescription(s, s.orders.order_code),
+      created_at: s.created_at,
+      orders: { order_code: s.orders.order_code },
+      isRiderNotif: true
+    };
+  });
+
+  // Also flag disputes explicitly, since those need a rider's attention
+  // even though they don't add a new status_history row. //
+  const { data: disputedOrders } = await supabase
+    .from('orders')
+    .select('id, order_code, not_arrived_reported_at')
+    .eq('rider_user_id', currentUser.id)
+    .not('not_arrived_reported_at', 'is', null);
+
+  (disputedOrders || []).forEach(function(o) {
+    notifs.push({
+      order_id: o.id,
+      status: 'awaiting_confirmation',
+      label: 'Customer Reported Non-Delivery',
+      description: 'The customer for Order #' + o.order_code + ' reported not receiving it. Please follow up.',
+      created_at: o.not_arrived_reported_at,
+      orders: { order_code: o.order_code },
+      isRiderNotif: true
+    });
+  });
+
+  notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
+  return notifs;
 }
 
 // Reword customer-facing status copy from the seller's point of view //
@@ -2869,6 +2924,29 @@ function merchantNotifDescription(s, orderCode) {
   }
 }
 
+// Reword status copy from the rider's point of view //
+function riderNotifDescription(s, orderCode) {
+  var code = orderCode || '';
+  switch (s.status) {
+    case 'preparing':
+      return 'You accepted Order #' + code + '. Head to the seller for pickup.';
+    case 'out_for_delivery':
+      return 'You picked up Order #' + code + '. On the way to the customer.';
+    case 'awaiting_confirmation':
+      return 'You marked Order #' + code + ' as delivered, awaiting customer confirmation.';
+    case 'delivered':
+      return 'Customer confirmed receipt of Order #' + code + '. Delivery complete!';
+    default:
+      return s.description;
+  }
+}
+
+function notifClearedKey() {
+  return currentUser ? ('homeweb_notif_cleared_' + currentUser.id + '_' + activeRole) : null;
+}
+
+var ROLE_NOTIF_LABEL = { customer: 'Customer', merchant: 'Store', rider: 'Delivery' };
+
 async function openNotificationsModal(e) {
   if (e) e.preventDefault();
 
@@ -2886,14 +2964,29 @@ async function openNotificationsModal(e) {
   list.innerHTML = '<div class="track-empty"><p>Loading notifications...</p></div>';
 
   const notifs = await fetchNotifications();
+  currentNotifList = notifs;
   renderNotifications(notifs);
 
-  // Mark as seen: remember the timestamp of the newest notification
+  // Mark as seen: remember the timestamp of the newest notification —
+  // this only affects the red badge dot, not what's visible in the list.
   if (notifs.length) {
     var newestTimestamp = notifs.reduce(function(max, n) { return new Date(n.created_at) > new Date(max) ? n.created_at : max; }, notifs[0].created_at);
     localStorage.setItem(notifSeenKey(), newestTimestamp);
   }
   updateNotifBadge();
+}
+
+// Hides the notification list going forward — purely a per-device display
+// filter. The underlying order_status_history / order records are never
+// touched, so nothing is lost from the seller's sales report, the rider's
+// delivery history, or the order timeline itself. //
+function clearAllNotifications() {
+  localStorage.setItem(notifClearedKey(), new Date().toISOString());
+  localStorage.setItem(notifSeenKey(), new Date().toISOString());
+  currentNotifList = [];
+  renderNotifications([]);
+  updateNotifBadge();
+  showToast('Notifications cleared', 'info');
 }
 
 function closeNotificationsModal() {
@@ -2904,12 +2997,20 @@ function closeNotificationsModal() {
 
 function renderNotifications(notifs) {
   var list = document.getElementById('sn-notif-list');
-  if (!notifs.length) {
-    list.innerHTML = '<div class="track-empty"><p>No notifications yet. They will show up here as your orders progress.</p></div>';
+  var clearedAt = localStorage.getItem(notifClearedKey());
+  var visible = clearedAt ? notifs.filter(function(n) { return new Date(n.created_at) > new Date(clearedAt); }) : notifs;
+
+  var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">' +
+    '<span style="font-size:11.5px;color:#999;text-transform:uppercase;letter-spacing:0.03em;">' + (ROLE_NOTIF_LABEL[activeRole] || 'Customer') + ' notifications</span>' +
+    (visible.length ? '<button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="clearAllNotifications()">Clear All</button>' : '') +
+    '</div>';
+
+  if (!visible.length) {
+    list.innerHTML = header + '<div class="track-empty"><p>No notifications yet. They will show up here as things happen.</p></div>';
     return;
   }
 
-  list.innerHTML = notifs.map(function(n) {
+  list.innerHTML = header + visible.map(function(n) {
     var icon = NOTIF_ICON_MAP[n.status] || 'fa-bell';
     return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;cursor:pointer;" ' +
       'onclick="closeNotificationsModal(); viewOrderNow(\'' + n.order_id + '\');">' +
@@ -2922,7 +3023,7 @@ function renderNotifications(notifs) {
   }).join('');
 }
 
-// Show/hide the red dot on the bell icon based on unseen notifications //
+// Show/hide the red dot on the bell icon based on unseen, uncleared notifications //
 async function updateNotifBadge() {
   var badges = document.querySelectorAll('.notif-badge');
   if (!currentUser) {
@@ -2931,6 +3032,8 @@ async function updateNotifBadge() {
   }
 
   var notifs = await fetchNotifications();
+  var clearedAt = localStorage.getItem(notifClearedKey());
+  if (clearedAt) notifs = notifs.filter(function(n) { return new Date(n.created_at) > new Date(clearedAt); });
 
   if (!notifs.length) {
     badges.forEach(function(b) { b.style.display = 'none'; });
