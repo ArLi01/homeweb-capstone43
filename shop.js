@@ -2101,7 +2101,7 @@ function adminTabsHtml() {
     var active = adminView === id;
     return '<button class="co-btn" style="flex:1;background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#333') + ';" onclick="switchAdminView(\'' + id + '\')">' + label + '</button>';
   }
-  return '<div style="display:flex;gap:8px;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + '</div>';
+  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + '</div>';
 }
 
 function switchAdminView(view) {
@@ -2116,6 +2116,8 @@ async function renderAdminDashboard() {
   if (adminView === 'overview') return renderAdminOverview();
   if (adminView === 'merchants') return renderAdminMerchants();
   if (adminView === 'riders') return renderAdminRiders();
+  if (adminView === 'customers') return renderAdminCustomers();
+  if (adminView === 'orders') return renderAdminOrders();
 }
 
 async function renderAdminOverview() {
@@ -2237,6 +2239,92 @@ async function adminViewRiderLicense(riderUserId) {
   const { data, error } = await supabase.storage.from('rider-docs').createSignedUrl(riderRow.license_path, 300);
   if (error || !data) { showToast('Could not open license: ' + (error ? error.message : 'unknown error'), 'error'); return; }
   window.open(data.signedUrl, '_blank');
+}
+
+async function renderAdminCustomers() {
+  var body = document.getElementById('sn-admin-body');
+  var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
+
+  const { data: customerRoles } = await supabase.from('user_roles').select('user_id').eq('role', 'customer');
+  var userIds = (customerRoles || []).map(function(r) { return r.user_id; });
+
+  if (!userIds.length) {
+    body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Customers</h3><p style="color:#999;font-size:13px;">No customers yet.</p>';
+    return;
+  }
+
+  const { data: profiles } = await supabase.from('profiles').select('id, full_name, phone, created_at').in('id', userIds);
+  const { data: orders } = await supabase.from('orders').select('user_id, total, status').in('user_id', userIds);
+
+  var statsById = {};
+  (orders || []).forEach(function(o) {
+    if (!statsById[o.user_id]) statsById[o.user_id] = { count: 0, total: 0, disputes: 0 };
+    statsById[o.user_id].count++;
+    statsById[o.user_id].total += o.total;
+  });
+
+  var rows = (profiles || [])
+    .sort(function(a, b) { return ((statsById[b.id] && statsById[b.id].total) || 0) - ((statsById[a.id] && statsById[a.id].total) || 0); })
+    .map(function(p) {
+      var s = statsById[p.id] || { count: 0, total: 0 };
+      return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;align-items:center;">' +
+        '<div>' +
+        '<p style="margin:0;font-weight:700;font-size:13px;">' + (p.full_name || 'Unnamed Customer') + '</p>' +
+        '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.phone || 'No phone on file') + ' \u2022 Joined ' + formatDate(p.created_at) + '</p>' +
+        '</div>' +
+        '<div style="text-align:right;">' +
+        '<p style="margin:0;font-weight:700;font-size:13px;">' + fmt(s.total) + '</p>' +
+        '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + s.count + ' order' + (s.count === 1 ? '' : 's') + '</p>' +
+        '</div></div>';
+    }).join('');
+
+  body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Customers (' + (profiles || []).length + ')</h3>' +
+    '<p style="margin:0 0 12px;font-size:11.5px;color:#999;">Sorted by total spend</p>' + rows;
+}
+
+let adminOrderFilter = 'all'; // 'all' | 'disputed'
+
+async function renderAdminOrders() {
+  var body = document.getElementById('sn-admin-body');
+  var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
+
+  const { data: allOrders, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false }).limit(150);
+  var orders = allOrders || [];
+
+  var disputedCount = orders.filter(function(o) { return o.not_arrived_reported_at; }).length;
+  var shown = adminOrderFilter === 'disputed' ? orders.filter(function(o) { return o.not_arrived_reported_at; }) : orders;
+
+  // Names aren't directly joinable (sibling FKs to auth.users), fetch separately //
+  var userIds = Array.from(new Set(shown.map(function(o) { return o.user_id; }).filter(Boolean)));
+  var riderIds = Array.from(new Set(shown.map(function(o) { return o.rider_user_id; }).filter(Boolean)));
+  var allIds = Array.from(new Set(userIds.concat(riderIds)));
+  var nameById = {};
+  if (allIds.length) {
+    const { data: profiles } = await supabase.from('profiles').select('id, full_name').in('id', allIds);
+    (profiles || []).forEach(function(p) { nameById[p.id] = p.full_name; });
+  }
+
+  var filterBar = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
+    '<button class="co-btn" style="flex:1;background:' + (adminOrderFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminOrderFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminOrderFilter=\'all\'; renderAdminOrders();">All (' + orders.length + ')</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (adminOrderFilter === 'disputed' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminOrderFilter === 'disputed' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminOrderFilter=\'disputed\'; renderAdminOrders();">Disputed (' + disputedCount + ')</button>' +
+    '</div>';
+
+  var rows = shown.length
+    ? shown.map(function(o) {
+        var statusInfo = getOrderStatusInfo(o.status);
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+          '<span style="font-weight:700;font-size:13px;">Order #' + o.order_code + '</span>' +
+          '<span style="font-weight:700;font-size:13px;">' + fmt(o.total) + '</span></div>' +
+          '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + statusInfo.label + ' \u2022 ' + (o.payment_method === 'cod' ? 'COD' : 'GCash') + ' \u2022 ' + formatDate(o.created_at) + '</p>' +
+          '<p style="margin:2px 0 0;font-size:12px;color:#777;"><i class="fas fa-user"></i> ' + (nameById[o.user_id] || 'Customer') +
+          (o.rider_user_id ? ' \u2022 <i class="fas fa-motorcycle"></i> ' + (nameById[o.rider_user_id] || o.rider_name || 'Rider') : '') + '</p>' +
+          (o.not_arrived_reported_at ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reported non-delivery</p>' : '') +
+          '</div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">' + (adminOrderFilter === 'disputed' ? 'No disputed orders.' : 'No orders yet.') + '</p>';
+
+  body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Orders (last 150)</h3>' + filterBar + rows;
 }
 
 async function logout() {
