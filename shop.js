@@ -1175,7 +1175,7 @@ async function placeOrder() {
   // been sitting open while stock changed (another customer bought it,
   // the merchant adjusted it, etc). This is the authoritative check. //
   var productIds = cart.map(function(i) { return i.id; });
-  const { data: freshProducts, error: stockErr } = await supabase.from('products').select('id, name, stock_qty').in('id', productIds);
+  const { data: freshProducts, error: stockErr } = await supabase.from('products').select('id, name, stock_qty, cost_price').in('id', productIds);
 
   if (stockErr) {
     if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
@@ -1184,7 +1184,8 @@ async function placeOrder() {
   }
 
   var stockById = {};
-  (freshProducts || []).forEach(function(p) { stockById[p.id] = p.stock_qty; });
+  var costPriceById = {};
+  (freshProducts || []).forEach(function(p) { stockById[p.id] = p.stock_qty; costPriceById[p.id] = p.cost_price; });
 
   for (var i = 0; i < cart.length; i++) {
     var item = cart[i];
@@ -1240,7 +1241,7 @@ async function placeOrder() {
     }
 
     const itemRows = group.items.map(function(item) {
-      return { order_id: orderRow.id, product_id: item.id, product_name: item.name, price: item.price, qty: item.qty, unit: item.unit || 'pc' };
+      return { order_id: orderRow.id, product_id: item.id, product_name: item.name, price: item.price, qty: item.qty, unit: item.unit || 'pc', cost_price: costPriceById[item.id] !== undefined ? costPriceById[item.id] : null };
     });
     await supabase.from('order_items').insert(itemRows);
 
@@ -3429,7 +3430,7 @@ async function loadMyMerchantProducts() {
 async function fetchMerchantSales() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, product_name, products!inner(name, merchant_id, category, cost_price), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at, user_id)')
+    .select('qty, price, cost_price, product_id, product_name, products!inner(name, merchant_id, category), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at, user_id)')
     .eq('products.merchant_id', myMerchantId);
 
   console.log('fetchMerchantSales:', { merchantId: myMerchantId, rows: data, error: error });
@@ -3463,7 +3464,7 @@ async function fetchMerchantSales() {
 
     // Only counts toward profit if this merchant actually entered a cost
     // price for this product — otherwise we honestly don't know it. //
-    var costPrice = r.products ? r.products.cost_price : null;
+    var costPrice = r.cost_price;
     if (costPrice !== null && costPrice !== undefined) {
       knownProfit += (r.price - costPrice) * r.qty;
       itemsWithCost += r.qty;
