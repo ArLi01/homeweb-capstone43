@@ -984,9 +984,11 @@ function cancelGcashPayment() {
 }
 
 function gcashOrderTotal() {
-  const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-  const ship = sub >= 500 ? 0 : 79;
-  return sub + ship;
+  var groups = groupCartByMerchant();
+  return groups.reduce(function(total, g) {
+    var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+    return total + sub + calcDeliveryFee(sub);
+  }, 0);
 }
 
 function renderGcashStep() {
@@ -1184,6 +1186,7 @@ async function placeOrder() {
 
     const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
       order_code: orderCode,
+      batch_code: groups.length > 1 ? baseCode : null,
       user_id: currentUser.id,
       status: 'placed',
       subtotal: sub,
@@ -3871,10 +3874,7 @@ function openProductForm(productId) {
     '<input type="number" id="pf-price" min="0" step="0.01" value="' + (p ? p.price : '') + '"/>' +
     '<span class="co-field-error">Enter a valid price</span></div>' +
     '<div class="co-field"><label>Unit of Measurement <span class="co-required">*</span></label>' +
-    '<input type="text" id="pf-unit" list="pf-unit-options" placeholder="e.g. 1kg, 500g, pack, sack" value="' + (p && p.unit ? p.unit : '') + '"/>' +
-    '<datalist id="pf-unit-options">' +
-    ['1kg', '500g', '250g', 'pc', 'pack', 'bundle', 'sack', 'bottle', 'dozen', 'tray'].map(function(u) { return '<option value="' + u + '">'; }).join('') +
-    '</datalist>' +
+    '<input type="text" id="pf-unit" placeholder="Type your own, e.g. 1kg, 350g, pack of 3, sack" value="' + (p && p.unit ? p.unit : '') + '"/>' +
     '<span class="co-field-error">Specify a unit (e.g. 1kg, pack)</span></div>' +
     '<div class="co-field"><label>Category</label>' +
     '<select id="pf-category">' +
@@ -4061,25 +4061,45 @@ async function checkForRiderOrderAlert() {
   const { data: riderRow } = await supabase.from('riders').select('is_available').eq('user_id', currentUser.id).single();
   if (!riderRow || !riderRow.is_available) return;
 
+  var cutoff = new Date(Date.now() - RIDER_ALERT_MAX_AGE_MS).toISOString();
+
   const { data: candidates } = await supabase
     .from('orders')
     .select('*, order_items(*)')
     .eq('status', 'placed')
     .is('rider_user_id', null)
+    .gte('created_at', cutoff)
     .order('created_at', { ascending: true })
-    .limit(5);
+    .limit(10);
 
   if (!candidates || !candidates.length) return;
   var order = candidates.find(function(o) { return !riderAlertShownOrderIds[o.id]; });
   if (!order) return;
 
-  showRiderOrderAlert(order);
+  // Bundle in any sibling orders from the same checkout (same customer,
+  // multiple sellers) so the rider can accept the whole batch at once. //
+  var siblings = order.batch_code
+    ? candidates.filter(function(o) { return o.batch_code === order.batch_code; })
+    : [order];
+
+  showRiderOrderAlert(siblings);
 }
 
-async function showRiderOrderAlert(order) {
-  riderAlertCurrentOrderId = order.id;
+async function showRiderOrderAlert(orders) {
+  var primary = orders[0];
+  var isBatch = orders.length > 1;
+  riderAlertCurrentOrderId = primary.id;
   var body = document.getElementById('sn-rider-alert-body');
-  var itemsSummary = (order.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+  var allIds = orders.map(function(o) { return o.id; }).join(',');
+  var grandTotal = orders.reduce(function(a, o) { return a + o.total; }, 0);
+
+  var ordersHtml = orders.map(function(o) {
+    var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+    return '<div style="background:#F9FAFB;border-radius:10px;padding:14px;margin:8px 0;">' +
+      '<p style="margin:0;font-weight:700;">Order #' + o.order_code + ' \u2014 ' + fmt(o.total) + '</p>' +
+      '<p style="margin:6px 0 0;font-size:12.5px;color:#666;">' + itemsSummary + '</p>' +
+      '</div>';
+  }).join('');
 
   const { count: rejectionsToday } = await supabase
     .from('rider_rejections')
@@ -4092,48 +4112,51 @@ async function showRiderOrderAlert(order) {
   body.innerHTML =
     '<div style="text-align:center;">' +
     '<div class="login-icon" style="color:var(--primary,#22C55E);"><i class="fas fa-bell"></i></div>' +
-    '<h2 style="margin:6px 0;">New Delivery Available!</h2>' +
-    '<p class="login-sub">First to accept gets it</p>' +
+    '<h2 style="margin:6px 0;">' + (isBatch ? orders.length + ' Deliveries Available!' : 'New Delivery Available!') + '</h2>' +
+    '<p class="login-sub">' + (isBatch ? 'Same customer, same checkout \u2014 accept together like a batched order' : 'First to accept gets it') + '</p>' +
     '</div>' +
-    '<div style="background:#F9FAFB;border-radius:10px;padding:14px;margin:12px 0;">' +
-    '<p style="margin:0;font-weight:700;">Order #' + order.order_code + ' \u2014 ' + fmt(order.total) + '</p>' +
-    '<p style="margin:6px 0 0;font-size:12.5px;color:#666;">' + itemsSummary + '</p>' +
-    '<p style="margin:6px 0 0;font-size:12.5px;color:#666;"><i class="fas fa-map-marker-alt"></i> ' + (order.shipping_street || '') + ', ' + (order.shipping_city || '') + '</p>' +
-    '</div>' +
-    '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:10px;" onclick="acceptOrderFromAlert(\'' + order.id + '\')">Accept Delivery</button>' +
+    ordersHtml +
+    '<p style="margin:6px 0 0;font-size:12.5px;color:#666;"><i class="fas fa-map-marker-alt"></i> ' + (primary.shipping_street || '') + ', ' + (primary.shipping_city || '') + '</p>' +
+    (isBatch ? '<p style="margin:10px 0;font-weight:700;text-align:center;">Combined Total: ' + fmt(grandTotal) + '</p>' : '') +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-top:10px;margin-bottom:10px;" onclick="acceptOrderFromAlert(\'' + allIds + '\')">' + (isBatch ? 'Accept All (' + orders.length + ')' : 'Accept Delivery') + '</button>' +
     (rejectionsLeft > 0
-      ? '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;" onclick="rejectOrderAlert(\'' + order.id + '\')">Reject (' + rejectionsLeft + ' left today)</button>'
+      ? '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;" onclick="rejectOrderAlert(\'' + allIds + '\')">Reject (' + rejectionsLeft + ' left today)</button>'
       : '<p style="text-align:center;color:#999;font-size:12px;margin:0;">Daily rejection limit reached \u2014 accept or dismiss to wait for the next one</p>') +
-    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="dismissRiderAlert(\'' + order.id + '\')">Not Now</button>';
+    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="dismissRiderAlert(\'' + allIds + '\')">Not Now</button>';
 
   document.getElementById('sn-riderAlertOverlay').classList.add('active');
   document.getElementById('sn-riderAlertModal').classList.add('active');
 }
 
-function dismissRiderAlert(orderId) {
-  riderAlertShownOrderIds[orderId] = true;
+function dismissRiderAlert(orderIdsStr) {
+  orderIdsStr.split(',').forEach(function(id) { riderAlertShownOrderIds[id] = true; });
   riderAlertCurrentOrderId = null;
   document.getElementById('sn-riderAlertOverlay').classList.remove('active');
   document.getElementById('sn-riderAlertModal').classList.remove('active');
 }
 
-async function acceptOrderFromAlert(orderId) {
+async function acceptOrderFromAlert(orderIdsStr) {
+  var ids = orderIdsStr.split(',');
   var btn = document.querySelector('#sn-rider-alert-body .co-btn--next');
-  if (btn) { btn.disabled = true; btn.textContent = 'Accepting...'; }
+  if (btn) { btn.disabled = true; btn.textContent = ids.length > 1 ? 'Accepting all...' : 'Accepting...'; }
 
   try {
-    await acceptOrder(orderId);
+    for (var i = 0; i < ids.length; i++) {
+      await acceptOrder(ids[i]);
+    }
     // acceptOrder() already shows the correct toast for success / too-late / error,
     // and already refreshes the dashboard lists regardless of whether it's open.
   } finally {
     // Guaranteed to run even if acceptOrder somehow throws — the popup can
     // never get stuck on "Accepting..." forever. //
-    dismissRiderAlert(orderId);
+    dismissRiderAlert(orderIdsStr);
   }
 }
 
-async function rejectOrderAlert(orderId) {
-  var reason = prompt('Why are you rejecting this delivery? (required)');
+async function rejectOrderAlert(orderIdsStr) {
+  var ids = orderIdsStr.split(',');
+  var primaryId = ids[0];
+  var reason = prompt(ids.length > 1 ? 'Why are you rejecting these ' + ids.length + ' deliveries? (required)' : 'Why are you rejecting this delivery? (required)');
   if (!reason || !reason.trim()) { showToast('A reason is required to reject an order', 'info'); return; }
 
   const { count: rejectionsToday } = await supabase
@@ -4144,12 +4167,14 @@ async function rejectOrderAlert(orderId) {
 
   if ((rejectionsToday || 0) >= 3) {
     showToast('Daily rejection limit reached (3/3)', 'error');
-    dismissRiderAlert(orderId);
+    dismissRiderAlert(orderIdsStr);
     return;
   }
 
+  // One rejection logged against the batch's primary order — a batch is
+  // one decision, not N separate strikes against the daily limit. //
   const { error } = await supabase.from('rider_rejections').insert({
-    rider_user_id: currentUser.id, order_id: orderId, reason: reason.trim()
+    rider_user_id: currentUser.id, order_id: primaryId, reason: reason.trim()
   });
 
   if (error) {
@@ -4158,7 +4183,7 @@ async function rejectOrderAlert(orderId) {
   }
 
   showToast('Order rejected. This affects your rating slightly \u2014 ' + (2 - (rejectionsToday || 0)) + ' rejections left today.', 'info');
-  dismissRiderAlert(orderId);
+  dismissRiderAlert(orderIdsStr);
 }
 
 
@@ -4217,18 +4242,48 @@ async function loadMyAssignedOrders() {
 }
 
 // Orders that have been placed but no rider has claimed yet //
+// Orders older than this stop showing up as "available" — prevents old
+// abandoned test/demo orders from lingering and popping up unrealistically. //
+var RIDER_ALERT_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
+
 async function loadAvailableOrders() {
+  var cutoff = new Date(Date.now() - RIDER_ALERT_MAX_AGE_MS).toISOString();
   const { data, error } = await supabase
     .from('orders')
     .select('*, order_items(*)')
     .eq('status', 'placed')
     .is('rider_user_id', null)
+    .gte('created_at', cutoff)
     .order('created_at', { ascending: false });
   availableOrders = error ? [] : (data || []);
 }
 
+// Groups available orders by batch_code so sibling orders from the same
+// checkout (same customer, multiple sellers) can be accepted together —
+// same idea as how Grab/Foodpanda batch nearby pickups for one rider. //
+function groupAvailableOrdersByBatch() {
+  var seen = {};
+  var groups = [];
+  availableOrders.forEach(function(o) {
+    var key = o.batch_code || o.id;
+    if (seen[key]) { seen[key].push(o); return; }
+    seen[key] = [o];
+    groups.push(seen[key]);
+  });
+  return groups;
+}
+
 // Claim an unassigned order for this rider (handles the race where
 // someone else — or the auto-assign fallback — grabbed it first) //
+// Accepts one or more orders — used by the dashboard's "Accept All" button
+// for batched sibling orders from the same checkout. //
+async function acceptOrderBatch(orderIdsStr) {
+  var ids = orderIdsStr.split(',');
+  for (var i = 0; i < ids.length; i++) {
+    await acceptOrder(ids[i]);
+  }
+}
+
 async function acceptOrder(orderId) {
   try {
     // If the rider accepted straight from the alert popup without ever opening
@@ -4384,13 +4439,25 @@ function renderRiderDashboard() {
   }
 
   var availableHtml = availableOrders.length
-    ? availableOrders.map(function(o) {
-        var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+    ? groupAvailableOrdersByBatch().map(function(group) {
+        var isBatch = group.length > 1;
+        var allIds = group.map(function(o) { return o.id; }).join(',');
+        var groupTotal = group.reduce(function(a, o) { return a + o.total; }, 0);
+        var ordersHtml = group.map(function(o) {
+          var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
+          return '<div style="' + (isBatch ? 'padding:8px 0;border-top:1px dashed #e5e5e5;' : '') + '">' +
+            '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + fmt(o.total) + '</p>' +
+            '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
+            '</div>';
+        }).join('');
+        var primary = group[0];
+
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
-          '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + fmt(o.total) + '</p>' +
-          '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
-          '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
-          '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="acceptOrder(\'' + o.id + '\')">Accept Delivery</button>' +
+          (isBatch ? '<p style="margin:0 0 6px;color:var(--primary,#22C55E);font-size:11.5px;font-weight:700;text-transform:uppercase;"><i class="fas fa-layer-group"></i> ' + group.length + ' orders \u2014 same customer</p>' : '') +
+          ordersHtml +
+          '<p style="margin:6px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (primary.shipping_street || '') + ', ' + (primary.shipping_city || '') + '</p>' +
+          (isBatch ? '<p style="margin:6px 0 0;font-weight:700;font-size:12.5px;">Combined Total: ' + fmt(groupTotal) + '</p>' : '') +
+          '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="acceptOrderBatch(\'' + allIds + '\')">' + (isBatch ? 'Accept All (' + group.length + ')' : 'Accept Delivery') + '</button>' +
           '</div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders waiting for a rider right now.</p>';
