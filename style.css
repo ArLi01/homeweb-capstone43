@@ -944,3 +944,14 @@ img { display: block; max-width: 100%; }
   .footer-inner { grid-template-columns: 1fr; }
   .flash-header { flex-wrap: wrap; gap: 10px; }
 }
+
+/* ── PRINT (used when exporting the merchant Sales Report) ── */
+@media print {
+  body * { visibility: hidden; }
+  #sn-merchant-body, #sn-merchant-body * { visibility: visible; }
+  #sn-merchant-body {
+    position: absolute; left: 0; top: 0; width: 100%;
+    padding: 20px;
+  }
+  #sn-merchant-body button { display: none !important; }
+}

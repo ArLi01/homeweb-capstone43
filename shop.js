@@ -74,7 +74,8 @@ async function loadProducts() {
       image_url: p.image_url,
       stock_qty: p.stock_qty,
       merchant_id: p.merchant_id,
-      merchantVerified: !!(p.merchants && p.merchants.is_verified)
+      merchantVerified: !!(p.merchants && p.merchants.is_verified),
+      unit: p.unit || 'pc'
     };
   });
 }
@@ -117,7 +118,7 @@ function renderProductCardHtml(p) {
     imgHtml +
     '<div class="product-info">' +
     '<p class="product-name">' + p.name + '</p>' +
-    '<div class="product-prices"><span class="price-now">' + fmtPrice(p.price) + '</span>' + oldPriceHtml + '</div>' +
+    '<div class="product-prices"><span class="price-now">' + fmtPrice(p.price) + '</span>' + oldPriceHtml + ' <span style="color:#999;font-size:11.5px;font-weight:400;">/ ' + p.unit + '</span></div>' +
     '<div class="product-stars">' + starsHTML(p.rating) + '<span>' + productStatsLabel(p) + '</span></div>' +
     '<p class="product-location"><i class="fas fa-store"></i> ' + p.location + '</p>' +
     stockNote +
@@ -405,6 +406,8 @@ function openProductModal(id) {
   m.querySelector('.pm-name').textContent = p.name;
   m.querySelector('.pm-stars').innerHTML = stars(p.rating) + '<span>' + productStatsLabel(p) + '</span>';
   m.querySelector('.pm-price-now').textContent = fmt(p.price);
+  var pmUnit = m.querySelector('.pm-unit');
+  if (pmUnit) pmUnit.textContent = ' / ' + p.unit;
   m.querySelector('.pm-price-old').textContent = p.oldPrice ? fmt(p.oldPrice) : '';
   const disc = m.querySelector('.pm-discount');
   disc.textContent = p.discount ? '-' + p.discount + '%' : '';
@@ -416,6 +419,7 @@ function openProductModal(id) {
 
   var pmStock = m.querySelector('.pm-stock');
   if (pmStock) pmStock.innerHTML = stockLabelHtml(p.stock_qty);
+  updateBuyButtonsState(p.stock_qty);
 
   document.getElementById('sn-overlay').classList.add('active');
   m.classList.add('active');
@@ -460,6 +464,7 @@ async function refreshProductStats(productId) {
   currentProduct.stock_qty = data.stock_qty;
   var stockEl = document.querySelector('#sn-productModal .pm-stock');
   if (stockEl) stockEl.innerHTML = stockLabelHtml(data.stock_qty);
+  updateBuyButtonsState(data.stock_qty);
 }
 
 function reviewRowHtml(r) {
@@ -635,9 +640,32 @@ function closeProductModal() {
 }
 
 // buttons sa product modal //
+// Keep the Add to Cart / Buy Now buttons and quantity controls in sync
+// with real stock — this can change while the modal is already open. //
+function updateBuyButtonsState(stockQty) {
+  var outOfStock = typeof stockQty === 'number' && stockQty <= 0;
+  var cartBtn = document.querySelector('#sn-productModal .pm-btn--cart');
+  var buyBtn = document.querySelector('#sn-productModal .pm-btn--buy');
+  var qtyMinus = document.querySelector('#sn-productModal .pm-qty button:first-child');
+  var qtyPlus = document.querySelector('#sn-productModal .pm-qty button:last-child');
+
+  [cartBtn, buyBtn, qtyMinus, qtyPlus].forEach(function(btn) {
+    if (!btn) return;
+    btn.disabled = outOfStock;
+    btn.style.opacity = outOfStock ? '0.4' : '';
+    btn.style.cursor = outOfStock ? 'not-allowed' : '';
+  });
+
+  if (cartBtn) cartBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Out of Stock' : '<i class="fas fa-cart-plus"></i> Add to Cart';
+  if (buyBtn) buyBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Out of Stock' : '<i class="fas fa-bolt"></i> Buy Now';
+}
+
 function changeQty(delta) {
-  currentProduct.qty = Math.max(1, Math.min(99, currentProduct.qty + delta));
+  var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
+  var attempted = currentProduct.qty + delta;
+  currentProduct.qty = Math.max(1, Math.min(max, attempted));
   document.querySelector('.pm-qty-val').textContent = currentProduct.qty;
+  if (delta > 0 && attempted > max) showToast('Only ' + max + ' left in stock', 'info');
 }
 
 // Add to cart //
@@ -652,7 +680,7 @@ function addToCart(andCheckout) {
   const p = currentProduct;
   const existing = cart.find(function(x) { return x.id === p.id; });
   if (existing) existing.qty += p.qty;
-  else cart.push({ id: p.id, name: p.name, price: p.price, icon: p.icon, qty: p.qty });
+  else cart.push({ id: p.id, name: p.name, price: p.price, icon: p.icon, qty: p.qty, unit: p.unit, merchant_id: p.merchant_id, merchantName: p.location, stock_qty: p.stock_qty });
   saveCart();
   updateCartBadge();
 
@@ -710,30 +738,33 @@ function renderCheckout() {
       var cartIconHtml = cartImgSrc
         ? '<img src="' + cartImgSrc + '" alt="' + item.name + '" />'
         : '<i class="fas ' + item.icon + '"></i>';
+      var atMax = typeof item.stock_qty === 'number' && item.qty >= item.stock_qty;
       return '<div class="co-cart-row" data-id="' + item.id + '">' +
         '<div class="co-cart-icon">' + cartIconHtml + '</div>' +
-        '<div class="co-cart-info"><p class="co-cart-name">' + item.name + '</p>' +
+        '<div class="co-cart-info"><p class="co-cart-name">' + item.name + ' <span style="color:#999;font-size:11px;">/ ' + (item.unit || 'pc') + '</span></p>' +
+        (item.merchantName ? '<p style="margin:2px 0 0;font-size:11px;color:#999;"><i class="fas fa-store"></i> ' + item.merchantName + '</p>' : '') +
         '<div class="co-cart-controls">' +
         '<button onclick="changeCartQty(\'' + item.id + '\',-1)">&#8722;</button>' +
         '<span>' + item.qty + '</span>' +
-        '<button onclick="changeCartQty(\'' + item.id + '\',1)">+</button>' +
+        '<button onclick="changeCartQty(\'' + item.id + '\',1)"' + (atMax ? ' disabled style="opacity:0.4;"' : '') + '>+</button>' +
         '<button class="co-remove" onclick="removeCartItem(\'' + item.id + '\')"><i class="fas fa-trash"></i></button>' +
-        '</div></div>' +
+        '</div>' +
+        (atMax ? '<p style="margin:4px 0 0;font-size:11px;color:#DC2626;">Max stock reached</p>' : '') +
+        '</div>' +
         '<div class="co-cart-price">' + fmt(item.price * item.qty) + '</div></div>';
     }).join('');
 
     const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    // Free shipping //
-    const ship = sub >= 500 ? 0 : 79;
+    const ship = calcDeliveryFee(sub);
 
     body = '<div class="co-cart-list">' + rows + '</div>' +
       '<div class="co-summary">' +
       '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
-      '<div class="co-summary-row"><span>Shipping</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
+      '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
       '<div class="co-summary-row total"><span>Total</span><span>' + fmt(sub + ship) + '</span></div>' +
       '</div>';
 
-  // STEP 2: SHIPPING //
+  // STEP 2: DELIVERY //
   } else if (checkoutStep === 2) {
     body = '<div class="co-form">' +
       '<h3>Delivery Address</h3>' +
@@ -747,13 +778,9 @@ function renderCheckout() {
       '<div class="co-field"><label>City / Municipality <span class="co-required">*</span></label><input type="text" id="co-city" placeholder="Sta. Barbara" value="' + shippingInfo.city + '"/><span class="co-field-error">City is required</span></div>' +
       '<div class="co-field"><label>ZIP Code <span class="co-required">*</span></label><input type="text" id="co-zip" placeholder="5002" value="' + shippingInfo.zip + '"/><span class="co-field-error">ZIP code is required</span></div>' +
       '</div>' +
-      '<div class="co-field"><label>Delivery Option</label>' +
-      '<div class="co-delivery-opts">' +
-      '<label class="co-radio"><input type="radio" name="delivery" value="standard" ' + (shippingInfo.delivery === 'standard' ? 'checked' : '') + '/>' +
-      '<span><strong>Standard Delivery</strong><em>3\u201320 minutes &nbsp;&bull;&nbsp; FREE on \u20B1200+</em></span></label>' +
-      '<label class="co-radio"><input type="radio" name="delivery" value="Saver" ' + (shippingInfo.delivery === 'Saver' ? 'checked' : '') + '/>' +
-      '<span><strong>Saver Delivery</strong><em>1\u201330 minutes &nbsp;&bull;&nbsp; \u20B1149</em></span></label>' +
-      '</div></div></div>';
+      '<div class="co-field"><label>Estimated Delivery Time</label>' +
+      '<div style="background:#F0FFF4;border-radius:10px;padding:12px 14px;font-size:13px;color:#15803D;">' +
+      '<i class="fas fa-motorcycle"></i> 10\u201315 minutes, depending on distance from the seller</div></div></div>';
 
   // STEP 3: PAYMENT //
   } else if (checkoutStep === 3) {
@@ -776,21 +803,34 @@ function renderCheckout() {
 
   // STEP 4: CONFIRM ORDER //
   } else if (checkoutStep === 4) {
-    const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    const ship = sub >= 500 ? 0 : 79;
-    const itemList = cart.map(function(i) {
-      return '<li><span>' + i.name + ' \u00D7 ' + i.qty + '</span><span>' + fmt(i.price * i.qty) + '</span></li>';
+    var groups = groupCartByMerchant();
+    var grandTotal = 0;
+
+    var groupsHtml = groups.map(function(g) {
+      var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+      var ship = calcDeliveryFee(sub);
+      grandTotal += sub + ship;
+      var itemList = g.items.map(function(i) {
+        return '<li><span>' + i.name + ' (' + (i.unit || 'pc') + ') \u00D7 ' + i.qty + '</span><span>' + fmt(i.price * i.qty) + '</span></li>';
+      }).join('');
+
+      return '<div style="background:#F9FAFB;border-radius:10px;padding:14px;margin-bottom:12px;">' +
+        '<p style="margin:0 0 8px;font-weight:700;font-size:13px;"><i class="fas fa-store"></i> ' + g.merchantName +
+        (groups.length > 1 ? '<span style="float:right;font-weight:400;color:#999;font-size:11.5px;">Separate order</span>' : '') + '</p>' +
+        '<ul class="co-confirm-items">' + itemList + '</ul>' +
+        '<div class="co-summary" style="margin-top:8px;">' +
+        '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
+        '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
+        '<div class="co-summary-row total"><span>Order Total</span><span>' + fmt(sub + ship) + '</span></div>' +
+        '</div></div>';
     }).join('');
 
     body = '<div class="co-confirm">' +
       '<div class="co-confirm-icon"><i class="fas fa-clipboard-check"></i></div>' +
-      '<h3>Review Your Order</h3>' +
-      '<ul class="co-confirm-items">' + itemList + '</ul>' +
-      '<div class="co-summary">' +
-      '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
-      '<div class="co-summary-row"><span>Shipping</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
-      '<div class="co-summary-row total"><span>Total</span><span>' + fmt(sub + ship) + '</span></div>' +
-      '</div>' +
+      '<h3>Review Your Order' + (groups.length > 1 ? 's (' + groups.length + ')' : '') + '</h3>' +
+      (groups.length > 1 ? '<p class="co-note" style="margin-bottom:12px;"><i class="fas fa-info-circle"></i> Your items are from ' + groups.length + ' different sellers, so this will place ' + groups.length + ' separate orders — each tracked independently.</p>' : '') +
+      groupsHtml +
+      (groups.length > 1 ? '<div class="co-summary" style="border-top:2px solid #eee;padding-top:10px;"><div class="co-summary-row total"><span>Grand Total</span><span>' + fmt(grandTotal) + '</span></div></div>' : '') +
       '<p class="co-note"><i class="fas fa-shield-alt"></i> Your payment is protected by HomeWeb Guarantee.</p>' +
       '</div>';
   }
@@ -896,7 +936,13 @@ function goStep(delta) {
 function changeCartQty(id, delta) {
   var item = cart.find(function(x) { return x.id === id; });
   if (!item) return;
-  item.qty = Math.max(1, item.qty + delta);
+  var max = typeof item.stock_qty === 'number' ? item.stock_qty : 99;
+  var attempted = item.qty + delta;
+  if (delta > 0 && attempted > max) {
+    showToast('Only ' + max + ' ' + (item.unit || 'pc') + ' left in stock', 'info');
+    return;
+  }
+  item.qty = Math.max(1, attempted);
   saveCart();
   updateCartBadge();
   renderCheckout();
@@ -1047,6 +1093,29 @@ var ORDER_STATUS_MAP = {
   'delivered':              { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' }
 };
 
+// Groups cart items by seller — each group becomes its own separate order,
+// since a single checkout can span multiple independent merchants. //
+function groupCartByMerchant() {
+  var groups = {};
+  var order = [];
+  cart.forEach(function(item) {
+    var key = item.merchant_id || 'unknown';
+    if (!groups[key]) {
+      groups[key] = { merchant_id: item.merchant_id, merchantName: item.merchantName || 'Seller', items: [] };
+      order.push(key);
+    }
+    groups[key].items.push(item);
+  });
+  return order.map(function(k) { return groups[k]; });
+}
+
+// Delivery fee: free at ₱200+, otherwise a small fee that's capped at the
+// subtotal itself so it can never cost more than the products being bought. //
+function calcDeliveryFee(sub) {
+  if (sub >= 200) return 0;
+  return Math.min(49, Math.round(sub));
+}
+
 function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -1065,63 +1134,135 @@ async function placeOrder() {
     return;
   }
 
-  const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-  const shipFee = sub >= 500 ? 0 : 79;
-
-  var paymentMethod = selectedPaymentMethod;
-  var orderCode = 'HW' + String(Date.now()).slice(-8).toUpperCase();
-
   const nextBtn = document.querySelector('#sn-checkoutModal .co-btn--next');
-  if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = 'Placing order...'; }
+  if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = 'Checking stock...'; }
 
-  // 1. Insert the order
-  const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
-    order_code: orderCode,
-    user_id: currentUser.id,
-    status: 'placed',
-    subtotal: sub,
-    shipping_fee: shipFee,
-    total: sub + shipFee,
-    payment_method: paymentMethod,
-    shipping_first_name: shippingInfo.firstName,
-    shipping_last_name: shippingInfo.lastName,
-    shipping_phone: shippingInfo.phone,
-    shipping_street: shippingInfo.street,
-    shipping_city: shippingInfo.city,
-    shipping_zip: shippingInfo.zip,
-    delivery_option: shippingInfo.delivery
-  }).select().single();
+  // Validate against LIVE stock right before placing — the cart may have
+  // been sitting open while stock changed (another customer bought it,
+  // the merchant adjusted it, etc). This is the authoritative check. //
+  var productIds = cart.map(function(i) { return i.id; });
+  const { data: freshProducts, error: stockErr } = await supabase.from('products').select('id, name, stock_qty').in('id', productIds);
 
-  if (orderErr) {
+  if (stockErr) {
     if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
-    showToast('Could not place order: ' + orderErr.message, 'error');
+    showToast('Could not verify stock: ' + stockErr.message, 'error');
     return;
   }
 
-  // 2. Insert order items
-  const itemRows = cart.map(function(item) {
-    return { order_id: orderRow.id, product_id: item.id, product_name: item.name, price: item.price, qty: item.qty };
-  });
-  await supabase.from('order_items').insert(itemRows);
+  var stockById = {};
+  (freshProducts || []).forEach(function(p) { stockById[p.id] = p.stock_qty; });
 
-  // 3. Insert the first status history entry
-  await supabase.from('order_status_history').insert({
-    order_id: orderRow.id,
-    status: 'placed',
-    label: ORDER_STATUS_MAP.placed.label,
-    description: ORDER_STATUS_MAP.placed.desc
-  });
+  for (var i = 0; i < cart.length; i++) {
+    var item = cart[i];
+    var avail = stockById[item.id];
+    if (avail === undefined) {
+      if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
+      showToast(item.name + ' is no longer available', 'error');
+      return;
+    }
+    if (item.qty > avail) {
+      if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
+      showToast(item.name + ' only has ' + avail + ' ' + (item.unit || 'pc') + ' left. Please update your cart.', 'error');
+      checkoutStep = 1;
+      renderCheckout();
+      return;
+    }
+  }
+
+  if (nextBtn) { nextBtn.textContent = 'Placing order...'; }
+
+  var paymentMethod = selectedPaymentMethod;
+  var baseCode = 'HW' + String(Date.now()).slice(-8).toUpperCase();
+  var groups = groupCartByMerchant();
+  var placedOrders = []; // { id, code, merchantName, total }
+
+  for (var g = 0; g < groups.length; g++) {
+    var group = groups[g];
+    var sub = group.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+    var shipFee = calcDeliveryFee(sub);
+    var orderCode = groups.length > 1 ? baseCode + '-' + String.fromCharCode(65 + g) : baseCode;
+
+    const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
+      order_code: orderCode,
+      user_id: currentUser.id,
+      status: 'placed',
+      subtotal: sub,
+      shipping_fee: shipFee,
+      total: sub + shipFee,
+      payment_method: paymentMethod,
+      shipping_first_name: shippingInfo.firstName,
+      shipping_last_name: shippingInfo.lastName,
+      shipping_phone: shippingInfo.phone,
+      shipping_street: shippingInfo.street,
+      shipping_city: shippingInfo.city,
+      shipping_zip: shippingInfo.zip,
+      delivery_option: shippingInfo.delivery
+    }).select().single();
+
+    if (orderErr) {
+      showToast('Could not place order for ' + group.merchantName + ': ' + orderErr.message, 'error');
+      continue; // keep trying the other sellers' orders rather than losing everything
+    }
+
+    const itemRows = group.items.map(function(item) {
+      return { order_id: orderRow.id, product_id: item.id, product_name: item.name, price: item.price, qty: item.qty, unit: item.unit || 'pc' };
+    });
+    await supabase.from('order_items').insert(itemRows);
+
+    await supabase.from('order_status_history').insert({
+      order_id: orderRow.id,
+      status: 'placed',
+      label: ORDER_STATUS_MAP.placed.label,
+      description: ORDER_STATUS_MAP.placed.desc
+    });
+
+    placedOrders.push({ id: orderRow.id, code: orderCode, merchantName: group.merchantName, total: sub + shipFee });
+  }
+
   updateNotifBadge();
 
-  // A real rider now needs to claim this order — see openRiderSearchModal()
-  // and acceptOrder() for how that happens.
+  if (!placedOrders.length) {
+    if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
+    showToast('Could not place your order. Please try again.', 'error');
+    return;
+  }
 
   // Clear cart
   closeCheckout();
   cart = [];
   saveCart();
   updateCartBadge();
-  openRiderSearchModal(orderRow.id, orderCode);
+
+  // A real rider now needs to claim each order — see openRiderSearchModal()
+  // and acceptOrder() for how that happens.
+  if (placedOrders.length === 1) {
+    openRiderSearchModal(placedOrders[0].id, placedOrders[0].code);
+  } else {
+    showMultiOrderSuccess(placedOrders);
+  }
+}
+
+function showMultiOrderSuccess(placedOrders) {
+  var body = document.getElementById('sn-rider-body');
+  var rowsHtml = placedOrders.map(function(o) {
+    return '<div style="display:flex;justify-content:space-between;padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<span style="font-size:13px;"><i class="fas fa-store"></i> ' + o.merchantName + '<br/><span style="color:#999;font-size:11.5px;">Order #' + o.code + '</span></span>' +
+      '<span style="font-weight:700;font-size:13px;">' + fmt(o.total) + '</span></div>';
+  }).join('');
+
+  body.innerHTML =
+    '<div style="text-align:center;">' +
+    '<div class="login-icon" style="color:#22C55E"><i class="fas fa-check-circle"></i></div>' +
+    '<h2 style="margin:6px 0;">' + placedOrders.length + ' Orders Placed!</h2>' +
+    '<p class="login-sub">Your items were from different sellers, so each is tracked separately.</p>' +
+    '</div>' +
+    rowsHtml +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-top:16px;" onclick="closeRiderModal(); openOrderTracking();">Track My Orders</button>' +
+    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal()">Continue Shopping</button>';
+
+  document.getElementById('sn-riderOverlay').classList.add('active');
+  document.getElementById('sn-riderModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
 }
 
 // Advance an order's status in Supabase + log it to the timeline //
@@ -1978,17 +2119,30 @@ async function renderAdminOverview() {
   body.innerHTML = body2;
 }
 
+let adminMerchantFilter = 'all'; // 'all' | 'pending'
+
 async function renderAdminMerchants() {
   var body = document.getElementById('sn-admin-body');
-  const { data: merchants, error } = await supabase.from('merchants').select('*').order('created_at', { ascending: false });
+  const { data: allMerchants, error } = await supabase.from('merchants').select('*').order('created_at', { ascending: false });
 
-  var rows = (error || !merchants || !merchants.length)
-    ? '<p style="color:#999;font-size:13px;">No merchants yet.</p>'
+  var merchants = allMerchants || [];
+  if (adminMerchantFilter === 'pending') {
+    merchants = merchants.filter(function(m) { return m.business_permit_url && !m.is_verified; });
+  }
+
+  var filterBar = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
+    '<button class="co-btn" style="flex:1;background:' + (adminMerchantFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'all\'; renderAdminMerchants();">All (' + (allMerchants ? allMerchants.length : 0) + ')</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (adminMerchantFilter === 'pending' ? '#B45309' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'pending\'; renderAdminMerchants();">Pending Review (' + (allMerchants ? allMerchants.filter(function(m){return m.business_permit_url && !m.is_verified;}).length : 0) + ')</button>' +
+    '</div>';
+
+  var rows = (error || !merchants.length)
+    ? '<p style="color:#999;font-size:13px;">' + (adminMerchantFilter === 'pending' ? 'Nothing pending review.' : 'No merchants yet.') + '</p>'
     : merchants.map(function(m) {
+        var typeColor = m.merchant_type === 'bolanteros' ? '#B45309' : '#3B82F6';
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
           '<span style="font-weight:700;font-size:13px;">' + m.store_name + (m.is_verified ? ' <i class="fas fa-badge-check" style="color:var(--primary,#22C55E);"></i>' : '') + '</span>' +
-          '<span style="font-size:11px;color:#999;">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
+          '<span style="font-size:11px;color:' + typeColor + ';font-weight:600;">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
           '</div>' +
           '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + (CATEGORY_META[m.business_type] ? CATEGORY_META[m.business_type].title : m.business_type) + '</p>' +
           '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">' +
@@ -2004,7 +2158,7 @@ async function renderAdminMerchants() {
       }).join('');
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
-    '<h3 style="margin:0 0 8px;font-size:14px;">All Merchants (' + (merchants ? merchants.length : 0) + ')</h3>' + rows;
+    '<h3 style="margin:0 0 8px;font-size:14px;">Merchants</h3>' + filterBar + rows;
 }
 
 async function adminSetMerchantVerified(merchantId, verified) {
@@ -2501,6 +2655,7 @@ function injectModals() {
     '<span class="pm-price-now"></span>' +
     '<span class="pm-price-old"></span>' +
     '<span class="pm-discount"></span>' +
+    '<span class="pm-unit" style="color:#999;font-size:12.5px;font-weight:400;"></span>' +
     '</div>' +
     '<p class="pm-location"></p>' +
     '<p class="pm-stock"></p>' +
@@ -3311,25 +3466,6 @@ async function fetchMerchantSales() {
 async function fetchMerchantActivity(orderIds, orderCodeMap) {
   var events = [];
 
-  const { data: stockRows, error: stockErr } = await supabase
-    .from('stock_movements')
-    .select('type, quantity, reason, created_at, products!inner(name, merchant_id)')
-    .eq('products.merchant_id', myMerchantId)
-    .order('created_at', { ascending: false })
-    .limit(100);
-  if (stockErr) console.error('activity: stock_movements error', stockErr);
-
-  (stockRows || []).forEach(function(s) {
-    events.push({
-      type: 'stock',
-      icon: s.type === 'in' ? 'fa-arrow-up' : 'fa-arrow-down',
-      color: s.type === 'in' ? '#15803D' : '#B45309',
-      title: (s.type === 'in' ? 'Stock in' : 'Stock out') + ' — ' + s.products.name,
-      detail: (s.type === 'in' ? '+' : '−') + s.quantity + ' units' + (s.reason ? ' (' + s.reason + ')' : ''),
-      at: s.created_at
-    });
-  });
-
   const { data: reviewRows, error: reviewErr } = await supabase
     .from('reviews')
     .select('rating, comment, created_at, is_anonymous, reviewer_name, products!inner(name, merchant_id)')
@@ -3353,11 +3489,100 @@ async function fetchMerchantActivity(orderIds, orderCodeMap) {
   return events.slice(0, 60);
 }
 
+// ============================================================
+// INVENTORY (separate from Sales Report — current stock levels
+// plus a full stock in/out ledger)
+// ============================================================
+
+async function fetchMerchantInventory() {
+  const { data: myProducts, error: prodErr } = await supabase
+    .from('products')
+    .select('id, name, unit, stock_qty, sold_count, is_active')
+    .eq('merchant_id', myMerchantId)
+    .order('name', { ascending: true });
+  if (prodErr) console.error('inventory: products error', prodErr);
+
+  const { data: movements, error: moveErr } = await supabase
+    .from('stock_movements')
+    .select('type, quantity, reason, created_at, products!inner(name, merchant_id)')
+    .eq('products.merchant_id', myMerchantId)
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (moveErr) console.error('inventory: stock_movements error', moveErr);
+
+  return { products: myProducts || [], movements: movements || [] };
+}
+
+function renderMerchantInventoryView(data) {
+  var body = document.getElementById('sn-merchant-body');
+  var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
+    '</div>';
+
+  var totalUnits = data.products.reduce(function(a, p) { return a + (p.stock_qty || 0); }, 0);
+  var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= 5; }).length;
+  var outOfStockCount = data.products.filter(function(p) { return p.stock_qty <= 0; }).length;
+
+  var summaryCards = '<div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">' +
+    '<div style="flex:1;min-width:90px;background:#F0F8FF;border-radius:10px;padding:12px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Total Units</p><p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#3B82F6;">' + totalUnits + '</p></div>' +
+    '<div style="flex:1;min-width:90px;background:#FFFBEB;border-radius:10px;padding:12px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Low Stock</p><p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#B45309;">' + lowStockCount + '</p></div>' +
+    '<div style="flex:1;min-width:90px;background:#FEE2E2;border-radius:10px;padding:12px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Out of Stock</p><p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#DC2626;">' + outOfStockCount + '</p></div>' +
+    '</div>';
+
+  var stockTable = data.products.length
+    ? '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12.5px;">' +
+      '<thead><tr style="border-bottom:2px solid #eee;text-align:left;color:#999;font-size:11px;text-transform:uppercase;">' +
+      '<th style="padding:6px 4px;">Product</th><th style="padding:6px 4px;">Unit</th><th style="padding:6px 4px;text-align:right;">In Stock</th><th style="padding:6px 4px;text-align:right;">Sold</th><th style="padding:6px 4px;">Status</th></tr></thead><tbody>' +
+      data.products.map(function(p) {
+        var statusHtml = p.stock_qty <= 0
+          ? '<span style="color:#DC2626;font-weight:600;">Out of Stock</span>'
+          : (p.stock_qty <= 5 ? '<span style="color:#B45309;font-weight:600;">Low</span>' : '<span style="color:#15803D;">OK</span>');
+        return '<tr style="border-bottom:1px solid #f5f5f5;' + (p.is_active ? '' : 'opacity:0.5;') + '">' +
+          '<td style="padding:8px 4px;">' + p.name + (p.is_active ? '' : ' <span style="color:#999;">(inactive)</span>') + '</td>' +
+          '<td style="padding:8px 4px;color:#777;">' + (p.unit || 'pc') + '</td>' +
+          '<td style="padding:8px 4px;text-align:right;font-weight:600;">' + p.stock_qty + '</td>' +
+          '<td style="padding:8px 4px;text-align:right;color:#777;">' + (p.sold_count || 0) + '</td>' +
+          '<td style="padding:8px 4px;">' + statusHtml + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div>'
+    : '<p style="color:#999;font-size:13px;">No products yet.</p>';
+
+  var ledgerHtml = data.movements.length
+    ? data.movements.map(function(m) {
+        return '<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #f5f5f5;font-size:12.5px;">' +
+          '<div><span style="font-weight:600;color:' + (m.type === 'in' ? '#15803D' : '#B45309') + ';"><i class="fas fa-' + (m.type === 'in' ? 'arrow-up' : 'arrow-down') + '"></i> ' + (m.type === 'in' ? 'Stock In' : 'Stock Out') + '</span>' +
+          '<span style="color:#777;"> \u2014 ' + m.products.name + '</span>' +
+          (m.reason ? '<p style="margin:2px 0 0;color:#999;font-size:11px;">' + m.reason + '</p>' : '') + '</div>' +
+          '<div style="text-align:right;"><span style="font-weight:700;">' + (m.type === 'in' ? '+' : '\u2212') + m.quantity + '</span>' +
+          '<p style="margin:2px 0 0;color:#aaa;font-size:11px;">' + timeAgo(m.created_at) + '</p></div></div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No stock movements yet.</p>';
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+    '<p class="login-sub" style="margin:0 0 14px;">Inventory tracking \u2014 separate from sales revenue</p>' +
+    '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="printSalesReport()"><i class="fas fa-print"></i> Print / Save as PDF</button>' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
+    '</div>' +
+    summaryCards +
+    '<h3 style="margin:0 0 8px;font-size:14px;">Current Stock</h3>' + stockTable +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Stock In / Out Ledger</h3>' + ledgerHtml;
+}
+
 function renderMerchantSalesView() {
   var body = document.getElementById('sn-merchant-body');
-  var tabs = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
-    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;" onclick="switchMerchantView(\'products\')">Products</button>' +
-    '<button class="co-btn" style="flex:1;background:var(--primary,#22C55E);color:#fff;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+  var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
   if (!myMerchantSales || myMerchantSales.error) {
@@ -3417,29 +3642,86 @@ function renderMerchantSalesView() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No activity yet. Sales, stock changes, and reviews will appear here.</p>';
 
+  var exportButtons = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="printSalesReport()"><i class="fas fa-print"></i> Print / Save as PDF</button>' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
+    '</div>';
+
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+    exportButtons +
     summaryCards +
     '<h3 style="margin:0 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Recent Orders</h3>' + recentOrdersHtml +
-    '<h3 style="margin:18px 0 8px;font-size:14px;">Other Store Activity</h3>' +
-    '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">Stock changes and new reviews</p>' +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Customer Feedback</h3>' +
+    '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">New reviews on your products \u2014 see the Inventory tab for stock activity</p>' +
     activityHtml;
+}
+
+// Uses the browser's native print dialog — "Save as PDF" is a built-in
+// destination option in every modern browser's print dialog, so this
+// covers the PDF requirement without needing a PDF-generation library. //
+function printSalesReport() {
+  window.print();
+}
+
+// Captures the report as a PNG using html2canvas, loaded on demand from
+// a CDN so it doesn't add weight to every page load — only merchants who
+// actually click this ever download it. //
+function downloadSalesReportImage() {
+  if (window.html2canvas) {
+    captureSalesReportImage();
+    return;
+  }
+  showToast('Preparing image export...', 'info');
+  var script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+  script.onload = captureSalesReportImage;
+  script.onerror = function() { showToast('Could not load image export tool. Try Print instead.', 'error'); };
+  document.head.appendChild(script);
+}
+
+function captureSalesReportImage() {
+  var target = document.getElementById('sn-merchant-body');
+  if (!target) return;
+
+  // Temporarily hide the export/tab buttons so they don't appear in the image //
+  var toHide = target.querySelectorAll('button');
+  toHide.forEach(function(b) { b.style.visibility = 'hidden'; });
+
+  window.html2canvas(target, { backgroundColor: '#ffffff', scale: 2 }).then(function(canvas) {
+    toHide.forEach(function(b) { b.style.visibility = ''; });
+    var link = document.createElement('a');
+    link.download = 'HomeWeb_Sales_Report_' + new Date().toISOString().slice(0, 10) + '.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    showToast('Report downloaded \u2705');
+  }).catch(function(err) {
+    toHide.forEach(function(b) { b.style.visibility = ''; });
+    showToast('Could not generate image: ' + err.message, 'error');
+  });
 }
 
 
 function renderMerchantDashboard() {
   var body = document.getElementById('sn-merchant-body');
 
-  var tabs = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
-    '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'products' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'products' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'products\')">Products</button>' +
-    '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'sales' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'sales' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
-    '<button class="co-btn" style="flex:1;background:' + (merchantDashboardView === 'verify' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'verify' ? '#fff' : '#333') + ';" onclick="switchMerchantView(\'verify\')">Verification</button>' +
+  var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'products' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'products' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'inventory' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'inventory' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'sales' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'sales' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'verify' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'verify' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
   if (merchantDashboardView === 'sales') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading sales report...</p></div>';
     fetchMerchantSales().then(renderMerchantSalesView);
+    return;
+  }
+
+  if (merchantDashboardView === 'inventory') {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading inventory...</p></div>';
+    fetchMerchantInventory().then(renderMerchantInventoryView);
     return;
   }
 
@@ -3588,6 +3870,12 @@ function openProductForm(productId) {
     '<div class="co-field"><label>Price (\u20B1) <span class="co-required">*</span></label>' +
     '<input type="number" id="pf-price" min="0" step="0.01" value="' + (p ? p.price : '') + '"/>' +
     '<span class="co-field-error">Enter a valid price</span></div>' +
+    '<div class="co-field"><label>Unit of Measurement <span class="co-required">*</span></label>' +
+    '<input type="text" id="pf-unit" list="pf-unit-options" placeholder="e.g. 1kg, 500g, pack, sack" value="' + (p && p.unit ? p.unit : '') + '"/>' +
+    '<datalist id="pf-unit-options">' +
+    ['1kg', '500g', '250g', 'pc', 'pack', 'bundle', 'sack', 'bottle', 'dozen', 'tray'].map(function(u) { return '<option value="' + u + '">'; }).join('') +
+    '</datalist>' +
+    '<span class="co-field-error">Specify a unit (e.g. 1kg, pack)</span></div>' +
     '<div class="co-field"><label>Category</label>' +
     '<select id="pf-category">' +
     Object.keys(CATEGORY_META).filter(function(k) { return k !== 'other'; }).concat(['other']).map(function(k) {
@@ -3609,7 +3897,7 @@ function openProductForm(productId) {
     '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" id="pf-save-btn" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
     '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="renderMerchantDashboard()">Cancel</button>';
 
-  ['pf-name', 'pf-price', 'pf-stock'].forEach(function(id) {
+  ['pf-name', 'pf-price', 'pf-stock', 'pf-unit'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', function() { this.closest('.co-field').classList.remove('co-field--error'); });
   });
@@ -3629,10 +3917,12 @@ async function saveProduct() {
   var price = parseFloat(document.getElementById('pf-price').value);
   var category = document.getElementById('pf-category').value;
   var desc = document.getElementById('pf-desc').value.trim();
+  var unit = document.getElementById('pf-unit').value.trim();
 
   var ok = true;
   if (!name) { document.getElementById('pf-name').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!(price >= 0)) { document.getElementById('pf-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (!unit) { document.getElementById('pf-unit').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!ok) { showToast('Please fix the errors above', 'info'); return; }
 
   var saveBtn = document.getElementById('pf-save-btn');
@@ -3658,7 +3948,7 @@ async function saveProduct() {
 
   if (editingProductId) {
     const { error } = await supabase.from('products').update({
-      name: name, description: desc, price: price, category: category, image_url: imageUrl, updated_at: new Date().toISOString()
+      name: name, description: desc, price: price, category: category, unit: unit, image_url: imageUrl, updated_at: new Date().toISOString()
     }).eq('id', editingProductId);
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; }
     if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
@@ -3669,7 +3959,7 @@ async function saveProduct() {
 
     const { data: newProduct, error } = await supabase.from('products').insert({
       merchant_id: myMerchantId, name: name, description: desc, price: price,
-      category: category, image_url: imageUrl, stock_qty: stock
+      category: category, unit: unit, image_url: imageUrl, stock_qty: stock
     }).select().single();
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Add Product'; }
     if (error) { showToast('Could not add product: ' + error.message, 'error'); return; }
@@ -4156,4 +4446,22 @@ document.addEventListener('DOMContentLoaded', async function() {
   await loadProducts();
   renderHomeProducts();
   renderCategoryPage();
+
+  // Keep product cards (ratings, stock, sold counts) live without needing
+  // a manual refresh — useful when reviews/orders happen on another
+  // device during a demo or in normal multi-user use. //
+  setInterval(async function() {
+    // Don't refresh while someone's actively browsing a product/cart/checkout —
+    // re-rendering underneath them would be jarring mid-interaction. //
+    var busyModals = ['sn-productModal', 'sn-checkoutModal', 'sn-storeModal'];
+    var isBusy = busyModals.some(function(id) {
+      var el = document.getElementById(id);
+      return el && el.classList.contains('active');
+    });
+    if (isBusy) return;
+
+    await loadProducts();
+    renderHomeProducts();
+    renderCategoryPage();
+  }, 30000);
 });
