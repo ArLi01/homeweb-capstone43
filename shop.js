@@ -415,7 +415,7 @@ function openProductModal(id) {
   m.querySelector('.pm-location').innerHTML = '<i class="fas fa-store"></i> Sold by <span onclick="closeProductModal(); openMerchantStorefront(\'' + p.merchant_id + '\')" style="text-decoration:underline;cursor:pointer;color:var(--primary,#22C55E);font-weight:600;">' + p.location + '</span>' +
     (p.merchantVerified ? ' <i class="fas fa-badge-check" title="Verified Seller" style="color:var(--primary,#22C55E);"></i>' : '') +
     ' <i class="fas fa-chevron-right" style="font-size:10px;color:#999;"></i>';
-  m.querySelector('.pm-qty-val').textContent = 1;
+  m.querySelector('.pm-qty-val').value = 1;
 
   var pmStock = m.querySelector('.pm-stock');
   if (pmStock) pmStock.innerHTML = stockLabelHtml(p.stock_qty);
@@ -664,8 +664,21 @@ function changeQty(delta) {
   var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
   var attempted = currentProduct.qty + delta;
   currentProduct.qty = Math.max(1, Math.min(max, attempted));
-  document.querySelector('.pm-qty-val').textContent = currentProduct.qty;
+  document.querySelector('.pm-qty-val').value = currentProduct.qty;
   if (delta > 0 && attempted > max) showToast('Only ' + max + ' left in stock', 'info');
+}
+
+// Lets the customer type a quantity directly instead of clicking +/- repeatedly //
+function setQtyDirect(value) {
+  var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
+  var n = parseInt(value, 10);
+  if (isNaN(n) || n < 1) n = 1;
+  if (n > max) {
+    n = max;
+    showToast('Only ' + max + ' left in stock', 'info');
+  }
+  currentProduct.qty = n;
+  document.querySelector('.pm-qty-val').value = n;
 }
 
 // Add to cart //
@@ -745,7 +758,9 @@ function renderCheckout() {
         (item.merchantName ? '<p style="margin:2px 0 0;font-size:11px;color:#999;"><i class="fas fa-store"></i> ' + item.merchantName + '</p>' : '') +
         '<div class="co-cart-controls">' +
         '<button onclick="changeCartQty(\'' + item.id + '\',-1)">&#8722;</button>' +
-        '<span>' + item.qty + '</span>' +
+        '<input type="number" value="' + item.qty + '" min="1" step="1" ' +
+        'style="width:48px;text-align:center;border:1px solid #ddd;border-radius:6px;padding:3px 2px;font-size:13px;" ' +
+        'onchange="setCartQtyDirect(\'' + item.id + '\', this.value)" onclick="this.select()"/>' +
         '<button onclick="changeCartQty(\'' + item.id + '\',1)"' + (atMax ? ' disabled style="opacity:0.4;"' : '') + '>+</button>' +
         '<button class="co-remove" onclick="removeCartItem(\'' + item.id + '\')"><i class="fas fa-trash"></i></button>' +
         '</div>' +
@@ -943,6 +958,23 @@ function changeCartQty(id, delta) {
     return;
   }
   item.qty = Math.max(1, attempted);
+  saveCart();
+  updateCartBadge();
+  renderCheckout();
+}
+
+// Lets the customer type a cart quantity directly instead of clicking +/- repeatedly //
+function setCartQtyDirect(id, value) {
+  var item = cart.find(function(x) { return x.id === id; });
+  if (!item) return;
+  var max = typeof item.stock_qty === 'number' ? item.stock_qty : 99;
+  var n = parseInt(value, 10);
+  if (isNaN(n) || n < 1) n = 1;
+  if (n > max) {
+    n = max;
+    showToast('Only ' + max + ' ' + (item.unit || 'pc') + ' left in stock', 'info');
+  }
+  item.qty = n;
   saveCart();
   updateCartBadge();
   renderCheckout();
@@ -2665,7 +2697,9 @@ function injectModals() {
     '<div class="pm-qty">' +
     '<span>Quantity:</span>' +
     '<button onclick="changeQty(-1)">&#8722;</button>' +
-    '<span class="pm-qty-val">1</span>' +
+    '<input type="number" class="pm-qty-val" value="1" min="1" step="1" ' +
+    'style="width:52px;text-align:center;border:1px solid #ddd;border-radius:6px;padding:4px 2px;font-size:14px;" ' +
+    'onchange="setQtyDirect(this.value)" onclick="this.select()"/>' +
     '<button onclick="changeQty(1)">+</button>' +
     '</div>' +
     '<div class="pm-actions">' +
@@ -3395,7 +3429,7 @@ async function loadMyMerchantProducts() {
 async function fetchMerchantSales() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, product_name, products!inner(name, merchant_id), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at, user_id)')
+    .select('qty, price, product_id, product_name, products!inner(name, merchant_id, category, cost_price), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at, user_id)')
     .eq('products.merchant_id', myMerchantId);
 
   console.log('fetchMerchantSales:', { merchantId: myMerchantId, rows: data, error: error });
@@ -3408,8 +3442,10 @@ async function fetchMerchantSales() {
   var rows = data || [];
   var totalRevenue = 0, totalItems = 0;
   var byProduct = {};
+  var byCategory = {};
   var orderIdSet = {};
   var byOrder = {};
+  var knownProfit = 0, itemsWithCost = 0, itemsWithoutCost = 0;
 
   rows.forEach(function(r) {
     var lineTotal = r.price * r.qty;
@@ -3420,6 +3456,20 @@ async function fetchMerchantSales() {
     if (!byProduct[pname]) byProduct[pname] = { name: pname, qty: 0, revenue: 0 };
     byProduct[pname].qty += r.qty;
     byProduct[pname].revenue += lineTotal;
+
+    var cat = r.products ? r.products.category : 'other';
+    if (!byCategory[cat]) byCategory[cat] = 0;
+    byCategory[cat] += lineTotal;
+
+    // Only counts toward profit if this merchant actually entered a cost
+    // price for this product — otherwise we honestly don't know it. //
+    var costPrice = r.products ? r.products.cost_price : null;
+    if (costPrice !== null && costPrice !== undefined) {
+      knownProfit += (r.price - costPrice) * r.qty;
+      itemsWithCost += r.qty;
+    } else {
+      itemsWithoutCost += r.qty;
+    }
 
     if (r.orders) {
       orderIdSet[r.orders.id] = r.orders.order_code;
@@ -3453,13 +3503,46 @@ async function fetchMerchantSales() {
 
   var activity = await fetchMerchantActivity(orderIds, orderIdSet);
 
+  // Order completion rate: real, computed from actual order statuses //
+  var deliveredCount = Object.values(byOrder).filter(function(o) { return o.status === 'delivered'; }).length;
+  var completionRate = orderIds.length > 0 ? Math.round((deliveredCount / orderIds.length) * 100) : null;
+
+  // Sell-through rate: units sold vs units ever stocked (sold + current stock) —
+  // a genuine operational metric, not fabricated. //
+  const { data: myProducts } = await supabase.from('products').select('stock_qty, sold_count').eq('merchant_id', myMerchantId);
+  var totalSold = 0, totalEverStocked = 0;
+  (myProducts || []).forEach(function(p) { totalSold += p.sold_count || 0; totalEverStocked += (p.sold_count || 0) + (p.stock_qty || 0); });
+  var sellThroughRate = totalEverStocked > 0 ? Math.round((totalSold / totalEverStocked) * 100) : null;
+
+  // Week-over-week comparison — real, using actual order timestamps.
+  // (Not year-over-year: the store hasn't been live a full year, so that
+  // comparison would be meaningless or fabricated.) //
+  var now = Date.now();
+  var weekMs = 7 * 24 * 60 * 60 * 1000;
+  var thisWeekRevenue = 0, lastWeekRevenue = 0;
+  Object.values(byOrder).forEach(function(o) {
+    var age = now - new Date(o.createdAt).getTime();
+    if (age <= weekMs) thisWeekRevenue += o.total;
+    else if (age <= weekMs * 2) lastWeekRevenue += o.total;
+  });
+  var wowChange = lastWeekRevenue > 0 ? Math.round(((thisWeekRevenue - lastWeekRevenue) / lastWeekRevenue) * 100) : null;
+
   myMerchantSales = {
     totalRevenue: totalRevenue,
     totalItems: totalItems,
     orderCount: orderIds.length,
     topProducts: topProducts,
     recentOrders: recentOrders,
-    activity: activity
+    activity: activity,
+    byCategory: byCategory,
+    knownProfit: knownProfit,
+    itemsWithCost: itemsWithCost,
+    itemsWithoutCost: itemsWithoutCost,
+    completionRate: completionRate,
+    sellThroughRate: sellThroughRate,
+    thisWeekRevenue: thisWeekRevenue,
+    lastWeekRevenue: lastWeekRevenue,
+    wowChange: wowChange
   };
   return myMerchantSales;
 }
@@ -3571,12 +3654,30 @@ function renderMerchantInventoryView(data) {
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
     '<p class="login-sub" style="margin:0 0 14px;">Inventory tracking \u2014 separate from sales revenue</p>' +
     '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
-    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="printSalesReport()"><i class="fas fa-print"></i> Print / Save as PDF</button>' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
     '</div>' +
     summaryCards +
     '<h3 style="margin:0 0 8px;font-size:14px;">Current Stock</h3>' + stockTable +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Stock In / Out Ledger</h3>' + ledgerHtml;
+}
+
+// Renders a circular percentage gauge as inline SVG — used only for
+// metrics that are genuinely computable percentages (sell-through rate,
+// order completion rate), never as decoration standing in for a real number. //
+function gaugeSvg(pct, color, size) {
+  size = size || 84;
+  var r = size / 2 - 8;
+  var c = 2 * Math.PI * r;
+  var offset = c * (1 - pct / 100);
+  var center = size / 2;
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '">' +
+    '<circle cx="' + center + '" cy="' + center + '" r="' + r + '" fill="none" stroke="#F0F0EE" stroke-width="8"/>' +
+    '<circle cx="' + center + '" cy="' + center + '" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="8" ' +
+    'stroke-dasharray="' + c + '" stroke-dashoffset="' + offset + '" stroke-linecap="round" ' +
+    'transform="rotate(-90 ' + center + ' ' + center + ')"/>' +
+    '<text x="' + center + '" y="' + (center + 5) + '" text-anchor="middle" font-size="17" font-weight="700" fill="' + color + '">' + pct + '%</text>' +
+    '</svg>';
 }
 
 function renderMerchantSalesView() {
@@ -3596,7 +3697,7 @@ function renderMerchantSalesView() {
 
   var s = myMerchantSales;
 
-  var summaryCards = '<div style="display:flex;gap:10px;margin-bottom:20px;">' +
+  var summaryCards = '<div style="display:flex;gap:10px;margin-bottom:16px;">' +
     '<div style="flex:1;background:#F0FFF4;border-radius:10px;padding:14px;text-align:center;">' +
     '<p style="margin:0;font-size:11px;color:#666;">Total Revenue</p>' +
     '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:var(--primary,#22C55E);">' + fmt(s.totalRevenue) + '</p></div>' +
@@ -3607,6 +3708,67 @@ function renderMerchantSalesView() {
     '<p style="margin:0;font-size:11px;color:#666;">Orders</p>' +
     '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#F59E0B;">' + s.orderCount + '</p></div>' +
     '</div>';
+
+  // Gauges — only rendered when there's actually enough data to compute
+  // a meaningful percentage; otherwise shown as "not enough data yet". //
+  var gaugesHtml = '<div style="display:flex;gap:10px;margin-bottom:16px;">' +
+    '<div style="flex:1;background:#fff;border:1px solid #eee;border-radius:10px;padding:14px;text-align:center;">' +
+    (s.sellThroughRate === null
+      ? '<p style="color:#999;font-size:12px;padding:20px 0;">No stock history yet</p>'
+      : gaugeSvg(s.sellThroughRate, '#3B82F6')) +
+    '<p style="margin:6px 0 0;font-size:11px;color:#666;">Sell-Through Rate</p>' +
+    '<p style="margin:2px 0 0;font-size:10px;color:#aaa;">Units sold vs. ever stocked</p></div>' +
+    '<div style="flex:1;background:#fff;border:1px solid #eee;border-radius:10px;padding:14px;text-align:center;">' +
+    (s.completionRate === null
+      ? '<p style="color:#999;font-size:12px;padding:20px 0;">No orders yet</p>'
+      : gaugeSvg(s.completionRate, 'var(--primary,#22C55E)')) +
+    '<p style="margin:6px 0 0;font-size:11px;color:#666;">Order Completion Rate</p>' +
+    '<p style="margin:2px 0 0;font-size:10px;color:#aaa;">Delivered vs. all orders</p></div>' +
+    '</div>';
+
+  // Revenue by category — real data, since every product already has a category //
+  var categoryEntries = Object.keys(s.byCategory).map(function(cat) {
+    return { cat: cat, revenue: s.byCategory[cat], label: CATEGORY_META[cat] ? CATEGORY_META[cat].title : cat };
+  }).sort(function(a, b) { return b.revenue - a.revenue; });
+  var maxCatRevenue = categoryEntries.length ? categoryEntries[0].revenue : 1;
+  var categoryChartHtml = categoryEntries.length
+    ? categoryEntries.map(function(c) {
+        var pct = Math.round((c.revenue / maxCatRevenue) * 100);
+        return '<div style="margin-bottom:10px;">' +
+          '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px;"><span>' + c.label + '</span><span style="font-weight:600;">' + fmt(c.revenue) + '</span></div>' +
+          '<div style="background:#F0F0EE;border-radius:6px;height:8px;overflow:hidden;"><div style="background:var(--primary,#22C55E);height:100%;width:' + pct + '%;"></div></div>' +
+          '</div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No sales yet.</p>';
+
+  // Net profit — only shown for products where the merchant actually
+  // entered a cost price. Never estimated or guessed. //
+  var profitHtml;
+  if (s.itemsWithCost === 0) {
+    profitHtml = '<div style="background:#F9FAFB;border-radius:10px;padding:14px;">' +
+      '<p style="margin:0;color:#777;font-size:12.5px;"><i class="fas fa-circle-info"></i> Add a cost price to your products (Products tab \u2192 Edit) to see real profit here.</p></div>';
+  } else {
+    var profitNote = s.itemsWithoutCost > 0
+      ? '<p style="margin:4px 0 0;font-size:11px;color:#999;">Based on ' + s.itemsWithCost + ' of ' + (s.itemsWithCost + s.itemsWithoutCost) + ' items sold \u2014 the rest don\'t have a cost price set yet.</p>'
+      : '<p style="margin:4px 0 0;font-size:11px;color:#999;">Based on all items sold.</p>';
+    profitHtml = '<div style="background:#F0FFF4;border-radius:10px;padding:14px;">' +
+      '<p style="margin:0;font-size:11px;color:#666;">Net Profit</p>' +
+      '<p style="margin:4px 0 0;font-weight:700;font-size:20px;color:' + (s.knownProfit >= 0 ? 'var(--primary,#22C55E)' : '#DC2626') + ';">' + fmt(s.knownProfit) + '</p>' +
+      profitNote + '</div>';
+  }
+
+  // Week-over-week — real comparison using actual timestamps, not a
+  // fabricated year-over-year figure the store has no history for. //
+  var wowHtml;
+  if (s.wowChange === null) {
+    wowHtml = '<p style="color:#999;font-size:12px;">Not enough order history yet for a week-over-week comparison.</p>';
+  } else {
+    var up = s.wowChange >= 0;
+    wowHtml = '<div style="display:flex;align-items:center;gap:10px;">' +
+      '<span style="font-size:22px;font-weight:700;color:' + (up ? 'var(--primary,#22C55E)' : '#DC2626') + ';"><i class="fas fa-arrow-' + (up ? 'up' : 'down') + '"></i> ' + Math.abs(s.wowChange) + '%</span>' +
+      '<span style="font-size:12px;color:#777;">' + fmt(s.thisWeekRevenue) + ' this week vs ' + fmt(s.lastWeekRevenue) + ' last week</span>' +
+      '</div>';
+  }
 
   var topProductsHtml = s.topProducts.length
     ? s.topProducts.map(function(p, i) {
@@ -3646,7 +3808,7 @@ function renderMerchantSalesView() {
     : '<p style="color:#999;font-size:13px;">No activity yet. Sales, stock changes, and reviews will appear here.</p>';
 
   var exportButtons = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
-    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="printSalesReport()"><i class="fas fa-print"></i> Print / Save as PDF</button>' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
     '</div>';
 
@@ -3654,18 +3816,82 @@ function renderMerchantSalesView() {
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
     exportButtons +
     summaryCards +
-    '<h3 style="margin:0 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
+    gaugesHtml +
+    '<h3 style="margin:0 0 8px;font-size:14px;">This Week vs Last Week</h3>' + wowHtml +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Revenue by Category</h3>' + categoryChartHtml +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Net Profit</h3>' + profitHtml +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Recent Orders</h3>' + recentOrdersHtml +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Customer Feedback</h3>' +
     '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">New reviews on your products \u2014 see the Inventory tab for stock activity</p>' +
     activityHtml;
 }
 
-// Uses the browser's native print dialog — "Save as PDF" is a built-in
-// destination option in every modern browser's print dialog, so this
-// covers the PDF requirement without needing a PDF-generation library. //
-function printSalesReport() {
-  window.print();
+// The old "Print / Save as PDF" button relied on window.print(), which
+// doesn't work reliably here — the report lives inside a position:fixed,
+// internally-scrolling modal, and browsers clip printed output to
+// whatever's currently visible in that scroll area rather than the full
+// content, producing blank pages beyond the first screen's worth.
+// This generates an actual PDF file directly instead, using the same
+// html2canvas capture as the image export, paired with jsPDF to paginate
+// it properly if the report is taller than one page. //
+function downloadSalesReportPDF() {
+  var need = [];
+  if (!window.html2canvas) need.push('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+  if (!window.jspdf) need.push('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+
+  if (!need.length) { captureSalesReportPDF(); return; }
+
+  showToast('Preparing PDF export...', 'info');
+  var loaded = 0;
+  need.forEach(function(src) {
+    var script = document.createElement('script');
+    script.src = src;
+    script.onload = function() {
+      loaded++;
+      if (loaded === need.length) captureSalesReportPDF();
+    };
+    script.onerror = function() { showToast('Could not load PDF export tool.', 'error'); };
+    document.head.appendChild(script);
+  });
+}
+
+function captureSalesReportPDF() {
+  var target = document.getElementById('sn-merchant-body');
+  if (!target) return;
+
+  var toHide = target.querySelectorAll('button');
+  toHide.forEach(function(b) { b.style.visibility = 'hidden'; });
+
+  window.html2canvas(target, { backgroundColor: '#ffffff', scale: 2 }).then(function(canvas) {
+    toHide.forEach(function(b) { b.style.visibility = ''; });
+
+    var pdf = new window.jspdf.jsPDF('p', 'pt', 'a4');
+    var pageWidth = pdf.internal.pageSize.getWidth();
+    var pageHeight = pdf.internal.pageSize.getHeight();
+    var imgWidth = pageWidth;
+    var imgHeight = (canvas.height * imgWidth) / canvas.width;
+    var imgData = canvas.toDataURL('image/png');
+
+    var heightLeft = imgHeight;
+    var position = 0;
+
+    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+
+    while (heightLeft > 0) {
+      position -= pageHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+    }
+
+    pdf.save('HomeWeb_Report_' + new Date().toISOString().slice(0, 10) + '.pdf');
+    showToast('PDF downloaded \u2705');
+  }).catch(function(err) {
+    toHide.forEach(function(b) { b.style.visibility = ''; });
+    showToast('Could not generate PDF: ' + err.message, 'error');
+  });
 }
 
 // Captures the report as a PNG using html2canvas, loaded on demand from
@@ -3680,7 +3906,7 @@ function downloadSalesReportImage() {
   var script = document.createElement('script');
   script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
   script.onload = captureSalesReportImage;
-  script.onerror = function() { showToast('Could not load image export tool. Try Print instead.', 'error'); };
+  script.onerror = function() { showToast('Could not load image export tool.', 'error'); };
   document.head.appendChild(script);
 }
 
@@ -3873,6 +4099,9 @@ function openProductForm(productId) {
     '<div class="co-field"><label>Price (\u20B1) <span class="co-required">*</span></label>' +
     '<input type="number" id="pf-price" min="0" step="0.01" value="' + (p ? p.price : '') + '"/>' +
     '<span class="co-field-error">Enter a valid price</span></div>' +
+    '<div class="co-field"><label>Cost Price (\u20B1) <span style="color:#999;font-weight:400;">\u2014 optional</span></label>' +
+    '<input type="number" id="pf-cost-price" min="0" step="0.01" placeholder="What you paid for this, if you want profit tracked" value="' + (p && p.cost_price !== null && p.cost_price !== undefined ? p.cost_price : '') + '"/>' +
+    '<span style="font-size:11px;color:#999;">Leave blank if you\'d rather not track this \u2014 your Sales Report just won\'t show profit for this item.</span></div>' +
     '<div class="co-field"><label>Unit of Measurement <span class="co-required">*</span></label>' +
     '<input type="text" id="pf-unit" placeholder="Type your own, e.g. 1kg, 350g, pack of 3, sack" value="' + (p && p.unit ? p.unit : '') + '"/>' +
     '<span class="co-field-error">Specify a unit (e.g. 1kg, pack)</span></div>' +
@@ -3897,7 +4126,7 @@ function openProductForm(productId) {
     '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" id="pf-save-btn" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
     '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="renderMerchantDashboard()">Cancel</button>';
 
-  ['pf-name', 'pf-price', 'pf-stock', 'pf-unit'].forEach(function(id) {
+  ['pf-name', 'pf-price', 'pf-cost-price', 'pf-stock', 'pf-unit'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', function() { this.closest('.co-field').classList.remove('co-field--error'); });
   });
@@ -3918,11 +4147,14 @@ async function saveProduct() {
   var category = document.getElementById('pf-category').value;
   var desc = document.getElementById('pf-desc').value.trim();
   var unit = document.getElementById('pf-unit').value.trim();
+  var costPriceRaw = document.getElementById('pf-cost-price').value.trim();
+  var costPrice = costPriceRaw === '' ? null : parseFloat(costPriceRaw);
 
   var ok = true;
   if (!name) { document.getElementById('pf-name').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!(price >= 0)) { document.getElementById('pf-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!unit) { document.getElementById('pf-unit').closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (costPriceRaw !== '' && !(costPrice >= 0)) { document.getElementById('pf-cost-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!ok) { showToast('Please fix the errors above', 'info'); return; }
 
   var saveBtn = document.getElementById('pf-save-btn');
@@ -3948,7 +4180,7 @@ async function saveProduct() {
 
   if (editingProductId) {
     const { error } = await supabase.from('products').update({
-      name: name, description: desc, price: price, category: category, unit: unit, image_url: imageUrl, updated_at: new Date().toISOString()
+      name: name, description: desc, price: price, cost_price: costPrice, category: category, unit: unit, image_url: imageUrl, updated_at: new Date().toISOString()
     }).eq('id', editingProductId);
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; }
     if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
@@ -3958,7 +4190,7 @@ async function saveProduct() {
     var stock = stockEl ? parseInt(stockEl.value, 10) || 0 : 0;
 
     const { data: newProduct, error } = await supabase.from('products').insert({
-      merchant_id: myMerchantId, name: name, description: desc, price: price,
+      merchant_id: myMerchantId, name: name, description: desc, price: price, cost_price: costPrice,
       category: category, unit: unit, image_url: imageUrl, stock_qty: stock
     }).select().single();
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Add Product'; }
