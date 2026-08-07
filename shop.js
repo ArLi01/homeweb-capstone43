@@ -103,7 +103,9 @@ function starsHTML(n) {
 // Shared product card markup used by both the homepage and category page //
 function renderProductCardHtml(p) {
   var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
-  var badge = p.discount ? '<div class="product-badge sale-badge">-' + p.discount + '%</div>' : '';
+  var badge = p.discount
+    ? '<div class="product-badge sale-badge">-' + p.discount + '%</div>'
+    : (p.ratingCount >= 10 && p.ratingAvg >= 4.7 ? '<div class="product-badge free-badge">Best Seller</div>' : '');
   var oldPriceHtml = p.oldPrice ? '<span class="price-old">' + fmtPrice(p.oldPrice) + '</span>' : '';
   var imgSrc = getProductImage(p.id);
   var imgHtml = imgSrc
@@ -338,11 +340,15 @@ function initSearch() {
     filterProducts(this.value);
   });
 
-  // Escape key to clear search //
+  // Enter key: filter, then jump straight to the results //
   input.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
       this.value = '';
       filterProducts('');
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      filterProducts(this.value);
+      scrollToProductGrid();
     }
   });
 
@@ -350,6 +356,23 @@ function initSearch() {
   input.addEventListener('search', function() {
     filterProducts(this.value);
   });
+
+  // Clicking the search button does the same thing as pressing Enter //
+  var searchBtn = document.querySelector('.search-btn');
+  if (searchBtn) {
+    searchBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      filterProducts(input.value);
+      scrollToProductGrid();
+    });
+  }
+}
+
+// Scrolls to wherever the product grid actually lives — the homepage's
+// "Recommended For You" grid, or category.html's results grid. //
+function scrollToProductGrid() {
+  var target = document.getElementById('home-product-grid') || document.getElementById('cat-product-grid');
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // INJECT DATA-IDS onto existing cards //
