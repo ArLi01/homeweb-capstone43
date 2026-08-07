@@ -94,6 +94,16 @@ img { display: block; max-width: 100%; }
   vertical-align: middle;
 }
 
+.msg-badge {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #EF4444;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
 /* HEADER */
 .header {
   background: var(--bg);

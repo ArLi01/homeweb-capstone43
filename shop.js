@@ -40,7 +40,7 @@ function openDaysLabel(merchant) {
 async function loadProducts() {
   const { data, error } = await supabase
     .from('products')
-    .select('*, merchants(id, store_name, merchant_type, open_days, is_verified)')
+    .select('*, merchants(id, store_name, merchant_type, open_days, is_verified, is_suspended)')
     .eq('is_active', true)
     .order('created_at', { ascending: false });
 
@@ -52,6 +52,8 @@ async function loadProducts() {
 
   products = (data || [])
     .filter(function(p) {
+      // Suspended merchants disappear from the storefront entirely //
+      if (p.merchants && p.merchants.is_suspended) return false;
       // Bolanteros stores disappear from the storefront on their closed days //
       return isStoreOpenToday(p.merchants);
     })
@@ -558,6 +560,521 @@ function renderReviewsList(showAll) {
 // MERCHANT STOREFRONT (customer-facing view of a seller's shop)
 // ============================================================
 
+// ============================================================
+// REPORTS — customers, merchants, and riders can report each other
+// ============================================================
+
+var REPORT_REASONS = {
+  merchant: ['Item not as described', 'Never received order', 'Fraud or scam', 'Rude or unprofessional', 'Fake or inappropriate listing', 'Other'],
+  rider: ['Never delivered', 'Rude or unprofessional', 'Damaged items on arrival', 'Unsafe behavior', 'Other'],
+  customer: ['Harassment or abuse', 'Fraudulent order', 'Refused to pay (COD)', 'Fake report/complaint', 'Other']
+};
+
+var currentReportContext = null;
+
+function openReportModal(reportedType, reportedId, reportedName, orderId) {
+  if (!currentUser) {
+    showToast('Please log in to submit a report', 'info');
+    openLoginModal();
+    return;
+  }
+  currentReportContext = { reportedType: reportedType, reportedId: reportedId, reportedName: reportedName, orderId: orderId || null };
+
+  var reasons = REPORT_REASONS[reportedType] || ['Other'];
+  var body = document.getElementById('sn-report-body');
+  body.innerHTML =
+    '<div class="login-icon" style="color:#DC2626;"><i class="fas fa-flag"></i></div>' +
+    '<h2>Report ' + (reportedType === 'merchant' ? 'Store' : capitalize(reportedType)) + '</h2>' +
+    '<p class="login-sub">Reporting: ' + reportedName + '</p>' +
+    '<div class="co-field"><label>Reason <span class="co-required">*</span></label>' +
+    '<select id="report-reason">' +
+    reasons.map(function(r) { return '<option value="' + r + '">' + r + '</option>'; }).join('') +
+    '</select></div>' +
+    '<div class="co-field"><label>Additional Details (optional)</label>' +
+    '<textarea id="report-details" placeholder="Anything else that would help us look into this..." style="width:100%;border:1px solid #e5e5e5;border-radius:8px;padding:10px;font-size:13px;resize:vertical;min-height:70px;font-family:var(--font);"></textarea></div>' +
+    '<button class="co-btn co-btn--next" id="report-submit-btn" style="width:100%;" onclick="submitReport()">Submit Report</button>' +
+    '<p style="margin:10px 0 0;font-size:11px;color:#999;text-align:center;">Reports are reviewed by HomeWeb admins and kept confidential.</p>';
+
+  document.getElementById('sn-reportOverlay').classList.add('active');
+  document.getElementById('sn-reportModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeReportModal() {
+  document.getElementById('sn-reportOverlay').classList.remove('active');
+  document.getElementById('sn-reportModal').classList.remove('active');
+  // Deliberately not touching document.body.style.overflow here — report
+  // always opens on top of another already-open modal, which remains
+  // responsible for that state until it's closed too.
+  currentReportContext = null;
+}
+
+async function submitReport() {
+  if (!currentReportContext) return;
+  var reason = document.getElementById('report-reason').value;
+  var details = document.getElementById('report-details').value.trim();
+  var btn = document.getElementById('report-submit-btn');
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+
+  const { error } = await supabase.from('reports').insert({
+    reporter_id: currentUser.id,
+    reported_type: currentReportContext.reportedType,
+    reported_id: currentReportContext.reportedId,
+    reported_name: currentReportContext.reportedName,
+    order_id: currentReportContext.orderId,
+    reason: reason,
+    details: details || null
+  });
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Submit Report'; }
+
+  if (error) {
+    showToast('Could not submit report: ' + error.message, 'error');
+    return;
+  }
+
+  showToast('Report submitted. Our team will review it.', 'info');
+  closeReportModal();
+}
+
+// ============================================================
+// CHAT — order-scoped messaging between customer/seller/rider,
+// whichever pairing is actually relevant to a given order. No open
+// messaging between strangers; RLS enforces real order relationships.
+// ============================================================
+
+var currentChatOrderId = null;
+var currentChatOtherUserId = null;
+var currentChatOtherName = null;
+var chatThreadPollId = null;
+
+// Every async chat render checks this token after its await, before
+// touching the DOM. Any view switch bumps the token, so a slow render
+// from a view the user already navigated away from can never land on
+// top of whatever's actually showing now — this is what "Back" was
+// racing against before. //
+var chatViewToken = 0;
+
+function chatCloseBtnHtml() {
+  return '<button class="chat-close-btn" onclick="closeChatModal()"><i class="fas fa-times"></i></button>';
+}
+
+function openChatThread(orderId, otherUserId, otherName) {
+  if (!currentUser) { showToast('Please log in to send a message', 'info'); openLoginModal(); return; }
+  var myToken = ++chatViewToken;
+
+  currentChatOrderId = orderId;
+  currentChatOtherUserId = otherUserId;
+  currentChatOtherName = otherName;
+
+  document.getElementById('sn-chatOverlay').classList.add('active');
+  document.getElementById('sn-chatModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  document.getElementById('sn-chat-header').innerHTML =
+    '<button class="chat-back-btn" onclick="openChatInbox()"><i class="fas fa-arrow-left"></i></button>' +
+    '<div class="chat-avatar"><i class="fas fa-user"></i></div>' +
+    '<div class="chat-header-title"><h3>' + otherName + '</h3></div>' +
+    chatCloseBtnHtml();
+
+  document.getElementById('sn-chat-scroll').innerHTML = '<div class="chat-empty"><i class="fas fa-circle-notch fa-spin"></i><p>Loading messages...</p></div>';
+
+  var composer = document.getElementById('sn-chat-composer');
+  composer.style.display = 'flex';
+  composer.innerHTML =
+    '<input type="text" class="chat-input" id="chat-message-input" placeholder="Type a message..." ' +
+    'oninput="document.getElementById(\'chat-send-btn\').disabled = !this.value.trim();" ' +
+    'onkeydown="if(event.key===\'Enter\'){sendChatMessage();}"/>' +
+    '<button class="chat-send-btn" id="chat-send-btn" disabled onclick="sendChatMessage()"><i class="fas fa-paper-plane"></i></button>';
+
+  renderChatThread(myToken);
+  if (chatThreadPollId) clearInterval(chatThreadPollId);
+  chatThreadPollId = setInterval(function() { renderChatThread(chatViewToken); }, 5000);
+}
+
+function closeChatModal() {
+  chatViewToken++; // invalidate any in-flight renders
+  document.getElementById('sn-chatOverlay').classList.remove('active');
+  document.getElementById('sn-chatModal').classList.remove('active');
+  document.body.style.overflow = '';
+  if (chatThreadPollId) { clearInterval(chatThreadPollId); chatThreadPollId = null; }
+  currentChatOrderId = null;
+  currentChatOtherUserId = null;
+}
+
+// Groups consecutive messages under one timestamp when they're close
+// together in time, instead of stamping every single bubble. //
+function formatChatDivider(iso) {
+  var d = new Date(iso);
+  var now = new Date();
+  var sameDay = d.toDateString() === now.toDateString();
+  var time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (sameDay) return time;
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' \u00b7 ' + time;
+}
+
+async function renderChatThread(myToken) {
+  if (myToken === undefined) myToken = ++chatViewToken;
+  if (!currentChatOrderId || !currentChatOtherUserId) return;
+
+  var scrollEl = document.getElementById('sn-chat-scroll');
+  var wasScrolledToBottom = true;
+  if (scrollEl && scrollEl.dataset.loaded) {
+    wasScrolledToBottom = (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight) < 40;
+  }
+
+  const { data: msgs, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('order_id', currentChatOrderId)
+    .or('sender_id.eq.' + currentUser.id + ',recipient_id.eq.' + currentUser.id)
+    .order('created_at', { ascending: true });
+
+  if (myToken !== chatViewToken) return; // a newer view has taken over — discard this stale render
+
+  var thread = (msgs || []).filter(function(m) {
+    return (m.sender_id === currentUser.id && m.recipient_id === currentChatOtherUserId) ||
+           (m.sender_id === currentChatOtherUserId && m.recipient_id === currentUser.id);
+  });
+
+  var unreadIds = thread.filter(function(m) { return m.recipient_id === currentUser.id && !m.read_at; }).map(function(m) { return m.id; });
+  if (unreadIds.length) {
+    supabase.from('messages').update({ read_at: new Date().toISOString() }).in('id', unreadIds).then(function() {
+      if (myToken === chatViewToken) updateChatBadge();
+    });
+  }
+
+  if (error) {
+    scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-triangle-exclamation"></i><p>Could not load messages: ' + error.message + '</p></div>';
+    return;
+  }
+
+  if (!thread.length) {
+    scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-comment-dots"></i><p>No messages yet. Say hello!</p></div>';
+    scrollEl.dataset.loaded = '1';
+    return;
+  }
+
+  var html = '';
+  var lastDividerTime = null;
+  thread.forEach(function(m) {
+    // New time divider if this message is >20 min after the last one shown //
+    if (!lastDividerTime || (new Date(m.created_at) - lastDividerTime) > 20 * 60 * 1000) {
+      html += '<div class="chat-bubble-time">' + formatChatDivider(m.created_at) + '</div>';
+      lastDividerTime = new Date(m.created_at);
+    }
+    var mine = m.sender_id === currentUser.id;
+    html += '<div class="chat-bubble-row" style="justify-content:' + (mine ? 'flex-end' : 'flex-start') + ';">' +
+      (mine ? '<button class="chat-del-btn" onclick="deleteChatMessage(\'' + m.id + '\')" title="Delete message"><i class="fas fa-trash"></i></button>' : '') +
+      '<div class="chat-bubble" style="background:' + (mine ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (mine ? '#fff' : '#333') + ';' + (mine ? 'border-bottom-right-radius:4px;' : 'border-bottom-left-radius:4px;') + '">' +
+      m.body.replace(/</g, '&lt;') +
+      '</div></div>';
+  });
+
+  scrollEl.innerHTML = html;
+  scrollEl.dataset.loaded = '1';
+  if (wasScrolledToBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+}
+
+async function deleteChatMessage(messageId) {
+  if (!confirm('Delete this message? This can\'t be undone.')) return;
+  const { error } = await supabase.from('messages').delete().eq('id', messageId);
+  if (error) { showToast('Could not delete message: ' + error.message, 'error'); return; }
+  renderChatThread(chatViewToken);
+}
+
+async function sendChatMessage() {
+  var input = document.getElementById('chat-message-input');
+  var text = input.value.trim();
+  if (!text || !currentChatOrderId || !currentChatOtherUserId) return;
+
+  input.value = '';
+  document.getElementById('chat-send-btn').disabled = true;
+
+  const { error } = await supabase.from('messages').insert({
+    order_id: currentChatOrderId, sender_id: currentUser.id, recipient_id: currentChatOtherUserId, body: text
+  });
+
+  if (error) {
+    showToast('Could not send message: ' + error.message, 'error');
+    input.value = text;
+    document.getElementById('chat-send-btn').disabled = false;
+    return;
+  }
+  renderChatThread(chatViewToken);
+  input.focus();
+}
+
+// Inbox — lists every conversation this account has across all their
+// orders (as customer, merchant, or rider), most recent first. //
+async function openChatInbox(e) {
+  if (e) e.preventDefault();
+  if (!currentUser) { showToast('Please log in to view messages', 'info'); openLoginModal(); return; }
+
+  var myToken = ++chatViewToken;
+  currentChatOrderId = null;
+  currentChatOtherUserId = null;
+  if (chatThreadPollId) { clearInterval(chatThreadPollId); chatThreadPollId = null; }
+
+  document.getElementById('sn-chatOverlay').classList.add('active');
+  document.getElementById('sn-chatModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  document.getElementById('sn-chat-header').innerHTML =
+    '<div class="chat-header-title" style="flex:1;"><h3>Messages</h3></div>' +
+    '<button class="chat-header-action" onclick="openNewMessagePicker()"><i class="fas fa-square-pen"></i> New</button>' +
+    chatCloseBtnHtml();
+  document.getElementById('sn-chat-composer').style.display = 'none';
+
+  var scrollEl = document.getElementById('sn-chat-scroll');
+  scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-circle-notch fa-spin"></i><p>Loading conversations...</p></div>';
+
+  const { data: msgs, error } = await supabase
+    .from('messages')
+    .select('*, orders(order_code)')
+    .or('sender_id.eq.' + currentUser.id + ',recipient_id.eq.' + currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (myToken !== chatViewToken) return;
+
+  if (error) {
+    scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-triangle-exclamation"></i><p>Could not load messages: ' + error.message + '</p></div>';
+    return;
+  }
+
+  var convos = {};
+  var order = [];
+  (msgs || []).forEach(function(m) {
+    var otherId = m.sender_id === currentUser.id ? m.recipient_id : m.sender_id;
+    var key = m.order_id + '_' + otherId;
+    if (!convos[key]) {
+      convos[key] = { orderId: m.order_id, orderCode: m.orders ? m.orders.order_code : '', otherId: otherId, lastMsg: m, unread: 0 };
+      order.push(key);
+    }
+    if (m.recipient_id === currentUser.id && !m.read_at) convos[key].unread++;
+  });
+
+  var hidden = getHiddenConversations();
+  var convoList = order.map(function(k) { return convos[k]; }).filter(function(c) { return hidden.indexOf(c.orderId + '_' + c.otherId) === -1; });
+
+  if (!convoList.length) {
+    scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-inbox"></i><p>No conversations yet. Tap "New" above to reach a seller or rider you\'ve transacted with.</p></div>';
+    return;
+  }
+
+  var otherIds = Array.from(new Set(convoList.map(function(c) { return c.otherId; })));
+  const { data: profiles } = await supabase.from('profiles').select('id, full_name').in('id', otherIds);
+  if (myToken !== chatViewToken) return;
+
+  var nameById = {};
+  (profiles || []).forEach(function(p) { nameById[p.id] = p.full_name; });
+
+  scrollEl.innerHTML = convoList.map(function(c) {
+    var name = nameById[c.otherId] || 'HomeWeb User';
+    var isUnread = c.unread > 0;
+    var convoKey = c.orderId + '_' + c.otherId;
+    return '<div class="chat-list-row' + (isUnread ? ' unread' : '') + '">' +
+      '<div class="chat-avatar" onclick="openChatThread(\'' + c.orderId + '\', \'' + c.otherId + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="cursor:pointer;"><i class="fas fa-user"></i></div>' +
+      '<div onclick="openChatThread(\'' + c.orderId + '\', \'' + c.otherId + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="flex:1;min-width:0;cursor:pointer;">' +
+      '<p class="chat-list-name" style="font-weight:' + (isUnread ? '800' : '500') + ';">' + name + (isUnread ? '<span class="chat-unread-dot">' + c.unread + '</span>' : '') + '</p>' +
+      '<p class="chat-list-preview" style="color:' + (isUnread ? '#333' : '#999') + ';font-weight:' + (isUnread ? '600' : '400') + ';">' + (c.orderCode ? '#' + c.orderCode + ' \u00b7 ' : '') + (c.lastMsg.sender_id === currentUser.id ? 'You: ' : '') + c.lastMsg.body.slice(0, 36) + (c.lastMsg.body.length > 36 ? '\u2026' : '') + '</p>' +
+      '</div>' +
+      '<span style="font-size:10.5px;color:#bbb;flex-shrink:0;">' + timeAgo(c.lastMsg.created_at) + '</span>' +
+      '<button class="chat-row-delete" onclick="event.stopPropagation(); deleteConversation(\'' + convoKey + '\')" title="Delete conversation"><i class="fas fa-trash"></i></button>' +
+      '</div>';
+  }).join('');
+}
+
+// Deleting a conversation only hides it from YOUR inbox — the other
+// person's copy of the messages is untouched, and it reappears if they
+// send something new. Consistent with how notification-clearing works. //
+function chatHiddenKey() {
+  return currentUser ? ('homeweb_hidden_convos_' + currentUser.id) : null;
+}
+
+function getHiddenConversations() {
+  var raw = localStorage.getItem(chatHiddenKey());
+  return raw ? JSON.parse(raw) : [];
+}
+
+function deleteConversation(convoKey) {
+  if (!confirm('Remove this conversation from your inbox? It\'ll come back if they message you again.')) return;
+  var hidden = getHiddenConversations();
+  if (hidden.indexOf(convoKey) === -1) hidden.push(convoKey);
+  localStorage.setItem(chatHiddenKey(), JSON.stringify(hidden));
+  openChatInbox();
+}
+
+// "New Message" — shows every real transaction partner (seller, rider,
+// or customer) this account has ever shared an order with, so a
+// conversation can be started even if none exists yet. //
+async function openNewMessagePicker() {
+  var myToken = ++chatViewToken;
+
+  document.getElementById('sn-chat-header').innerHTML =
+    '<button class="chat-back-btn" onclick="openChatInbox()"><i class="fas fa-arrow-left"></i></button>' +
+    '<div class="chat-header-title" style="flex:1;"><h3>New Message</h3></div>' +
+    chatCloseBtnHtml();
+  document.getElementById('sn-chat-composer').style.display = 'none';
+
+  var scrollEl = document.getElementById('sn-chat-scroll');
+  scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-circle-notch fa-spin"></i><p>Loading contacts...</p></div>';
+
+  var contacts = await fetchMyContacts();
+  if (myToken !== chatViewToken) return;
+
+  if (!contacts.length) {
+    scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-address-book"></i><p>No contacts yet \u2014 you can message someone once you\'ve placed, sold, or delivered an order with them.</p></div>';
+    return;
+  }
+
+  var roleIcon = { seller: 'fa-store', rider: 'fa-motorcycle', customer: 'fa-user' };
+  var roleLabel = { seller: 'Seller', rider: 'Rider', customer: 'Customer' };
+
+  scrollEl.innerHTML = contacts.map(function(c) {
+    return '<div class="chat-list-row" onclick="openChatThread(\'' + c.orderId + '\', \'' + c.userId + '\', \'' + c.name.replace(/'/g, "\\'") + '\')">' +
+      '<div class="chat-avatar"><i class="fas ' + (roleIcon[c.role] || 'fa-user') + '"></i></div>' +
+      '<div style="flex:1;min-width:0;">' +
+      '<p class="chat-list-name" style="font-weight:600;">' + c.name + '</p>' +
+      '<p class="chat-list-preview" style="color:#999;">' + roleLabel[c.role] + ' \u00b7 Order #' + c.orderCode + '</p>' +
+      '</div>' +
+      '</div>';
+  }).join('');
+}
+
+async function fetchMyContacts() {
+  var contacts = {}; // keyed by userId -> {userId, name, role, orderId, orderCode, lastAt}
+
+  function noteContact(userId, name, role, orderId, orderCode, at) {
+    if (!userId || userId === currentUser.id) return;
+    var existing = contacts[userId];
+    if (!existing || new Date(at) > new Date(existing.lastAt)) {
+      contacts[userId] = { userId: userId, name: name || 'HomeWeb User', role: role, orderId: orderId, orderCode: orderCode, lastAt: at };
+    }
+  }
+
+  // As customer: my own orders give me their rider + seller //
+  const { data: myOrders } = await supabase
+    .from('orders')
+    .select('id, order_code, created_at, rider_user_id, rider_name, order_items(products(merchant_id, merchants(user_id, store_name)))')
+    .eq('user_id', currentUser.id);
+
+  (myOrders || []).forEach(function(o) {
+    if (o.rider_user_id) noteContact(o.rider_user_id, o.rider_name, 'rider', o.id, o.order_code, o.created_at);
+    (o.order_items || []).forEach(function(oi) {
+      if (oi.products && oi.products.merchants) {
+        noteContact(oi.products.merchants.user_id, oi.products.merchants.store_name, 'seller', o.id, o.order_code, o.created_at);
+      }
+    });
+  });
+
+  // As rider: deliveries I've handled give me their customer + seller //
+  if (userRoles.indexOf('rider') !== -1) {
+    const { data: myDeliveries } = await supabase
+      .from('orders')
+      .select('id, order_code, created_at, user_id, order_items(products(merchant_id, merchants(user_id, store_name)))')
+      .eq('rider_user_id', currentUser.id);
+
+    var customerIds = Array.from(new Set((myDeliveries || []).map(function(o) { return o.user_id; })));
+    var customerNames = {};
+    if (customerIds.length) {
+      const { data: profiles } = await supabase.from('profiles').select('id, full_name').in('id', customerIds);
+      (profiles || []).forEach(function(p) { customerNames[p.id] = p.full_name; });
+    }
+
+    (myDeliveries || []).forEach(function(o) {
+      noteContact(o.user_id, customerNames[o.user_id] || 'Customer', 'customer', o.id, o.order_code, o.created_at);
+      (o.order_items || []).forEach(function(oi) {
+        if (oi.products && oi.products.merchants) {
+          noteContact(oi.products.merchants.user_id, oi.products.merchants.store_name, 'seller', o.id, o.order_code, o.created_at);
+        }
+      });
+    });
+  }
+
+  // As merchant: orders containing my products give me their customer + rider //
+  if (userRoles.indexOf('merchant') !== -1) {
+    if (!myMerchantId) {
+      const { data: merchantRow } = await supabase.from('merchants').select('id').eq('user_id', currentUser.id).single();
+      if (merchantRow) myMerchantId = merchantRow.id;
+    }
+  }
+
+  if (userRoles.indexOf('merchant') !== -1 && myMerchantId) {
+    const { data: myStoreItems } = await supabase
+      .from('order_items')
+      .select('orders(id, order_code, created_at, user_id, rider_user_id, rider_name), products!inner(merchant_id)')
+      .eq('products.merchant_id', myMerchantId);
+
+    var storeCustomerIds = Array.from(new Set((myStoreItems || []).map(function(r) { return r.orders ? r.orders.user_id : null; }).filter(Boolean)));
+    var storeCustomerNames = {};
+    if (storeCustomerIds.length) {
+      const { data: profiles } = await supabase.from('profiles').select('id, full_name').in('id', storeCustomerIds);
+      (profiles || []).forEach(function(p) { storeCustomerNames[p.id] = p.full_name; });
+    }
+
+    (myStoreItems || []).forEach(function(r) {
+      if (!r.orders) return;
+      noteContact(r.orders.user_id, storeCustomerNames[r.orders.user_id] || 'Customer', 'customer', r.orders.id, r.orders.order_code, r.orders.created_at);
+      if (r.orders.rider_user_id) noteContact(r.orders.rider_user_id, r.orders.rider_name, 'rider', r.orders.id, r.orders.order_code, r.orders.created_at);
+    });
+  }
+
+  return Object.values(contacts).sort(function(a, b) { return new Date(b.lastAt) - new Date(a.lastAt); });
+}
+
+function openHelpCenterModal(e) {
+  if (e) e.preventDefault();
+  var body = document.getElementById('sn-help-body');
+  body.innerHTML =
+    '<div class="login-icon"><i class="fas fa-headset"></i></div>' +
+    '<h2>Help Center</h2>' +
+    '<p class="login-sub">Reach the HomeWeb admin directly</p>' +
+    '<div style="text-align:left;background:#F9FAFB;border-radius:10px;padding:16px;margin-top:12px;">' +
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">' +
+    '<i class="fab fa-facebook" style="color:#1877F2;font-size:20px;width:22px;text-align:center;"></i>' +
+    '<div><p style="margin:0;font-size:11px;color:#999;">Facebook</p><p style="margin:0;font-weight:600;font-size:13.5px;">Alexis Dinsay</p></div>' +
+    '</div>' +
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">' +
+    '<i class="fas fa-envelope" style="color:var(--primary,#22C55E);font-size:18px;width:22px;text-align:center;"></i>' +
+    '<div><p style="margin:0;font-size:11px;color:#999;">Email</p><p style="margin:0;font-weight:600;font-size:13.5px;">alexisdinsay18@gmail.com</p></div>' +
+    '</div>' +
+    '<div style="display:flex;align-items:center;gap:10px;">' +
+    '<i class="fas fa-phone" style="color:#F59E0B;font-size:16px;width:22px;text-align:center;"></i>' +
+    '<div><p style="margin:0;font-size:11px;color:#999;">Contact Number</p><p style="margin:0;font-weight:600;font-size:13.5px;">0969 123 4567</p></div>' +
+    '</div>' +
+    '</div>';
+
+  document.getElementById('sn-helpOverlay').classList.add('active');
+  document.getElementById('sn-helpModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeHelpCenterModal() {
+  document.getElementById('sn-helpOverlay').classList.remove('active');
+  document.getElementById('sn-helpModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+async function messageSellerForOrder(orderId, productId) {
+  if (!productId) { showToast('Could not find seller info for this order', 'error'); return; }
+
+  const { data, error } = await supabase
+    .from('products')
+    .select('merchants(user_id, store_name)')
+    .eq('id', productId)
+    .single();
+
+  if (error || !data || !data.merchants) {
+    showToast('Could not load seller info', 'error');
+    return;
+  }
+
+  openChatThread(orderId, data.merchants.user_id, data.merchants.store_name);
+}
+
 async function openMerchantStorefront(merchantId) {
   if (!merchantId) { showToast('This product has no store information', 'info'); return; }
 
@@ -641,6 +1158,9 @@ async function openMerchantStorefront(merchantId) {
     (merchant.business_permit_url
       ? '<a href="' + merchant.business_permit_url + '" target="_blank" style="display:inline-block;margin-top:10px;color:#fff;font-size:11.5px;text-decoration:underline;"><i class="fas fa-file-shield"></i> View Business Permit</a>'
       : '') +
+    '<div style="margin-top:10px;">' +
+    '<a href="#" onclick="openReportModal(\'merchant\', \'' + merchant.user_id + '\', \'' + merchant.store_name.replace(/'/g, "\\'") + '\'); return false;" style="color:rgba(255,255,255,0.75);font-size:11px;text-decoration:underline;"><i class="fas fa-flag"></i> Report this store</a>' +
+    '</div>' +
     '</div>' +
     '<div style="padding:0 4px;">' +
     '<h3 style="margin:0 0 14px;font-size:14.5px;display:flex;align-items:center;gap:8px;"><i class="fas fa-shopping-basket" style="color:var(--primary,#22C55E);"></i> ' + mapped.length + ' Product' + (mapped.length === 1 ? '' : 's') + ' Available</h3>' +
@@ -825,10 +1345,8 @@ function renderCheckout() {
     body = '<div class="co-form">' +
       '<h3>Payment Method</h3>' +
       '<div class="co-pay-opts">' +
-      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="cod" ' + (selectedPaymentMethod === 'cod' ? 'checked' : '') + '/>' +
+      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="cod" checked/>' +
       '<span><i class="fas fa-money-bill-wave"></i><strong>Cash on Delivery</strong></span></label>' +
-      '<label class="co-radio co-pay-radio"><input type="radio" name="payment" value="gcash" ' + (selectedPaymentMethod === 'gcash' ? 'checked' : '') + '/>' +
-      '<span><i class="fas fa-mobile-alt"></i><strong>GCash</strong></span></label>' +
       '</div>' +
       '<div id="sn-cardFields" style="display:none" class="co-card-fields">' +
       '<div class="co-field"><label>Card Number</label><input type="text" placeholder="1234 5678 9012 3456" maxlength="19"/></div>' +
@@ -1849,6 +2367,9 @@ function renderTrackingDetail(order) {
     '<div class="track-detail-section">' +
     '<h4>Order Items</h4>' +
     '<div class="track-detail-items">' + itemsHtml + '</div>' +
+    ((order.order_items && order.order_items.length)
+      ? '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;padding:8px;" onclick="messageSellerForOrder(\'' + order.id + '\', \'' + order.order_items[0].product_id + '\')"><i class="fas fa-comment-dots"></i> Message Seller</button>'
+      : '') +
     '</div>' +
 
     (reviewsHtml ? (
@@ -1877,6 +2398,12 @@ function renderTrackingDetail(order) {
       '</div></div>' +
       (order.rider_license_path
         ? '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;padding:8px;" onclick="viewRiderLicenseForOrder(\'' + order.id + '\')"><i class="fas fa-id-card"></i> View Rider\'s ID for Safety Verification</button>'
+        : '') +
+      (order.rider_user_id
+        ? '<button class="co-btn co-btn--next" style="width:100%;margin-top:10px;padding:8px;" onclick="openChatThread(\'' + order.id + '\', \'' + order.rider_user_id + '\', \'' + order.rider_name.replace(/'/g, "\\'") + '\')"><i class="fas fa-comment-dots"></i> Message Rider</button>'
+        : '') +
+      (order.rider_user_id
+        ? '<a href="#" onclick="openReportModal(\'rider\', \'' + order.rider_user_id + '\', \'' + order.rider_name.replace(/'/g, "\\'") + '\', \'' + order.id + '\'); return false;" style="display:block;margin-top:10px;text-align:center;color:#999;font-size:11.5px;text-decoration:underline;"><i class="fas fa-flag"></i> Report this rider</a>'
         : '') +
       '</div>'
     ) : '') +
@@ -2124,7 +2651,7 @@ function adminTabsHtml() {
     var active = adminView === id;
     return '<button class="co-btn" style="flex:1;background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#333') + ';" onclick="switchAdminView(\'' + id + '\')">' + label + '</button>';
   }
-  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + '</div>';
+  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + tab('reports', 'Reports') + '</div>';
 }
 
 function switchAdminView(view) {
@@ -2141,18 +2668,20 @@ async function renderAdminDashboard() {
   if (adminView === 'riders') return renderAdminRiders();
   if (adminView === 'customers') return renderAdminCustomers();
   if (adminView === 'orders') return renderAdminOrders();
+  if (adminView === 'reports') return renderAdminReports();
 }
 
 async function renderAdminOverview() {
   var body = document.getElementById('sn-admin-body');
 
-  const [{ count: merchantCount }, { count: riderCount }, { count: customerCount }, { count: orderCount }, { count: productCount }, { count: pendingPermits }] = await Promise.all([
+  const [{ count: merchantCount }, { count: riderCount }, { count: customerCount }, { count: orderCount }, { count: productCount }, { count: pendingPermits }, { count: pendingReports }] = await Promise.all([
     supabase.from('merchants').select('id', { count: 'exact', head: true }),
     supabase.from('riders').select('id', { count: 'exact', head: true }),
     supabase.from('user_roles').select('id', { count: 'exact', head: true }).eq('role', 'customer'),
     supabase.from('orders').select('id', { count: 'exact', head: true }),
     supabase.from('products').select('id', { count: 'exact', head: true }),
-    supabase.from('merchants').select('id', { count: 'exact', head: true }).not('business_permit_url', 'is', null).eq('is_verified', false)
+    supabase.from('merchants').select('id', { count: 'exact', head: true }).not('business_permit_url', 'is', null).eq('is_verified', false),
+    supabase.from('reports').select('id', { count: 'exact', head: true }).eq('status', 'pending')
   ]);
 
   function card(label, value, color) {
@@ -2170,6 +2699,12 @@ async function renderAdminOverview() {
     card('Products', productCount || 0, '#0F6E56') +
     card('Orders', orderCount || 0, '#B45309') +
     '</div>' +
+    (pendingReports > 0
+      ? '<div style="background:#FEE2E2;border-radius:10px;padding:14px;margin-bottom:10px;">' +
+        '<p style="margin:0;font-weight:700;color:#DC2626;font-size:13px;"><i class="fas fa-flag"></i> ' + pendingReports + ' report(s) awaiting review</p>' +
+        '<button class="co-btn" style="background:#fff;color:#DC2626;margin-top:8px;padding:6px 12px;" onclick="switchAdminView(\'reports\')">Review Now</button>' +
+        '</div>'
+      : '') +
     (pendingPermits > 0
       ? '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-bottom:10px;">' +
         '<p style="margin:0;font-weight:700;color:#B45309;font-size:13px;"><i class="fas fa-clock"></i> ' + pendingPermits + ' business permit(s) awaiting review</p>' +
@@ -2200,12 +2735,14 @@ async function renderAdminMerchants() {
     ? '<p style="color:#999;font-size:13px;">' + (adminMerchantFilter === 'pending' ? 'Nothing pending review.' : 'No merchants yet.') + '</p>'
     : merchants.map(function(m) {
         var typeColor = m.merchant_type === 'bolanteros' ? '#B45309' : '#3B82F6';
-        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+        var escapedName = m.store_name.replace(/'/g, "\\'");
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;' + (m.is_suspended ? 'opacity:0.65;' : '') + '">' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
           '<span style="font-weight:700;font-size:13px;">' + m.store_name + (m.is_verified ? ' <i class="fas fa-badge-check" style="color:var(--primary,#22C55E);"></i>' : '') + '</span>' +
           '<span style="font-size:11px;color:' + typeColor + ';font-weight:600;">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
           '</div>' +
           '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + (CATEGORY_META[m.business_type] ? CATEGORY_META[m.business_type].title : m.business_type) + '</p>' +
+          (m.is_suspended ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-ban"></i> Suspended: ' + (m.suspended_reason || 'No reason given') + '</p>' : '') +
           '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">' +
           (m.business_permit_url
             ? '<a href="' + m.business_permit_url + '" target="_blank" class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;text-decoration:none;font-size:12px;">View Permit</a>'
@@ -2215,6 +2752,9 @@ async function renderAdminMerchants() {
                 ? '<button class="co-btn" style="padding:6px 12px;background:#FEE2E2;color:#DC2626;font-size:12px;" onclick="adminSetMerchantVerified(\'' + m.id + '\', false)">Revoke Verification</button>'
                 : '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminSetMerchantVerified(\'' + m.id + '\', true)">Approve & Verify</button>')
             : '') +
+          (m.is_suspended
+            ? '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminReinstateMerchant(\'' + m.id + '\', \'' + escapedName + '\')">Reinstate</button>'
+            : '<button class="co-btn" style="padding:6px 12px;background:#1F2937;color:#fff;font-size:12px;" onclick="adminSuspendMerchant(\'' + m.id + '\', \'' + escapedName + '\')"><i class="fas fa-ban"></i> Suspend Store</button>') +
           '</div></div>';
       }).join('');
 
@@ -2226,6 +2766,34 @@ async function adminSetMerchantVerified(merchantId, verified) {
   const { error } = await supabase.from('merchants').update({ is_verified: verified }).eq('id', merchantId);
   if (error) { showToast('Could not update: ' + error.message, 'error'); return; }
   showToast(verified ? 'Merchant verified \u2705' : 'Verification revoked', 'info');
+  renderAdminMerchants();
+}
+
+// Suspends a merchant's store — hides their products from the storefront
+// and blocks new listings, without deleting their real order history
+// (which would break every past order's product references). //
+async function adminSuspendMerchant(merchantId, storeName) {
+  var reason = prompt('Reason for suspending "' + storeName + '"? (shown in admin logs, required)');
+  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a store', 'info'); return; }
+
+  const { error } = await supabase.from('merchants').update({
+    is_suspended: true, suspended_reason: reason.trim(), suspended_at: new Date().toISOString()
+  }).eq('id', merchantId);
+  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return; }
+
+  showToast('Store suspended \u2705');
+  renderAdminMerchants();
+}
+
+async function adminReinstateMerchant(merchantId, storeName) {
+  if (!confirm('Reinstate "' + storeName + '"? Their products will become visible again.')) return;
+
+  const { error } = await supabase.from('merchants').update({
+    is_suspended: false, suspended_reason: null, suspended_at: null
+  }).eq('id', merchantId);
+  if (error) { showToast('Could not reinstate: ' + error.message, 'error'); return; }
+
+  showToast('Store reinstated \u2705');
   renderAdminMerchants();
 }
 
@@ -2253,6 +2821,63 @@ async function renderAdminRiders() {
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
     '<h3 style="margin:0 0 8px;font-size:14px;">All Riders (' + (riders ? riders.length : 0) + ')</h3>' + rows;
+}
+
+let adminReportFilter = 'pending'; // 'pending' | 'all'
+
+async function renderAdminReports() {
+  var body = document.getElementById('sn-admin-body');
+  var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
+
+  const { data: allReports, error } = await supabase.from('reports').select('*').order('created_at', { ascending: false });
+  var reports = allReports || [];
+  var shown = adminReportFilter === 'pending' ? reports.filter(function(r) { return r.status === 'pending'; }) : reports;
+
+  // Reporter names aren't directly joinable, fetch separately //
+  var reporterIds = Array.from(new Set(shown.map(function(r) { return r.reporter_id; }).filter(Boolean)));
+  var nameById = {};
+  if (reporterIds.length) {
+    const { data: profiles } = await supabase.from('profiles').select('id, full_name').in('id', reporterIds);
+    (profiles || []).forEach(function(p) { nameById[p.id] = p.full_name; });
+  }
+
+  var pendingCount = reports.filter(function(r) { return r.status === 'pending'; }).length;
+  var filterBar = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
+    '<button class="co-btn" style="flex:1;background:' + (adminReportFilter === 'pending' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminReportFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminReportFilter=\'pending\'; renderAdminReports();">Pending (' + pendingCount + ')</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (adminReportFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminReportFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminReportFilter=\'all\'; renderAdminReports();">All (' + reports.length + ')</button>' +
+    '</div>';
+
+  var typeIcon = { merchant: 'fa-store', rider: 'fa-motorcycle', customer: 'fa-user' };
+  var statusColor = { pending: '#B45309', reviewed: '#15803D', dismissed: '#999' };
+
+  var rows = shown.length
+    ? shown.map(function(r) {
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+          '<span style="font-weight:700;font-size:13px;"><i class="fas ' + (typeIcon[r.reported_type] || 'fa-flag') + '"></i> ' + (r.reported_name || 'Unknown') + '</span>' +
+          '<span style="font-size:11px;color:' + (statusColor[r.status] || '#999') + ';font-weight:700;text-transform:uppercase;">' + r.status + '</span>' +
+          '</div>' +
+          '<p style="margin:4px 0 0;font-size:12.5px;color:#DC2626;font-weight:600;">' + r.reason + '</p>' +
+          (r.details ? '<p style="margin:4px 0 0;font-size:12.5px;color:#666;">"' + r.details + '"</p>' : '') +
+          '<p style="margin:6px 0 0;font-size:11.5px;color:#999;">Reported by ' + (nameById[r.reporter_id] || 'Unknown') + ' \u2022 ' + formatDate(r.created_at) + (r.order_id ? ' \u2022 Order-linked' : '') + '</p>' +
+          (r.status === 'pending'
+            ? '<div style="display:flex;gap:6px;margin-top:8px;">' +
+              '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'reviewed\')">Mark Reviewed</button>' +
+              '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'dismissed\')">Dismiss</button>' +
+              '</div>'
+            : '') +
+          '</div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">' + (adminReportFilter === 'pending' ? 'No pending reports.' : 'No reports yet.') + '</p>';
+
+  body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Reports</h3>' + filterBar + rows;
+}
+
+async function adminUpdateReportStatus(reportId, status) {
+  const { error } = await supabase.from('reports').update({ status: status }).eq('id', reportId);
+  if (error) { showToast('Could not update report: ' + error.message, 'error'); return; }
+  showToast('Report marked as ' + status, 'info');
+  renderAdminReports();
 }
 
 async function adminViewRiderLicense(riderUserId) {
@@ -2651,6 +3276,7 @@ async function restoreSession() {
     await fetchUserRoles();
     updateAuthUI();
     updateNotifBadge();
+    updateChatBadge();
     startRiderAlertPolling();
   }
 
@@ -2658,6 +3284,7 @@ async function restoreSession() {
     currentUser = session ? session.user : null;
     updateAuthUI();
     updateNotifBadge();
+    updateChatBadge();
     if (currentUser) startRiderAlertPolling(); else stopRiderAlertPolling();
   });
 }
@@ -2909,6 +3536,30 @@ function injectModals() {
     '<div id="sn-riderAlertOverlay" class="sn-overlay"></div>' +
     '<div id="sn-riderAlertModal" class="sn-login-modal">' +
     '<div class="login-body" id="sn-rider-alert-body"></div>' +
+    '</div>' +
+
+    // Report overlay + modal (reusable across contexts - reporting a store, rider, or customer)
+    '<div id="sn-reportOverlay" class="sn-overlay" onclick="closeReportModal()"></div>' +
+    '<div id="sn-reportModal" class="sn-login-modal">' +
+    '<button class="pm-close" onclick="closeReportModal()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body" id="sn-report-body"></div>' +
+    '</div>' +
+
+    // Chat overlay + modal (inbox list <-> thread view, order-scoped)
+    '<div id="sn-chatOverlay" class="sn-overlay" onclick="closeChatModal()"></div>' +
+    '<div id="sn-chatModal" class="sn-chat-modal">' +
+    '<div class="chat-panel">' +
+    '<div class="chat-header" id="sn-chat-header"></div>' +
+    '<div class="chat-scroll" id="sn-chat-scroll"></div>' +
+    '<div class="chat-composer" id="sn-chat-composer" style="display:none;"></div>' +
+    '</div>' +
+    '</div>' +
+
+    // Help Center overlay + modal
+    '<div id="sn-helpOverlay" class="sn-overlay" onclick="closeHelpCenterModal()"></div>' +
+    '<div id="sn-helpModal" class="sn-login-modal">' +
+    '<button class="pm-close" onclick="closeHelpCenterModal()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body" id="sn-help-body"></div>' +
     '</div>' +
 
     // Merchant storefront overlay + modal
@@ -3258,6 +3909,23 @@ async function updateNotifBadge() {
   badges.forEach(function(b) { b.style.display = isUnseen ? 'inline-block' : 'none'; });
 }
 
+// Shows/hides the red dot on the Messages icon based on real unread messages //
+async function updateChatBadge() {
+  var badges = document.querySelectorAll('.msg-badge');
+  if (!currentUser) {
+    badges.forEach(function(b) { b.style.display = 'none'; });
+    return;
+  }
+
+  const { count } = await supabase
+    .from('messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('recipient_id', currentUser.id)
+    .is('read_at', null);
+
+  badges.forEach(function(b) { b.style.display = (count > 0) ? 'inline-block' : 'none'; });
+}
+
 // Open the tracking modal directly on a specific order's detail view //
 function viewOrderNow(orderId) {
   document.getElementById('sn-trackingOverlay').classList.add('active');
@@ -3513,9 +4181,18 @@ async function openMerchantDashboard(e) {
 
   if (!myMerchantId) {
     const { data: merchant, error } = await supabase
-      .from('merchants').select('id').eq('user_id', currentUser.id).single();
+      .from('merchants').select('id, is_suspended, suspended_reason').eq('user_id', currentUser.id).single();
     if (error || !merchant) {
       body.innerHTML = '<div class="track-empty"><p>Could not load your merchant profile.</p></div>';
+      return;
+    }
+    if (merchant.is_suspended) {
+      body.innerHTML = '<h2 style="margin:0 0 12px;">My Store</h2>' +
+        '<div style="background:#FEE2E2;border-radius:10px;padding:16px;">' +
+        '<p style="margin:0;font-weight:700;color:#DC2626;"><i class="fas fa-ban"></i> Your store has been suspended</p>' +
+        '<p style="margin:8px 0 0;font-size:13px;color:#7F1D1D;">' + (merchant.suspended_reason || 'No reason was given.') + '</p>' +
+        '<p style="margin:10px 0 0;font-size:12.5px;color:#7F1D1D;">Your listings are hidden and you can\'t add or edit products while suspended. Contact HomeWeb support if you believe this is a mistake.</p>' +
+        '</div>';
       return;
     }
     myMerchantId = merchant.id;
@@ -3907,6 +4584,7 @@ function renderMerchantSalesView() {
           '<p style="margin:6px 0 0;font-size:12px;color:#555;line-height:1.6;">' + itemsList + '</p>' +
           '<p style="margin:6px 0 0;font-size:12.5px;font-weight:700;color:var(--primary,#22C55E);">Total: ' + fmt(o.total) + '</p>' +
           (o.notArrived ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reports non-delivery</p>' : '') +
+          '<button class="co-btn" style="background:#F3F4F6;color:#333;font-size:11.5px;padding:5px 10px;margin-top:8px;" onclick="openChatThread(\'' + o.orderId + '\', \'' + o.customerId + '\', \'' + (o.customerName || 'Customer').replace(/'/g, "\\'") + '\')"><i class="fas fa-comment-dots"></i> Message Customer</button>' +
           '</div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
@@ -4783,6 +5461,13 @@ function renderRiderDashboard() {
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
       (o.not_arrived_reported_at ? '<p style="margin:8px 0 0;background:#FEE2E2;color:#DC2626;padding:8px;border-radius:6px;font-size:12px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reports this was NOT received. Please follow up.</p>' : '') +
       actionBtn +
+      '<div style="display:flex;gap:6px;margin-top:8px;">' +
+      '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12px;padding:6px;" onclick="openChatThread(\'' + o.id + '\', \'' + o.user_id + '\', \'Customer of Order #' + o.order_code + '\')"><i class="fas fa-comment-dots"></i> Customer</button>' +
+      ((o.order_items && o.order_items.length)
+        ? '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12px;padding:6px;" onclick="messageSellerForOrder(\'' + o.id + '\', \'' + o.order_items[0].product_id + '\')"><i class="fas fa-comment-dots"></i> Seller</button>'
+        : '') +
+      '</div>' +
+      '<a href="#" onclick="openReportModal(\'customer\', \'' + o.user_id + '\', \'Customer of Order #' + o.order_code + '\', \'' + o.id + '\'); return false;" style="display:block;margin-top:8px;text-align:right;color:#999;font-size:11px;text-decoration:underline;"><i class="fas fa-flag"></i> Report customer</a>' +
       '</div>';
   }
 
@@ -4878,5 +5563,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     await loadProducts();
     renderHomeProducts();
     renderCategoryPage();
+    if (currentUser) updateChatBadge();
   }, 30000);
 });
