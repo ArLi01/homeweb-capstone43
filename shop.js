@@ -704,8 +704,8 @@ function openChatThread(orderId, otherUserId, otherName) {
 
   document.getElementById('sn-chat-header').innerHTML =
     '<button class="chat-back-btn" onclick="openChatInbox()"><i class="fas fa-arrow-left"></i></button>' +
-    '<div class="chat-avatar"><i class="fas fa-user"></i></div>' +
-    '<div class="chat-header-title"><h3>' + otherName + '</h3></div>' +
+    '<div class="chat-avatar" onclick="openContactProfileModal(\'' + otherUserId + '\')" style="cursor:pointer;"><i class="fas fa-user"></i></div>' +
+    '<div class="chat-header-title" onclick="openContactProfileModal(\'' + otherUserId + '\')" style="cursor:pointer;"><h3>' + otherName + '</h3></div>' +
     chatCloseBtnHtml();
 
   document.getElementById('sn-chat-scroll').innerHTML = '<div class="chat-empty"><i class="fas fa-circle-notch fa-spin"></i><p>Loading messages...</p></div>';
@@ -906,7 +906,7 @@ async function openChatInbox(e) {
     var isUnread = c.unread > 0;
     var convoKey = c.orderId + '_' + c.otherId;
     return '<div class="chat-list-row' + (isUnread ? ' unread' : '') + '">' +
-      '<div class="chat-avatar" onclick="openChatThread(\'' + c.orderId + '\', \'' + c.otherId + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="cursor:pointer;"><i class="fas fa-user"></i></div>' +
+      '<div class="chat-avatar" onclick="event.stopPropagation(); openContactProfileModal(\'' + c.otherId + '\')" style="cursor:pointer;"><i class="fas fa-user"></i></div>' +
       '<div onclick="openChatThread(\'' + c.orderId + '\', \'' + c.otherId + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="flex:1;min-width:0;cursor:pointer;">' +
       '<p class="chat-list-name" style="font-weight:' + (isUnread ? '800' : '500') + ';">' + name + (isUnread ? '<span class="chat-unread-dot">' + c.unread + '</span>' : '') + '</p>' +
       '<p class="chat-list-preview" style="color:' + (isUnread ? '#333' : '#999') + ';font-weight:' + (isUnread ? '600' : '400') + ';">' + (c.orderCode ? '#' + c.orderCode + ' \u00b7 ' : '') + (c.lastMsg.sender_id === currentUser.id ? 'You: ' : '') + c.lastMsg.body.slice(0, 36) + (c.lastMsg.body.length > 36 ? '\u2026' : '') + '</p>' +
@@ -965,13 +965,75 @@ async function openNewMessagePicker() {
 
   scrollEl.innerHTML = contacts.map(function(c) {
     return '<div class="chat-list-row" onclick="openChatThread(\'' + c.orderId + '\', \'' + c.userId + '\', \'' + c.name.replace(/'/g, "\\'") + '\')">' +
-      '<div class="chat-avatar"><i class="fas ' + (roleIcon[c.role] || 'fa-user') + '"></i></div>' +
+      '<div class="chat-avatar" onclick="event.stopPropagation(); openContactProfileModal(\'' + c.userId + '\')" style="cursor:pointer;"><i class="fas ' + (roleIcon[c.role] || 'fa-user') + '"></i></div>' +
       '<div style="flex:1;min-width:0;">' +
       '<p class="chat-list-name" style="font-weight:600;">' + c.name + '</p>' +
       '<p class="chat-list-preview" style="color:#999;">' + roleLabel[c.role] + ' \u00b7 Order #' + c.orderCode + '</p>' +
       '</div>' +
       '</div>';
   }).join('');
+}
+
+// Shows a contact's profile card — avatar, name, phone (if set), and
+// role tags. Reachable by tapping their avatar in an inbox row or a
+// chat thread's header. Only works for people you actually share an
+// order with, same as the profiles RLS boundary. //
+async function openContactProfileModal(userId) {
+  if (!userId) return;
+
+  document.getElementById('sn-contactProfileOverlay').classList.add('active');
+  document.getElementById('sn-contactProfileModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var body = document.getElementById('sn-contact-profile-body');
+  body.innerHTML = '<div class="track-empty"><p>Loading profile...</p></div>';
+
+  const [{ data: profile, error: profileErr }, { data: roles }] = await Promise.all([
+    supabase.from('profiles').select('full_name, phone, avatar_url').eq('id', userId).single(),
+    supabase.from('user_roles').select('role').eq('user_id', userId)
+  ]);
+
+  if (profileErr || !profile) {
+    body.innerHTML = '<p style="color:#999;text-align:center;padding:20px 0;">Could not load this profile.</p>';
+    return;
+  }
+
+  var roleList = (roles || []).map(function(r) { return r.role; }).filter(function(r) { return r !== 'admin'; });
+  var roleTagColors = { customer: '#3B82F6', merchant: '#15803D', rider: '#B45309' };
+  var roleTagsHtml = roleList.map(function(r) {
+    return '<span style="display:inline-block;background:' + (roleTagColors[r] || '#999') + '1A;color:' + (roleTagColors[r] || '#999') + ';font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;text-transform:capitalize;margin:0 4px 4px 0;">' + r + '</span>';
+  }).join('');
+
+  var avatarHtml = profile.avatar_url
+    ? '<img src="' + profile.avatar_url + '" style="width:72px;height:72px;border-radius:50%;object-fit:cover;"/>'
+    : '<div style="width:72px;height:72px;border-radius:50%;background:#F0FFF4;color:var(--primary,#22C55E);display:flex;align-items:center;justify-content:center;font-size:28px;"><i class="fas fa-user"></i></div>';
+
+  var storeSectionHtml = '';
+  if (roleList.indexOf('merchant') !== -1) {
+    const { data: merchantRow } = await supabase.from('merchants').select('id, store_name').eq('user_id', userId).single();
+    if (merchantRow) {
+      storeSectionHtml = '<button class="co-btn co-btn--next" style="width:100%;margin-top:14px;" onclick="closeContactProfileModal(); openMerchantStorefront(\'' + merchantRow.id + '\')"><i class="fas fa-store"></i> Visit ' + merchantRow.store_name.replace(/</g, '&lt;') + '</button>';
+    }
+  }
+
+  body.innerHTML =
+    '<div style="text-align:center;">' +
+    avatarHtml +
+    '<h2 style="margin:12px 0 6px;">' + (profile.full_name || 'HomeWeb User') + '</h2>' +
+    '<div style="margin-bottom:6px;">' + (roleTagsHtml || '<span style="color:#999;font-size:12px;">No roles on file</span>') + '</div>' +
+    (profile.phone
+      ? '<p style="margin:8px 0 0;font-size:13.5px;color:#555;"><i class="fas fa-phone" style="color:var(--primary,#22C55E);"></i> ' + profile.phone + '</p>'
+      : '<p style="margin:8px 0 0;font-size:12.5px;color:#aaa;">No phone number on file</p>') +
+    storeSectionHtml +
+    '</div>';
+}
+
+function closeContactProfileModal() {
+  document.getElementById('sn-contactProfileOverlay').classList.remove('active');
+  document.getElementById('sn-contactProfileModal').classList.remove('active');
+  // Deliberately not touching document.body.style.overflow — this always
+  // opens on top of the chat modal, which remains open underneath and
+  // stays responsible for that state until it's closed too.
 }
 
 async function fetchMyContacts() {
@@ -3752,6 +3814,13 @@ function injectModals() {
     '<div id="sn-resetOverlay" class="sn-overlay"></div>' +
     '<div id="sn-resetModal" class="sn-login-modal">' +
     '<div class="login-body" id="sn-reset-body"></div>' +
+    '</div>' +
+
+    // Contact profile popup (from chat - shows who you're messaging)
+    '<div id="sn-contactProfileOverlay" class="sn-overlay" onclick="closeContactProfileModal()" style="z-index:500;"></div>' +
+    '<div id="sn-contactProfileModal" class="sn-login-modal" style="z-index:501;">' +
+    '<button class="pm-close" onclick="closeContactProfileModal()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body" id="sn-contact-profile-body"></div>' +
     '</div>' +
 
     // Merchant storefront overlay + modal
