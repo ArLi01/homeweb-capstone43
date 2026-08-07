@@ -2505,6 +2505,141 @@ function closeLoginModal() {
   document.body.style.overflow = '';
 }
 
+// ============================================================
+// FORGOT PASSWORD
+// ============================================================
+
+function openForgotPasswordModal(e) {
+  if (e) e.preventDefault();
+  closeLoginModal();
+
+  var body = document.getElementById('sn-forgot-body');
+  body.innerHTML =
+    '<div class="login-icon"><i class="fas fa-key"></i></div>' +
+    '<h2>Reset Password</h2>' +
+    '<p class="login-sub">Enter the email on your account and we\'ll send a reset link.</p>' +
+    '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
+    '<input type="email" id="forgot-email" placeholder="you@example.com"/>' +
+    '<span class="co-field-error">Enter a valid email address</span></div>' +
+    '<button class="co-btn co-btn--next login-submit" id="forgot-submit-btn" onclick="submitForgotPassword()">Send Reset Link</button>' +
+    '<p class="login-signup"><a href="#" onclick="closeForgotPasswordModal(); openLoginModal(event); return false;">Back to Log In</a></p>';
+
+  document.getElementById('forgot-email').addEventListener('keydown', function(ev) { if (ev.key === 'Enter') submitForgotPassword(); });
+
+  document.getElementById('sn-forgotOverlay').classList.add('active');
+  document.getElementById('sn-forgotModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeForgotPasswordModal() {
+  document.getElementById('sn-forgotOverlay').classList.remove('active');
+  document.getElementById('sn-forgotModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+async function submitForgotPassword() {
+  var emailEl = document.getElementById('forgot-email');
+  var email = emailEl.value.trim();
+  var emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+  if (!emailOk) {
+    emailEl.closest('.co-field').classList.add('co-field--error');
+    return;
+  }
+
+  var btn = document.getElementById('forgot-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin + window.location.pathname
+  });
+
+  btn.disabled = false;
+  btn.textContent = 'Send Reset Link';
+
+  // Deliberately vague on success either way — confirming or denying that
+  // an email exists in the system is an account-enumeration leak. //
+  var body = document.getElementById('sn-forgot-body');
+  body.innerHTML =
+    '<div class="login-icon" style="color:#22C55E;"><i class="fas fa-envelope-circle-check"></i></div>' +
+    '<h2>Check Your Email</h2>' +
+    '<p class="login-sub">If an account exists for <strong>' + email.replace(/</g, '&lt;') + '</strong>, a password reset link is on its way. It may take a minute — check spam too.</p>' +
+    '<button class="co-btn co-btn--next login-submit" onclick="closeForgotPasswordModal()">Done</button>';
+
+  if (error) console.error('resetPasswordForEmail error:', error.message);
+}
+
+// ============================================================
+// SET NEW PASSWORD (after clicking the emailed reset link)
+// ============================================================
+
+function openSetNewPasswordModal() {
+  var body = document.getElementById('sn-reset-body');
+  body.innerHTML =
+    '<div class="login-icon"><i class="fas fa-lock"></i></div>' +
+    '<h2>Set a New Password</h2>' +
+    '<p class="login-sub">Choose a new password for your account.</p>' +
+    '<div class="co-field"><label>New Password <span class="co-required">*</span></label>' +
+    '<input type="password" id="reset-new-password" placeholder="At least 6 characters"/>' +
+    '<span class="co-field-error">Password must be at least 6 characters</span></div>' +
+    '<div class="co-field"><label>Confirm Password <span class="co-required">*</span></label>' +
+    '<input type="password" id="reset-confirm-password" placeholder="Re-enter password"/>' +
+    '<span class="co-field-error">Passwords do not match</span></div>' +
+    '<button class="co-btn co-btn--next login-submit" id="reset-submit-btn" onclick="submitNewPassword()">Update Password</button>' +
+    '<p class="login-signup"><a href="#" onclick="cancelPasswordReset(); return false;">Cancel</a></p>';
+
+  document.getElementById('sn-resetOverlay').classList.add('active');
+  document.getElementById('sn-resetModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+async function cancelPasswordReset() {
+  // The reset link leaves the browser in a temporary authenticated
+  // "recovery" session — sign out rather than leaving that dangling. //
+  await supabase.auth.signOut();
+  document.getElementById('sn-resetOverlay').classList.remove('active');
+  document.getElementById('sn-resetModal').classList.remove('active');
+  document.body.style.overflow = '';
+  history.replaceState(null, '', window.location.pathname);
+}
+
+async function submitNewPassword() {
+  var pass1El = document.getElementById('reset-new-password');
+  var pass2El = document.getElementById('reset-confirm-password');
+  var pass1 = pass1El.value;
+  var pass2 = pass2El.value;
+  var ok = true;
+
+  pass1El.closest('.co-field').classList.remove('co-field--error');
+  pass2El.closest('.co-field').classList.remove('co-field--error');
+
+  if (pass1.length < 6) { pass1El.closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (pass1 !== pass2) { pass2El.closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (!ok) return;
+
+  var btn = document.getElementById('reset-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Updating...';
+
+  const { error } = await supabase.auth.updateUser({ password: pass1 });
+
+  btn.disabled = false;
+  btn.textContent = 'Update Password';
+
+  if (error) {
+    showToast('Could not update password: ' + error.message, 'error');
+    return;
+  }
+
+  document.getElementById('sn-resetOverlay').classList.remove('active');
+  document.getElementById('sn-resetModal').classList.remove('active');
+  document.body.style.overflow = '';
+  history.replaceState(null, '', window.location.pathname);
+  showToast('Password updated \u2705 You\'re now logged in.');
+  updateAuthUI();
+}
+
 // Validate login form //
 function validateLoginForm() {
   const emailEl = document.getElementById('login-email');
@@ -2726,6 +2861,13 @@ async function renderAdminMerchants() {
     merchants = merchants.filter(function(m) { return m.business_permit_url && !m.is_verified; });
   }
 
+  var merchantUserIds = merchants.map(function(m) { return m.user_id; });
+  var merchantEmailById = {};
+  if (merchantUserIds.length) {
+    const { data: mProfiles } = await supabase.from('profiles').select('id, email').in('id', merchantUserIds);
+    (mProfiles || []).forEach(function(p) { merchantEmailById[p.id] = p.email; });
+  }
+
   var filterBar = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
     '<button class="co-btn" style="flex:1;background:' + (adminMerchantFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'all\'; renderAdminMerchants();">All (' + (allMerchants ? allMerchants.length : 0) + ')</button>' +
     '<button class="co-btn" style="flex:1;background:' + (adminMerchantFilter === 'pending' ? '#B45309' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'pending\'; renderAdminMerchants();">Pending Review (' + (allMerchants ? allMerchants.filter(function(m){return m.business_permit_url && !m.is_verified;}).length : 0) + ')</button>' +
@@ -2742,6 +2884,7 @@ async function renderAdminMerchants() {
           '<span style="font-size:11px;color:' + typeColor + ';font-weight:600;">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
           '</div>' +
           '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + (CATEGORY_META[m.business_type] ? CATEGORY_META[m.business_type].title : m.business_type) + '</p>' +
+          '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + (merchantEmailById[m.user_id] || 'No email on file') + '</p>' +
           (m.is_suspended ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-ban"></i> Suspended: ' + (m.suspended_reason || 'No reason given') + '</p>' : '') +
           '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">' +
           (m.business_permit_url
@@ -2801,6 +2944,13 @@ async function renderAdminRiders() {
   var body = document.getElementById('sn-admin-body');
   const { data: riders, error } = await supabase.from('riders').select('*').order('created_at', { ascending: false });
 
+  var riderUserIds = (riders || []).map(function(r) { return r.user_id; });
+  var riderEmailById = {};
+  if (riderUserIds.length) {
+    const { data: rProfiles } = await supabase.from('profiles').select('id, email').in('id', riderUserIds);
+    (rProfiles || []).forEach(function(p) { riderEmailById[p.id] = p.email; });
+  }
+
   var rows = (error || !riders || !riders.length)
     ? '<p style="color:#999;font-size:13px;">No riders yet.</p>'
     : riders.map(function(r) {
@@ -2809,6 +2959,7 @@ async function renderAdminRiders() {
           '<span style="font-weight:700;font-size:13px;">' + capitalize(r.vehicle_type) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</span>' +
           '<span style="font-size:11px;color:' + (r.is_available ? '#15803D' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</span>' +
           '</div>' +
+          '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + (riderEmailById[r.user_id] || 'No email on file') + '</p>' +
           '<p style="margin:4px 0 0;font-size:12px;color:#777;">' +
           (r.rating_count > 0 ? r.rating_avg + ' \u2605 (' + r.rating_count + ')' : 'No ratings yet') +
           (r.rejection_penalty > 0 ? ' \u2022 <span style="color:#DC2626;">-' + r.rejection_penalty.toFixed(1) + ' penalty</span>' : '') +
@@ -2901,7 +3052,7 @@ async function renderAdminCustomers() {
     return;
   }
 
-  const { data: profiles } = await supabase.from('profiles').select('id, full_name, phone, created_at').in('id', userIds);
+  const { data: profiles } = await supabase.from('profiles').select('id, full_name, email, phone, created_at').in('id', userIds);
   const { data: orders } = await supabase.from('orders').select('user_id, total, status').in('user_id', userIds);
 
   var statsById = {};
@@ -2918,6 +3069,7 @@ async function renderAdminCustomers() {
       return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;align-items:center;">' +
         '<div>' +
         '<p style="margin:0;font-weight:700;font-size:13px;">' + (p.full_name || 'Unnamed Customer') + '</p>' +
+        '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.email || 'No email on file') + '</p>' +
         '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.phone || 'No phone on file') + ' \u2022 Joined ' + formatDate(p.created_at) + '</p>' +
         '</div>' +
         '<div style="text-align:right;">' +
@@ -3286,6 +3438,12 @@ async function restoreSession() {
     updateNotifBadge();
     updateChatBadge();
     if (currentUser) startRiderAlertPolling(); else stopRiderAlertPolling();
+
+    // Fired automatically by Supabase when the user arrives via a password
+    // reset email link — this is the cue to show the "set new password" form. //
+    if (event === 'PASSWORD_RECOVERY') {
+      openSetNewPasswordModal();
+    }
   });
 }
 
@@ -3492,7 +3650,10 @@ function injectModals() {
     '<div class="co-field"><label>Password <span class="co-required">*</span></label>' +
     '<input type="password" id="login-password" placeholder="Enter your password"/>' +
     '<span class="co-field-error">Password is required</span></div>' +
-    '<label class="login-remember"><input type="checkbox" id="login-remember"/> <span>Remember me</span></label>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
+    '<label class="login-remember" style="margin:0;"><input type="checkbox" id="login-remember"/> <span>Remember me</span></label>' +
+    '<a href="#" onclick="openForgotPasswordModal(event)" style="font-size:12.5px;color:var(--primary,#22C55E);text-decoration:underline;">Forgot password?</a>' +
+    '</div>' +
     '<button class="co-btn co-btn--next login-submit" onclick="submitLogin()">Log In <i class="fas fa-arrow-right"></i></button>' +
     '<p class="login-signup">Don\'t have an account? <a href="#" onclick="closeLoginModal(); openSignupModal(event); return false;">Sign Up</a></p>' +
     '</div></div>' +
@@ -3560,6 +3721,19 @@ function injectModals() {
     '<div id="sn-helpModal" class="sn-login-modal">' +
     '<button class="pm-close" onclick="closeHelpCenterModal()"><i class="fas fa-times"></i></button>' +
     '<div class="login-body" id="sn-help-body"></div>' +
+    '</div>' +
+
+    // Forgot password overlay + modal
+    '<div id="sn-forgotOverlay" class="sn-overlay" onclick="closeForgotPasswordModal()"></div>' +
+    '<div id="sn-forgotModal" class="sn-login-modal">' +
+    '<button class="pm-close" onclick="closeForgotPasswordModal()"><i class="fas fa-times"></i></button>' +
+    '<div class="login-body" id="sn-forgot-body"></div>' +
+    '</div>' +
+
+    // Set new password overlay + modal (opens automatically after clicking the reset link in email)
+    '<div id="sn-resetOverlay" class="sn-overlay"></div>' +
+    '<div id="sn-resetModal" class="sn-login-modal">' +
+    '<div class="login-body" id="sn-reset-body"></div>' +
     '</div>' +
 
     // Merchant storefront overlay + modal
