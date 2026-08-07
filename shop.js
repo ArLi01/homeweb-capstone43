@@ -2577,12 +2577,12 @@ function openAdminLoginModal() {
     '<h2>Admin Access</h2>' +
     '<p class="login-sub">Restricted area</p>' +
     '<div class="co-field"><label>Username</label>' +
-    '<input type="text" id="admin-username" autocomplete="off"/></div>' +
+    '<input type="text" id="admin-access-code" name="admin_access_code" autocomplete="off" data-lpignore="true" data-1p-ignore/></div>' +
     '<div class="co-field"><label>Password</label>' +
-    '<input type="password" id="admin-password"/></div>' +
+    '<input type="password" id="admin-access-secret" name="admin_access_secret" autocomplete="new-password" data-lpignore="true" data-1p-ignore/></div>' +
     '<button class="co-btn co-btn--next login-submit" id="admin-login-btn" onclick="submitAdminLogin()">Log In</button>';
 
-  document.getElementById('admin-password').addEventListener('keydown', function(e) { if (e.key === 'Enter') submitAdminLogin(); });
+  document.getElementById('admin-access-secret').addEventListener('keydown', function(e) { if (e.key === 'Enter') submitAdminLogin(); });
 
   document.getElementById('sn-adminLoginOverlay').classList.add('active');
   document.getElementById('sn-adminLoginModal').classList.add('active');
@@ -2597,8 +2597,8 @@ function closeAdminLoginModal() {
 }
 
 async function submitAdminLogin() {
-  var username = document.getElementById('admin-username').value.trim().toLowerCase();
-  var password = document.getElementById('admin-password').value;
+  var username = document.getElementById('admin-access-code').value.trim().toLowerCase();
+  var password = document.getElementById('admin-access-secret').value;
   var btn = document.getElementById('admin-login-btn');
 
   if (username !== 'admin') {
