@@ -3354,6 +3354,10 @@ function renderProfileForm(profile, roleStats) {
     dashboardButton += '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:10px;" onclick="closeProfileModal(); openRiderDashboard();">' +
       '<i class="fas fa-motorcycle"></i> My Deliveries</button>';
   }
+  if (userRoles.indexOf('admin') !== -1) {
+    dashboardButton += '<button class="co-btn co-btn--next" style="width:100%;margin-bottom:10px;background:#1F2937;" onclick="closeProfileModal(); openAdminDashboard();">' +
+      '<i class="fas fa-user-shield"></i> Admin Dashboard</button>';
+  }
 
   var addRoleButtons = '';
   if (userRoles.indexOf('merchant') === -1) {
