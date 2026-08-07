@@ -187,7 +187,37 @@ function renderCategoryPage() {
 let cart = JSON.parse(localStorage.getItem('shopnow_cart') || '[]');
 let currentProduct = null;    
 let checkoutStep = 1;         
-let currentUser = null;      
+let currentUser = null;
+var pendingPasswordRecovery = false;
+
+// Subscribed immediately, at the top of the script — not nested inside an
+// async function called later from DOMContentLoaded. This matters: Supabase
+// starts scanning the URL for a password-reset token the instant the client
+// is created, and fires PASSWORD_RECOVERY as soon as that async check
+// resolves. If our listener isn't already registered by then, the event
+// fires on an empty listener list and is silently missed — which is
+// exactly what caused the reset link to log the user in normally instead
+// of prompting for a new password. //
+supabase.auth.onAuthStateChange(function(event, session) {
+  currentUser = session ? session.user : null;
+  updateAuthUI();
+  updateNotifBadge();
+  updateChatBadge();
+  if (currentUser) startRiderAlertPolling(); else stopRiderAlertPolling();
+
+  if (event === 'PASSWORD_RECOVERY') {
+    // The reset-password modal is injected dynamically by injectModals(),
+    // which only runs once DOMContentLoaded fires — this event can arrive
+    // before that. If the modal isn't in the DOM yet, flag it and let the
+    // init block show it right after injecting modals instead. //
+    if (document.getElementById('sn-resetModal')) {
+      openSetNewPasswordModal();
+    } else {
+      pendingPasswordRecovery = true;
+    }
+  }
+});
+
 let userRoles = [];
 let currentNotifList = [];
 let activeRole = 'customer';
@@ -3422,8 +3452,10 @@ async function submitSignup() {
 
 // Restore session on page load (so refreshing doesn't log the user out) //
 async function restoreSession() {
+  // Check for an existing session on load — this can safely happen
+  // after the listener above is already subscribed. //
   const { data } = await supabase.auth.getSession();
-  if (data.session) {
+  if (data.session && !pendingPasswordRecovery) {
     currentUser = data.session.user;
     await fetchUserRoles();
     updateAuthUI();
@@ -3431,20 +3463,6 @@ async function restoreSession() {
     updateChatBadge();
     startRiderAlertPolling();
   }
-
-  supabase.auth.onAuthStateChange(function(event, session) {
-    currentUser = session ? session.user : null;
-    updateAuthUI();
-    updateNotifBadge();
-    updateChatBadge();
-    if (currentUser) startRiderAlertPolling(); else stopRiderAlertPolling();
-
-    // Fired automatically by Supabase when the user arrives via a password
-    // reset email link — this is the cue to show the "set new password" form. //
-    if (event === 'PASSWORD_RECOVERY') {
-      openSetNewPasswordModal();
-    }
-  });
 }
 
 // ============================================================
@@ -5713,7 +5731,17 @@ document.addEventListener('DOMContentLoaded', async function() {
   initLoginModal();
   updateCartBadge();
   initSearch();
-  restoreSession();
+
+  // Await this before touching the recovery flag below, so restoreSession()
+  // can see it's still true and correctly skip treating this as a normal
+  // login — otherwise the header would flash "logged in" for a moment
+  // alongside the "set new password" prompt. //
+  await restoreSession();
+
+  if (pendingPasswordRecovery) {
+    pendingPasswordRecovery = false;
+    openSetNewPasswordModal();
+  }
 
   if (window.location.hash === '#admin') openAdminLoginModal();
 
