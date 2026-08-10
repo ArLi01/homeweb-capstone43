@@ -2522,24 +2522,45 @@ function renderTrackingDetail(order) {
   // Customer confirms receipt — only appears once the rider has actually
   // marked it delivered, never at any earlier status. This is the only
   // way an order finalizes as 'delivered' and unlocks reviews.
+  //
+  // Merchants and riders can legitimately load this same order (they're
+  // real participants and RLS correctly allows it), but these actions
+  // belong to the customer alone — finalizing receipt or disputing
+  // non-delivery isn't something a seller or rider should be able to do
+  // on the customer's behalf. Gate the whole block on actually being
+  // the customer; everyone else just sees a plain status line instead.
   if (order.status === 'awaiting_confirmation') {
-    var elapsedSinceDelivered = Date.now() - new Date(order.updated_at).getTime();
-    var gracePeriodPassed = elapsedSinceDelivered >= CONFIRMATION_GRACE_PERIOD_MS;
-
-    html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
-      '<p style="margin:0 0 10px;font-size:13px;color:#92400E;"><i class="fas fa-info-circle"></i> Your rider marked this order as delivered. Please confirm you actually received it.</p>' +
-      '<button class="co-btn co-btn--next track-mark-delivered" onclick="confirmDelivery(\'' + order.id + '\')">Confirm Receipt</button>';
-
-    if (order.not_arrived_reported_at) {
-      html += '<p style="margin:10px 0 0;font-size:12px;color:#DC2626;"><i class="fas fa-flag"></i> You reported this order as not received. The seller and rider have been notified.</p>';
-    } else if (gracePeriodPassed) {
-      html += '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-top:10px;" onclick="reportNotArrived(\'' + order.id + '\')">Did Not Arrive Yet</button>';
+    if (order.user_id !== currentUser.id) {
+      html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
+        '<p style="margin:0;font-size:13px;color:#92400E;"><i class="fas fa-info-circle"></i> ' +
+        (order.not_arrived_reported_at
+          ? 'The customer has reported this order as not received. Awaiting resolution.'
+          : 'Delivered by the rider — awaiting the customer\'s confirmation.') +
+        '</p></div>';
+    } else if (order.not_arrived_reported_at) {
+      // Already disputed — don't offer Confirm Receipt at all here, since
+      // confirming after already claiming non-receipt is contradictory
+      // and could wrongly finalize an order that's under dispute. //
+      html += '<div style="background:#FEE2E2;border-radius:10px;padding:14px;margin-top:16px;">' +
+        '<p style="margin:0;font-size:13px;color:#DC2626;"><i class="fas fa-flag"></i> You reported this order as not received. The seller and rider have been notified — this will be resolved before the order can be finalized.</p>' +
+        '</div>';
     } else {
-      var minsLeft = Math.ceil((CONFIRMATION_GRACE_PERIOD_MS - elapsedSinceDelivered) / 1000 / 60) || 1;
-      html += '<p style="margin:10px 0 0;font-size:11.5px;color:#92400E;">Didn\'t receive it? You can report this in about ' + minsLeft + ' minute' + (minsLeft === 1 ? '' : 's') + '.</p>';
-    }
+      var elapsedSinceDelivered = Date.now() - new Date(order.updated_at).getTime();
+      var gracePeriodPassed = elapsedSinceDelivered >= CONFIRMATION_GRACE_PERIOD_MS;
 
-    html += '</div>';
+      html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
+        '<p style="margin:0 0 10px;font-size:13px;color:#92400E;"><i class="fas fa-info-circle"></i> Your rider marked this order as delivered. Please confirm you actually received it.</p>' +
+        '<button class="co-btn co-btn--next track-mark-delivered" onclick="confirmDelivery(\'' + order.id + '\')">Confirm Receipt</button>';
+
+      if (gracePeriodPassed) {
+        html += '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-top:10px;" onclick="reportNotArrived(\'' + order.id + '\')">Did Not Arrive Yet</button>';
+      } else {
+        var minsLeft = Math.ceil((CONFIRMATION_GRACE_PERIOD_MS - elapsedSinceDelivered) / 1000 / 60) || 1;
+        html += '<p style="margin:10px 0 0;font-size:11.5px;color:#92400E;">Didn\'t receive it? You can report this in about ' + minsLeft + ' minute' + (minsLeft === 1 ? '' : 's') + '.</p>';
+      }
+
+      html += '</div>';
+    }
   }
 
   container.innerHTML = html;
