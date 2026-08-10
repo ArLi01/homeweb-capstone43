@@ -94,13 +94,20 @@ function fmtPrice(n) {
   return '\u20B1' + Number(n).toLocaleString();
 }
 
+// Renders a star rating with pixel-precise fractional fill (4.5 shows as
+// 4 full + exactly half; 3.8 shows as 3 full + exactly 3/4, not just
+// rounded to the nearest half-star) by overlaying a full-color star row
+// clipped to the exact percentage on top of a grey empty-star row. //
 function starsHTML(n) {
-  var s = '';
-  for (var i = 1; i <= 5; i++) {
-    s += '<i class="' + (i <= n ? 'fas' : 'far') + ' fa-star"></i>';
-  }
-  return s;
+  n = Math.max(0, Math.min(5, Number(n) || 0));
+  var pct = (n / 5) * 100;
+  return '<span style="position:relative;display:inline-block;line-height:1;vertical-align:middle;">' +
+    '<span style="color:#ddd;letter-spacing:1px;">\u2605\u2605\u2605\u2605\u2605</span>' +
+    '<span style="position:absolute;top:0;left:0;overflow:hidden;width:' + pct + '%;white-space:nowrap;color:#F59E0B;letter-spacing:1px;">\u2605\u2605\u2605\u2605\u2605</span>' +
+    '</span>';
 }
+
+function stars(n) { return starsHTML(n); }
 
 // Shared product card markup used by both the homepage and category page //
 function renderProductCardHtml(p) {
@@ -224,7 +231,7 @@ let activeRole = 'customer';
 let currentTrackingOrder = null; 
 let shippingInfo = {
   firstName: '', lastName: '', phone: '',
-  street: '', city: 'Sta. Barbara', zip: '5002',
+  street: '', barangay: '', city: 'Sta. Barbara', zip: '5002',
   delivery: 'standard'
 };
 let gcashStep = 1; // 1: mobile number, 2: mpin, 3: processing, 4: success
@@ -238,12 +245,6 @@ let orders = [];
 const fmt = n => '\u20B1' + Number(n).toLocaleString();
 
 // Star rating icons //
-function stars(n) {
-  let s = '';
-  for (let i = 1; i <= 5; i++)
-    s += '<i class="' + (i <= n ? 'fas' : 'far') + ' fa-star"></i>';
-  return s;
-}
 
 // Save cart localStorage //
 function saveCart() {
@@ -1243,7 +1244,7 @@ async function openMerchantStorefront(merchantId) {
     '<p style="color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:13px;">' + (CATEGORY_META[merchant.business_type] ? CATEGORY_META[merchant.business_type].title : merchant.business_type) + '</p>' +
     (merchant.store_description ? '<p style="color:rgba(255,255,255,0.9);margin:10px auto 0;font-size:13px;max-width:420px;">' + merchant.store_description + '</p>' : '') +
     '<div style="margin-top:10px;color:#FEF3C7;font-size:13px;font-weight:600;">' +
-    (totalReviews > 0 ? stars(Math.round(storeRatingAvg)) + ' ' + storeRatingAvg + ' <span style="color:rgba(255,255,255,0.85);font-weight:400;">(' + totalReviews + ' reviews)</span>' : '<span style="color:rgba(255,255,255,0.85);font-weight:400;">No reviews yet</span>') +
+    (totalReviews > 0 ? stars(storeRatingAvg) + ' ' + storeRatingAvg + ' <span style="color:rgba(255,255,255,0.85);font-weight:400;">(' + totalReviews + ' reviews)</span>' : '<span style="color:rgba(255,255,255,0.85);font-weight:400;">No reviews yet</span>') +
     '</div>' +
     verifiedBadge +
     scheduleBadge +
@@ -1423,11 +1424,12 @@ function renderCheckout() {
       '<div class="co-field"><label>Last Name <span class="co-required">*</span></label><input type="text" id="co-lastName" placeholder="Last Name" value="' + shippingInfo.lastName + '"/><span class="co-field-error">Last name is required</span></div>' +
       '</div>' +
       '<div class="co-field"><label>Phone Number <span class="co-required">*</span></label><input type="tel" id="co-phone" placeholder="+63 9XX XXX XXXX" value="' + shippingInfo.phone + '"/><span class="co-field-error">Phone number is required</span></div>' +
-      '<div class="co-field"><label>Street Address <span class="co-required">*</span></label><input type="text" id="co-street" placeholder="House No., Street, Barangay" value="' + shippingInfo.street + '"/><span class="co-field-error">Street address is required</span></div>' +
+      '<div class="co-field"><label>Street Address <span class="co-required">*</span></label><input type="text" id="co-street" placeholder="House No., Street" value="' + shippingInfo.street + '"/><span class="co-field-error">Street address is required</span></div>' +
       '<div class="co-form-row">' +
+      '<div class="co-field"><label>Barangay <span class="co-required">*</span></label><input type="text" id="co-barangay" placeholder="e.g. Cabalabaguan" value="' + (shippingInfo.barangay || '') + '"/><span class="co-field-error">Barangay is required \u2014 used to match you with nearby riders</span></div>' +
       '<div class="co-field"><label>City / Municipality <span class="co-required">*</span></label><input type="text" id="co-city" placeholder="Sta. Barbara" value="' + shippingInfo.city + '"/><span class="co-field-error">City is required</span></div>' +
-      '<div class="co-field"><label>ZIP Code <span class="co-required">*</span></label><input type="text" id="co-zip" placeholder="5002" value="' + shippingInfo.zip + '"/><span class="co-field-error">ZIP code is required</span></div>' +
       '</div>' +
+      '<div class="co-field"><label>ZIP Code <span class="co-required">*</span></label><input type="text" id="co-zip" placeholder="5002" value="' + shippingInfo.zip + '"/><span class="co-field-error">ZIP code is required</span></div>' +
       '<div class="co-field"><label>Estimated Delivery Time</label>' +
       '<div style="background:#F0FFF4;border-radius:10px;padding:12px 14px;font-size:13px;color:#15803D;">' +
       '<i class="fas fa-motorcycle"></i> 10\u201315 minutes, depending on distance from the seller</div></div></div>';
@@ -1524,7 +1526,7 @@ function renderCheckout() {
 
 // Validate shipping form //
 function validateShippingForm() {
-  const requiredIds = ['co-firstName', 'co-lastName', 'co-phone', 'co-street', 'co-city', 'co-zip'];
+  const requiredIds = ['co-firstName', 'co-lastName', 'co-phone', 'co-street', 'co-barangay', 'co-city', 'co-zip'];
   let isValid = true;
   let firstInvalidEl = null;
 
@@ -1551,6 +1553,7 @@ function saveShippingForm() {
   shippingInfo.lastName  = get('co-lastName');
   shippingInfo.phone     = get('co-phone');
   shippingInfo.street    = get('co-street');
+  shippingInfo.barangay  = get('co-barangay');
   shippingInfo.city      = get('co-city');
   shippingInfo.zip       = get('co-zip');
   const deliveryEl = document.querySelector('input[name="delivery"]:checked');
@@ -1757,7 +1760,8 @@ var ORDER_STATUS_MAP = {
   'preparing':              { label: 'Preparing Your Order',  desc: 'The seller is packing your items with care.' },
   'out_for_delivery':        { label: 'Out for Delivery',      desc: 'Your rider is on the way to deliver your order!' },
   'awaiting_confirmation':   { label: 'Delivered — Awaiting Your Confirmation', desc: 'Your rider marked this as delivered. Please confirm you received it.' },
-  'delivered':              { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' }
+  'delivered':              { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' },
+  'cancelled':              { label: 'Cancelled',             desc: 'No rider accepted this order within 30 minutes, so it was automatically cancelled.' }
 };
 
 // Groups cart items by seller — each group becomes its own separate order,
@@ -1863,6 +1867,7 @@ async function placeOrder() {
       shipping_last_name: shippingInfo.lastName,
       shipping_phone: shippingInfo.phone,
       shipping_street: shippingInfo.street,
+      shipping_barangay: shippingInfo.barangay,
       shipping_city: shippingInfo.city,
       shipping_zip: shippingInfo.zip,
       delivery_option: shippingInfo.delivery
@@ -2606,10 +2611,12 @@ function renderTrackingDetail(order) {
 // Helpers for order tracking
 function getOrderStatusInfo(status) {
   var map = {
-    'placed':            { label: 'Order Placed',       icon: '' },
-    'preparing':         { label: 'Preparing',          icon: '' },
-    'out_for_delivery':  { label: 'Out for Delivery',   icon: '' },
-    'delivered':         { label: 'Delivered',          icon: '' }
+    'placed':                { label: 'Order Placed',        icon: '' },
+    'preparing':             { label: 'Preparing',           icon: '' },
+    'out_for_delivery':      { label: 'Out for Delivery',    icon: '' },
+    'awaiting_confirmation': { label: 'Awaiting Confirmation', icon: '' },
+    'delivered':             { label: 'Delivered',           icon: '' },
+    'cancelled':             { label: 'Cancelled',           icon: '' }
   };
   return map[status] || map['placed'];
 }
@@ -4395,7 +4402,7 @@ function renderProfileForm(profile, roleStats) {
           (m.openToday ? 'Your store is visible today' : 'Your store is hidden today (closed)') + '</p>'
         : '') +
       '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
-      (m.ratingCount > 0 ? stars(Math.round(m.ratingAvg)) + ' ' + m.ratingAvg + ' (' + m.ratingCount + ' reviews)' : 'No reviews yet') +
+      (m.ratingCount > 0 ? stars(m.ratingAvg) + ' ' + m.ratingAvg + ' (' + m.ratingCount + ' reviews)' : 'No reviews yet') +
       '</p></div>';
   }
   if (roleStats.rider) {
@@ -4405,7 +4412,7 @@ function renderProfileForm(profile, roleStats) {
       '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + capitalize(r.vehicle_type) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:' + (r.is_available ? '#22C55E' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
-      (r.rating_count > 0 ? stars(Math.round(rEffectiveRating)) + ' ' + rEffectiveRating.toFixed(1) + ' (' + r.rating_count + ' ratings)' : 'New rider, no ratings yet') +
+      (r.rating_count > 0 ? stars(rEffectiveRating) + ' ' + rEffectiveRating.toFixed(1) + ' (' + r.rating_count + ' ratings)' : 'New rider, no ratings yet') +
       (r.rejection_penalty > 0 ? '<span style="color:#DC2626;"> \u2014 ' + r.rejection_penalty.toFixed(1) + ' rejection penalty</span>' : '') +
       '</p></div>';
   }
@@ -5202,7 +5209,7 @@ function renderMerchantProductsView(tabs) {
       '<div style="flex:1;min-width:0;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">' + p.name + (p.is_active ? '' : ' <span style="color:#DC2626;font-size:11px;">(inactive)</span>') + '</p>' +
       '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + (p.sold_count || 0) + ' sold \u2022 ' + meta.title + '</p>' +
-      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(Math.round(p.rating_avg || 0)) + ' ' + (p.rating_avg > 0 ? p.rating_avg + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
+      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(p.rating_avg || 0) + ' ' + (p.rating_avg > 0 ? p.rating_avg + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-shrink:0;">' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="viewProductReviews(\'' + p.id + '\', \'' + p.name.replace(/'/g, "\\'") + '\')" title="Reviews"><i class="fas fa-comment-dots"></i></button>' +
@@ -5447,10 +5454,12 @@ async function checkForRiderOrderAlert() {
   var order = candidates.find(function(o) { return !riderAlertShownOrderIds[o.id]; });
   if (!order) return;
 
-  // Bundle in any sibling orders from the same checkout (same customer,
-  // multiple sellers) so the rider can accept the whole batch at once. //
-  var siblings = order.batch_code
-    ? candidates.filter(function(o) { return o.batch_code === order.batch_code; })
+  // Bundle in any other unclaimed orders in the same barangay so the
+  // rider can accept a whole route at once — this naturally covers same-
+  // checkout siblings too, since one checkout always shares one address. //
+  var orderBarangay = (order.shipping_barangay || '').trim().toLowerCase();
+  var siblings = orderBarangay
+    ? candidates.filter(function(o) { return (o.shipping_barangay || '').trim().toLowerCase() === orderBarangay; })
     : [order];
 
   showRiderOrderAlert(siblings);
@@ -5484,7 +5493,7 @@ async function showRiderOrderAlert(orders) {
     '<div style="text-align:center;">' +
     '<div class="login-icon" style="color:var(--primary,#22C55E);"><i class="fas fa-bell"></i></div>' +
     '<h2 style="margin:6px 0;">' + (isBatch ? orders.length + ' Deliveries Available!' : 'New Delivery Available!') + '</h2>' +
-    '<p class="login-sub">' + (isBatch ? 'Same customer, same checkout \u2014 accept together like a batched order' : 'First to accept gets it') + '</p>' +
+    '<p class="login-sub">' + (isBatch ? 'Same barangay \u2014 accept together for one efficient route' : 'First to accept gets it') + '</p>' +
     '</div>' +
     ordersHtml +
     '<p style="margin:6px 0 0;font-size:12.5px;color:#666;"><i class="fas fa-map-marker-alt"></i> ' + (primary.shipping_street || '') + ', ' + (primary.shipping_city || '') + '</p>' +
@@ -5629,14 +5638,17 @@ async function loadAvailableOrders() {
   availableOrders = error ? [] : (data || []);
 }
 
-// Groups available orders by batch_code so sibling orders from the same
-// checkout (same customer, multiple sellers) can be accepted together —
-// same idea as how Grab/Foodpanda batch nearby pickups for one rider. //
-function groupAvailableOrdersByBatch() {
+// Groups available orders by barangay so a rider can accept several
+// nearby deliveries together — genuinely useful proximity batching (not
+// just same-checkout siblings, though those are always included too,
+// since one checkout always shares one delivery address). Sta. Barbara
+// is a single municipality, so barangay is the right granularity —
+// city/municipality alone would group the entire town together. //
+function groupAvailableOrdersByBarangay() {
   var seen = {};
   var groups = [];
   availableOrders.forEach(function(o) {
-    var key = o.batch_code || o.id;
+    var key = (o.shipping_barangay || '').trim().toLowerCase() || ('order-' + o.id);
     if (seen[key]) { seen[key].push(o); return; }
     seen[key] = [o];
     groups.push(seen[key]);
@@ -5817,25 +5829,28 @@ function renderRiderDashboard() {
   }
 
   var availableHtml = availableOrders.length
-    ? groupAvailableOrdersByBatch().map(function(group) {
+    ? groupAvailableOrdersByBarangay().map(function(group) {
         var isBatch = group.length > 1;
         var allIds = group.map(function(o) { return o.id; }).join(',');
         var groupTotal = group.reduce(function(a, o) { return a + o.total; }, 0);
+        var primary = group[0];
+        var barangayLabel = primary.shipping_barangay || 'Unspecified area';
         var ordersHtml = group.map(function(o) {
           var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
           return '<div style="' + (isBatch ? 'padding:8px 0;border-top:1px dashed #e5e5e5;' : '') + '">' +
             '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + fmt(o.total) + '</p>' +
             '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
+            '<p style="margin:2px 0 0;color:#999;font-size:11.5px;">' + (o.shipping_street || '') + '</p>' +
             '</div>';
         }).join('');
-        var primary = group[0];
 
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
-          (isBatch ? '<p style="margin:0 0 6px;color:var(--primary,#22C55E);font-size:11.5px;font-weight:700;text-transform:uppercase;"><i class="fas fa-layer-group"></i> ' + group.length + ' orders \u2014 same customer</p>' : '') +
+          (isBatch
+            ? '<p style="margin:0 0 6px;color:var(--primary,#22C55E);font-size:11.5px;font-weight:700;text-transform:uppercase;"><i class="fas fa-route"></i> ' + group.length + ' orders in Brgy. ' + barangayLabel + '</p>'
+            : '<p style="margin:0 0 4px;color:#999;font-size:11px;"><i class="fas fa-map-marker-alt"></i> Brgy. ' + barangayLabel + '</p>') +
           ordersHtml +
-          '<p style="margin:6px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (primary.shipping_street || '') + ', ' + (primary.shipping_city || '') + '</p>' +
           (isBatch ? '<p style="margin:6px 0 0;font-weight:700;font-size:12.5px;">Combined Total: ' + fmt(groupTotal) + '</p>' : '') +
-          '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="acceptOrderBatch(\'' + allIds + '\')">' + (isBatch ? 'Accept All (' + group.length + ')' : 'Accept Delivery') + '</button>' +
+          '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="acceptOrderBatch(\'' + allIds + '\')">' + (isBatch ? 'Accept All ' + group.length + ' \u2014 Same Route' : 'Accept Delivery') + '</button>' +
           '</div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders waiting for a rider right now.</p>';
@@ -5846,7 +5861,7 @@ function renderRiderDashboard() {
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
     '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed' +
     (myRiderProfile && myRiderProfile.rating_count > 0
-      ? ' \u2022 <span style="color:#F59E0B;">' + stars(Math.round(myEffectiveRating)) + '</span> ' + myEffectiveRating.toFixed(1) + ' (' + myRiderProfile.rating_count + ')'
+      ? ' \u2022 <span style="color:#F59E0B;">' + stars(myEffectiveRating) + '</span> ' + myEffectiveRating.toFixed(1) + ' (' + myRiderProfile.rating_count + ')'
       : ' \u2022 New rider, no ratings yet') +
     (myRiderProfile && myRiderProfile.rejection_penalty > 0 ? ' \u2022 <span style="color:#DC2626;">' + myRiderProfile.rejection_penalty.toFixed(1) + ' rejection penalty</span>' : '') +
     '</p>' +
