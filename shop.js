@@ -2030,6 +2030,33 @@ async function reportNotArrived(orderDbId) {
   openTrackingDetail(orderDbId);
 }
 
+// Lets the customer who filed a non-delivery report retract it once the
+// order genuinely does arrive — without this, a dispute would be a
+// permanent dead end even after the rider successfully delivers. Only
+// the customer who filed it can retract it (enforced by orders RLS,
+// same as confirmDelivery/reportNotArrived). //
+async function retractNotArrivedAndConfirm(orderDbId) {
+  const { data: existing } = await supabase.from('orders').select('status, order_code, not_arrived_reported_at').eq('id', orderDbId).single();
+  if (!existing || existing.status !== 'awaiting_confirmation' || !existing.not_arrived_reported_at) {
+    showToast('This order has no active dispute to resolve', 'info');
+    return;
+  }
+  if (!confirm('Confirm you received Order #' + existing.order_code + '? This withdraws your non-delivery report and completes the order.')) return;
+
+  await supabase.from('orders').update({
+    status: 'delivered', not_arrived_reported_at: null, updated_at: new Date().toISOString()
+  }).eq('id', orderDbId);
+  await supabase.from('order_status_history').insert({
+    order_id: orderDbId, status: 'delivered',
+    label: 'Delivery Confirmed \u2014 Dispute Resolved',
+    description: 'The customer withdrew their non-delivery report and confirmed the order was received.'
+  });
+
+  showToast('Order confirmed as delivered \u2705');
+  updateNotifBadge();
+  openTrackingDetail(orderDbId);
+}
+
 // Mark order as delivered (manual override, e.g. for demo purposes) //
 // ============================================================
 // REVIEWS & RATINGS
@@ -2538,11 +2565,13 @@ function renderTrackingDetail(order) {
           : 'Delivered by the rider — awaiting the customer\'s confirmation.') +
         '</p></div>';
     } else if (order.not_arrived_reported_at) {
-      // Already disputed — don't offer Confirm Receipt at all here, since
-      // confirming after already claiming non-receipt is contradictory
-      // and could wrongly finalize an order that's under dispute. //
+      // Disputed — Confirm Receipt is hidden by default (confirming right
+      // after claiming non-receipt would be self-contradictory), but the
+      // customer needs a way forward if the rider does show up afterward.
+      // Only the person who filed the report can retract it. //
       html += '<div style="background:#FEE2E2;border-radius:10px;padding:14px;margin-top:16px;">' +
-        '<p style="margin:0;font-size:13px;color:#DC2626;"><i class="fas fa-flag"></i> You reported this order as not received. The seller and rider have been notified — this will be resolved before the order can be finalized.</p>' +
+        '<p style="margin:0 0 10px;font-size:13px;color:#DC2626;"><i class="fas fa-flag"></i> You reported this order as not received. The seller and rider have been notified.</p>' +
+        '<button class="co-btn co-btn--next" style="width:100%;" onclick="retractNotArrivedAndConfirm(\'' + order.id + '\')">Actually, I Received It \u2014 Confirm Receipt</button>' +
         '</div>';
     } else {
       var elapsedSinceDelivered = Date.now() - new Date(order.updated_at).getTime();
@@ -3232,12 +3261,38 @@ async function renderAdminOrders() {
           '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + statusInfo.label + ' \u2022 ' + (o.payment_method === 'cod' ? 'COD' : 'GCash') + ' \u2022 ' + formatDate(o.created_at) + '</p>' +
           '<p style="margin:2px 0 0;font-size:12px;color:#777;"><i class="fas fa-user"></i> ' + (nameById[o.user_id] || 'Customer') +
           (o.rider_user_id ? ' \u2022 <i class="fas fa-motorcycle"></i> ' + (nameById[o.rider_user_id] || o.rider_name || 'Rider') : '') + '</p>' +
-          (o.not_arrived_reported_at ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reported non-delivery</p>' : '') +
+          (o.not_arrived_reported_at
+            ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reported non-delivery</p>' +
+              '<button class="co-btn" style="background:#F0FFF4;color:#15803D;font-size:12px;padding:6px 12px;margin-top:8px;" onclick="adminResolveDispute(\'' + o.id + '\', \'' + o.order_code + '\')">Mark Resolved \u2014 Delivered</button>'
+            : '') +
           '</div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">' + (adminOrderFilter === 'disputed' ? 'No disputed orders.' : 'No orders yet.') + '</p>';
 
   body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Orders (last 150)</h3>' + filterBar + rows;
+}
+
+// Admin resolution — for disputes the customer doesn't or can't retract
+// themselves (e.g. the rider confirms delivery happened, investigation
+// resolves it another way). Requires the "Admin can update all orders"
+// policy, since admin has never had order-write access before this. //
+async function adminResolveDispute(orderId, orderCode) {
+  if (!confirm('Mark Order #' + orderCode + ' as resolved and delivered? This clears the dispute and finalizes the order.')) return;
+
+  const { error } = await supabase.from('orders').update({
+    status: 'delivered', not_arrived_reported_at: null, updated_at: new Date().toISOString()
+  }).eq('id', orderId);
+
+  if (error) { showToast('Could not resolve: ' + error.message, 'error'); return; }
+
+  await supabase.from('order_status_history').insert({
+    order_id: orderId, status: 'delivered',
+    label: 'Delivery Confirmed \u2014 Resolved by Admin',
+    description: 'An admin reviewed this dispute and confirmed the order as delivered.'
+  });
+
+  showToast('Order marked resolved \u2705');
+  renderAdminOrders();
 }
 
 async function logout() {
