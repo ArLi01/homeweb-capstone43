@@ -2391,6 +2391,14 @@ function renderTrackingDetail(order) {
   var container = document.getElementById('sn-tracking-detail');
   if (!container) return;
 
+  // This view is reachable by anyone with a legitimate reason to see the
+  // order (customer, merchant, rider — RLS correctly allows all three to
+  // fetch it), but actions like reviewing a product, rating the rider, or
+  // messaging/reporting the rider only make sense from the customer's
+  // side. A rider viewing their own delivery shouldn't be able to rate
+  // themselves or message themselves. Compute this once, use everywhere. //
+  var isCustomerViewer = order.user_id === currentUser.id;
+
   var statusInfo = getOrderStatusInfo(order.status);
   var dateStr = formatDate(order.created_at);
 
@@ -2417,9 +2425,9 @@ function renderTrackingDetail(order) {
       '</div>';
   }).join('');
 
-  // Review section (only for delivered orders)
+  // Review section (only for delivered orders, and only the customer can review) //
   var reviewsHtml = '';
-  if (order.status === 'delivered') {
+  if (order.status === 'delivered' && isCustomerViewer) {
     var myReviews = order._myReviews || {};
     reviewsHtml = (order.order_items || []).map(function(item) {
       var existing = myReviews[item.product_id];
@@ -2447,7 +2455,7 @@ function renderTrackingDetail(order) {
   }
 
   var riderRatingHtml = '';
-  if (order.status === 'delivered' && order.rider_user_id) {
+  if (order.status === 'delivered' && order.rider_user_id && isCustomerViewer) {
     var riderKey = 'rider-' + order.id;
     var existingRiderRating = order._myRiderRating;
     if (existingRiderRating) {
@@ -2486,7 +2494,7 @@ function renderTrackingDetail(order) {
     '<div class="track-detail-section">' +
     '<h4>Order Items</h4>' +
     '<div class="track-detail-items">' + itemsHtml + '</div>' +
-    ((order.order_items && order.order_items.length)
+    ((order.order_items && order.order_items.length && isCustomerViewer)
       ? '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;padding:8px;" onclick="messageSellerForOrder(\'' + order.id + '\', \'' + order.order_items[0].product_id + '\')"><i class="fas fa-comment-dots"></i> Message Seller</button>'
       : '') +
     '</div>' +
@@ -2515,13 +2523,13 @@ function renderTrackingDetail(order) {
       '<p style="margin:2px 0;color:#777;font-size:13px;">' + order.rider_vehicle + ' \u2022 ' + order.rider_plate + ' \u2022 ' + (order.rider_rating ? '<i class="fas fa-star" style="color:#F59E0B;"></i> ' + order.rider_rating : 'New rider') + '</p>' +
       '<p style="margin:0;color:#777;font-size:13px;">' + order.rider_phone + '</p>' +
       '</div></div>' +
-      (order.rider_license_path
+      (order.rider_license_path && isCustomerViewer
         ? '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;padding:8px;" onclick="viewRiderLicenseForOrder(\'' + order.id + '\')"><i class="fas fa-id-card"></i> View Rider\'s ID for Safety Verification</button>'
         : '') +
-      (order.rider_user_id
+      (order.rider_user_id && isCustomerViewer
         ? '<button class="co-btn co-btn--next" style="width:100%;margin-top:10px;padding:8px;" onclick="openChatThread(\'' + order.id + '\', \'' + order.rider_user_id + '\', \'' + order.rider_name.replace(/'/g, "\\'") + '\')"><i class="fas fa-comment-dots"></i> Message Rider</button>'
         : '') +
-      (order.rider_user_id
+      (order.rider_user_id && isCustomerViewer
         ? '<a href="#" onclick="openReportModal(\'rider\', \'' + order.rider_user_id + '\', \'' + order.rider_name.replace(/'/g, "\\'") + '\', \'' + order.id + '\'); return false;" style="display:block;margin-top:10px;text-align:center;color:#999;font-size:11.5px;text-decoration:underline;"><i class="fas fa-flag"></i> Report this rider</a>'
         : '') +
       '</div>'
