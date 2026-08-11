@@ -1042,3 +1042,82 @@
 }
 .chat-list-row:hover .chat-row-delete { opacity: 1; }
 .chat-row-delete:hover { color: #DC2626; }
+
+/* ── DASHBOARD MODALS (merchant, rider, admin) — fullscreen, not a
+   floating card. These are dense, multi-tab, table-heavy views that
+   need real screen space to work well, unlike the lighter popup modals. ── */
+.sn-dashboard-modal {
+  display: none;
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+  background: #fff;
+  border-radius: 0;
+  z-index: 300;
+  overflow-y: auto;
+}
+@keyframes dashboardModalIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.sn-dashboard-modal.active {
+  display: block;
+  animation: dashboardModalIn 0.15s ease forwards;
+}
+.sn-dashboard-modal .pm-close {
+  position: fixed;
+  top: 16px; right: 16px;
+  z-index: 301;
+}
+
+.dashboard-body-inner {
+  padding: 56px 32px 32px;
+  max-width: 1440px;
+  margin: 0 auto;
+}
+.dashboard-body-inner--wide { max-width: 1600px; }
+
+/* On genuinely large screens, scale the content itself up rather than
+   just leaving more empty margin around a fixed-size column — this is
+   what "fullscreen" should actually feel like, not a bigger frame
+   around the same small box. */
+@media (min-width: 900px) {
+  .dashboard-body-inner {
+    padding: 64px 56px 40px;
+    /* Most dashboard text is hardcoded inline pixel font-sizes (built
+       directly in JS-generated HTML), which don't inherit a parent's
+       font-size at all — a font-size change here would only affect the
+       handful of elements without their own inline size. `zoom` scales
+       the whole rendered box — text, padding, buttons, everything —
+       proportionally, which is what actually makes it look and feel
+       bigger on a large screen instead of just technically wider. */
+    zoom: 1.15;
+  }
+}
+
+@media (max-width: 640px) {
+  .dashboard-body-inner {
+    padding: 52px 14px 28px;
+  }
+  /* Dashboard content is built from a lot of inline flex rows (KPI cards,
+     tab bars, filter bars, action buttons) — force comfortable touch
+     targets and let everything wrap instead of staying cramped on one
+     line, same spirit as the earlier admin/merchant overflow fix. */
+  .dashboard-body-inner .co-btn,
+  .dashboard-body-inner select,
+  .dashboard-body-inner input[type="text"] {
+    font-size: 13px !important;
+    min-height: 38px;
+  }
+  .dashboard-body-inner h2 { font-size: 19px; }
+  .dashboard-body-inner h3 { font-size: 15px; }
+}
+
+@media (max-width: 420px) {
+  .dashboard-body-inner {
+    padding: 50px 10px 24px;
+  }
+}
