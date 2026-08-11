@@ -2560,6 +2560,16 @@ function renderTrackingDetail(order) {
     timelineHtml +
     '</div>' +
 
+    (order.proof_of_delivery_url
+      ? '<div class="track-detail-section">' +
+        '<h4>Proof of Delivery</h4>' +
+        '<a href="' + order.proof_of_delivery_url + '" target="_blank">' +
+        '<img src="' + order.proof_of_delivery_url + '" style="width:100%;max-width:280px;border-radius:10px;border:1px solid #eee;"/>' +
+        '</a>' +
+        '<p style="margin:6px 0 0;font-size:11.5px;color:#999;">Photo taken by your rider when the order was marked delivered.</p>' +
+        '</div>'
+      : '') +
+
     // Items
     '<div class="track-detail-section">' +
     '<h4>Order Items</h4>' +
@@ -3477,6 +3487,9 @@ async function renderAdminOrders() {
           (o.rider_user_id ? ' \u2022 <i class="fas fa-motorcycle"></i> ' + (nameById[o.rider_user_id] || o.rider_name || 'Rider') : '') + '</p>' +
           (o.not_arrived_reported_at
             ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reported non-delivery</p>' +
+              (o.proof_of_delivery_url
+                ? '<a href="' + o.proof_of_delivery_url + '" target="_blank" class="co-btn" style="display:inline-block;background:#F3F4F6;color:#333;font-size:12px;padding:6px 12px;margin-top:8px;text-decoration:none;"><i class="fas fa-camera"></i> View Delivery Photo</a>'
+                : '<p style="margin:6px 0 0;font-size:11px;color:#999;">No delivery photo on file for this order.</p>') +
               '<button class="co-btn" style="background:#F0FFF4;color:#15803D;font-size:12px;padding:6px 12px;margin-top:8px;" onclick="adminResolveDispute(\'' + o.id + '\', \'' + o.order_code + '\')">Mark Resolved \u2014 Delivered</button>'
             : '') +
           '</div>';
@@ -6310,7 +6323,8 @@ function renderRiderDashboard() {
     if (o.status === 'preparing') {
       actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'out_for_delivery\')">Mark Picked Up</button>';
     } else if (o.status === 'out_for_delivery') {
-      actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'awaiting_confirmation\')">Mark Delivered</button>';
+      actionBtn = '<input type="file" id="pod-input-' + o.id + '" accept="image/*" capture="environment" style="display:none;" onchange="submitProofOfDelivery(\'' + o.id + '\', this.files[0])"/>' +
+        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="document.getElementById(\'pod-input-' + o.id + '\').click()"><i class="fas fa-camera"></i> Take Proof of Delivery Photo</button>';
     } else if (o.status === 'awaiting_confirmation') {
       actionBtn = '<p style="margin:8px 0 0;color:#F59E0B;font-size:12px;"><i class="fas fa-clock"></i> Waiting for customer to confirm receipt</p>';
     }
@@ -6382,6 +6396,29 @@ async function riderAdvanceOrder(orderId, newStatus) {
   showToast(newStatus === 'delivered' ? 'Order marked delivered \u2705' : 'Order marked picked up \uD83D\uDEF5');
   await loadMyAssignedOrders();
   renderRiderDashboard();
+}
+
+// Requires a photo before an order can move to "awaiting confirmation" —
+// protects the rider from false non-delivery claims, and gives the
+// customer/merchant/admin real evidence if a dispute happens later. //
+async function submitProofOfDelivery(orderId, file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { showToast('Please choose a photo', 'error'); return; }
+  if (file.size > 8 * 1024 * 1024) { showToast('Photo must be under 8MB', 'error'); return; }
+
+  showToast('Uploading proof of delivery...', 'info');
+  var ext = file.name.split('.').pop();
+  var path = 'delivery-proof/' + orderId + '/' + Date.now() + '.' + ext;
+
+  const { error: uploadErr } = await supabase.storage.from('uploads').upload(path, file, { upsert: true });
+  if (uploadErr) { showToast('Could not upload photo: ' + uploadErr.message, 'error'); return; }
+
+  const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(path);
+
+  const { error: updateErr } = await supabase.from('orders').update({ proof_of_delivery_url: urlData.publicUrl }).eq('id', orderId);
+  if (updateErr) { showToast('Could not save photo: ' + updateErr.message, 'error'); return; }
+
+  await riderAdvanceOrder(orderId, 'awaiting_confirmation');
 }
 
 
