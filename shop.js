@@ -5982,7 +5982,26 @@ async function checkForRiderOrderAlert() {
     console.log('[rider-alert] skipped: not logged in as a rider on this device', { hasUser: !!currentUser, roles: userRoles });
     return;
   }
-  if (riderAlertCurrentOrderId) return; // already showing one, don't stack alerts
+
+  if (riderAlertCurrentOrderId) {
+    // An alert is already showing — use this poll to verify it's still
+    // valid rather than just sitting idle. If another rider claimed it,
+    // or the customer cancelled it, close the popup automatically so
+    // riders aren't left staring at a dead order. //
+    const { data: stillValid } = await supabase
+      .from('orders')
+      .select('status, rider_user_id')
+      .eq('id', riderAlertCurrentOrderId)
+      .single();
+
+    if (!stillValid || stillValid.status !== 'placed' || stillValid.rider_user_id) {
+      var reason = (stillValid && stillValid.status === 'cancelled')
+        ? 'This order was cancelled by the customer.'
+        : 'Another rider already accepted this order.';
+      closeRiderAlertPopup(reason);
+    }
+    return;
+  }
 
   const { data: riderRow, error: riderErr } = await supabase.from('riders').select('is_available').eq('user_id', currentUser.id).single();
   if (riderErr) console.error('[rider-alert] could not load rider row:', riderErr);
@@ -6074,6 +6093,18 @@ function dismissRiderAlert(orderIdsStr) {
   riderAlertCurrentOrderId = null;
   document.getElementById('sn-riderAlertOverlay').classList.remove('active');
   document.getElementById('sn-riderAlertModal').classList.remove('active');
+}
+
+// Auto-closes the alert popup when the order it's showing stops being
+// valid (cancelled by the customer, or claimed by another rider) while
+// this rider was still looking at it, rather than leaving them staring
+// at a dead order until they try to accept it themselves. //
+function closeRiderAlertPopup(reasonMessage) {
+  if (riderAlertCurrentOrderId) riderAlertShownOrderIds[riderAlertCurrentOrderId] = true;
+  riderAlertCurrentOrderId = null;
+  document.getElementById('sn-riderAlertOverlay').classList.remove('active');
+  document.getElementById('sn-riderAlertModal').classList.remove('active');
+  if (reasonMessage) showToast(reasonMessage, 'info');
 }
 
 async function acceptOrderFromAlert(orderIdsStr) {
@@ -6266,7 +6297,19 @@ async function acceptOrder(orderId) {
       return false;
     }
     if (!data || !data.length) {
-      showToast('Too late — another rider already claimed this order', 'info');
+      // The update matched zero rows — could mean someone else claimed it,
+      // OR the customer cancelled it. Check which actually happened
+      // instead of showing the same generic "too late" message either way. //
+      const { data: currentState } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderId).single();
+
+      if (currentState && currentState.status === 'cancelled') {
+        showToast('This order has been cancelled by the customer', 'info');
+      } else if (currentState && currentState.rider_user_id) {
+        showToast('Too late — another rider already claimed this order', 'info');
+      } else {
+        showToast('This order is no longer available', 'info');
+      }
+
       await loadAvailableOrders();
       if (document.getElementById('sn-riderDashModal').classList.contains('active')) renderRiderDashboard();
       return false;
