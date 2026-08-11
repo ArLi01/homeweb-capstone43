@@ -2396,6 +2396,29 @@ function renderOrderList() {
   container.innerHTML = html;
 }
 
+// Lets a customer cancel their own order while still waiting for a rider
+// to accept — reachable from Track Orders even if they navigated away
+// from the "finding a rider" screen and come back later. //
+async function cancelOrderByCustomer(orderId, orderCode) {
+  if (!confirm('Cancel Order #' + orderCode + '? This can\'t be undone.')) return;
+
+  const { data, error } = await supabase.rpc('cancel_order_by_customer', { order_id_param: orderId });
+
+  if (error) {
+    showToast('Could not cancel order: ' + error.message, 'error');
+    return;
+  }
+  if (!data) {
+    showToast('This order can no longer be cancelled — a rider may have already accepted it.', 'info');
+    openTrackingDetail(orderId);
+    return;
+  }
+
+  showToast('Order cancelled \u2705');
+  updateNotifBadge();
+  openTrackingDetail(orderId);
+}
+
 async function openTrackingDetail(orderId) {
   const { data: order, error } = await supabase
     .from('orders')
@@ -2553,6 +2576,10 @@ function renderTrackingDetail(order) {
 
     '<h3>' + statusInfo.label + ' — Order #' + order.order_code + '</h3>' +
     (order._storeName ? '<p style="margin:2px 0 12px;font-size:12.5px;color:#777;"><i class="fas fa-store"></i> ' + order._storeName + '</p>' : '') +
+
+    (order.status === 'placed' && !order.rider_user_id
+      ? '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-bottom:14px;" onclick="cancelOrderByCustomer(\'' + order.id + '\', \'' + order.order_code + '\')"><i class="fas fa-ban"></i> Cancel Order</button>'
+      : '') +
 
     // Timeline
     '<div class="track-detail-section">' +
@@ -4418,8 +4445,12 @@ async function openNotificationsModal(e) {
 function clearAllNotifications() {
   localStorage.setItem(notifClearedKey(), new Date().toISOString());
   localStorage.setItem(notifSeenKey(), new Date().toISOString());
-  currentNotifList = [];
-  renderNotifications([]);
+  // Deliberately NOT touching currentNotifList here — the Logs view reads
+  // from this same cached list, and clearing the main view should never
+  // affect what Logs can show. The main view's own render logic already
+  // filters against the cleared timestamp; the underlying data (and this
+  // cache) stays untouched. //
+  renderNotifications(currentNotifList);
   updateNotifBadge();
   showToast('Notifications cleared', 'info');
 }
@@ -4854,7 +4885,7 @@ async function fetchMerchantSales(dateFilter) {
     totalItems += r.qty;
 
     var pname = r.products ? r.products.name : 'Unknown product';
-    if (!byProduct[pname]) byProduct[pname] = { name: pname, qty: 0, revenue: 0, profit: 0, itemsWithCost: 0, itemsWithoutCost: 0 };
+    if (!byProduct[pname]) byProduct[pname] = { name: pname, qty: 0, revenue: 0, profit: 0, cost: 0, itemsWithCost: 0, itemsWithoutCost: 0 };
     byProduct[pname].qty += r.qty;
     byProduct[pname].revenue += lineTotal;
 
@@ -4870,6 +4901,7 @@ async function fetchMerchantSales(dateFilter) {
       knownProfit += lineProfit;
       itemsWithCost += r.qty;
       byProduct[pname].profit += lineProfit;
+      byProduct[pname].cost += costPrice * r.qty;
       byProduct[pname].itemsWithCost += r.qty;
     } else {
       itemsWithoutCost += r.qty;
@@ -5327,12 +5359,13 @@ function renderMerchantSalesView() {
   var productProfitHtml = productsWithCost.length
     ? '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12.5px;">' +
       '<thead><tr style="border-bottom:2px solid #eee;text-align:left;color:#999;font-size:11px;text-transform:uppercase;">' +
-      '<th style="padding:6px 4px;">Product</th><th style="padding:6px 4px;text-align:right;">Units Sold</th><th style="padding:6px 4px;text-align:right;">Revenue</th><th style="padding:6px 4px;text-align:right;">Profit</th></tr></thead><tbody>' +
+      '<th style="padding:6px 4px;">Product</th><th style="padding:6px 4px;text-align:right;">Units Sold</th><th style="padding:6px 4px;text-align:right;">Revenue</th><th style="padding:6px 4px;text-align:right;">Supplier Cost</th><th style="padding:6px 4px;text-align:right;">Profit</th></tr></thead><tbody>' +
       productsWithCost.map(function(p) {
         return '<tr style="border-bottom:1px solid #f5f5f5;">' +
           '<td style="padding:8px 4px;">' + p.name + (p.itemsWithoutCost > 0 ? ' <span style="color:#999;font-size:10.5px;">(partial data)</span>' : '') + '</td>' +
           '<td style="padding:8px 4px;text-align:right;">' + p.qty + '</td>' +
           '<td style="padding:8px 4px;text-align:right;">' + fmt(p.revenue) + '</td>' +
+          '<td style="padding:8px 4px;text-align:right;color:#B45309;">' + fmt(p.cost) + '</td>' +
           '<td style="padding:8px 4px;text-align:right;font-weight:700;color:' + (p.profit >= 0 ? '#15803D' : '#DC2626') + ';">' + fmt(p.profit) + '</td>' +
           '</tr>';
       }).join('') + '</tbody></table></div>'
@@ -5945,15 +5978,22 @@ function stopRiderAlertPolling() {
 }
 
 async function checkForRiderOrderAlert() {
-  if (!currentUser || userRoles.indexOf('rider') === -1) return;
+  if (!currentUser || userRoles.indexOf('rider') === -1) {
+    console.log('[rider-alert] skipped: not logged in as a rider on this device', { hasUser: !!currentUser, roles: userRoles });
+    return;
+  }
   if (riderAlertCurrentOrderId) return; // already showing one, don't stack alerts
 
-  const { data: riderRow } = await supabase.from('riders').select('is_available').eq('user_id', currentUser.id).single();
-  if (!riderRow || !riderRow.is_available) return;
+  const { data: riderRow, error: riderErr } = await supabase.from('riders').select('is_available').eq('user_id', currentUser.id).single();
+  if (riderErr) console.error('[rider-alert] could not load rider row:', riderErr);
+  if (!riderRow || !riderRow.is_available) {
+    console.log('[rider-alert] skipped: this account is offline (is_available=false in the riders table). Toggle online in My Deliveries.', { riderRow: riderRow });
+    return;
+  }
 
   var cutoff = new Date(Date.now() - RIDER_ALERT_MAX_AGE_MS).toISOString();
 
-  const { data: candidates } = await supabase
+  const { data: candidates, error: candErr } = await supabase
     .from('orders')
     .select('*, order_items(*)')
     .eq('status', 'placed')
@@ -5962,9 +6002,18 @@ async function checkForRiderOrderAlert() {
     .order('created_at', { ascending: true })
     .limit(10);
 
-  if (!candidates || !candidates.length) return;
+  if (candErr) console.error('[rider-alert] could not query candidate orders:', candErr);
+  if (!candidates || !candidates.length) {
+    console.log('[rider-alert] online and checked, but no unclaimed orders found right now.');
+    return;
+  }
   var order = candidates.find(function(o) { return !riderAlertShownOrderIds[o.id]; });
-  if (!order) return;
+  if (!order) {
+    console.log('[rider-alert] all current candidates were already shown to this session.', { candidateCount: candidates.length });
+    return;
+  }
+
+  console.log('[rider-alert] showing alert for order', order.order_code);
 
   // Bundle in any other unclaimed orders in the same barangay so the
   // rider can accept a whole route at once — this naturally covers same-
@@ -6281,6 +6330,13 @@ async function viewMyLicense() {
   window.open(data.signedUrl, '_blank');
 }
 
+let riderHistoryDateFilter = 'all';
+
+function changeRiderHistoryDateFilter(value) {
+  riderHistoryDateFilter = value;
+  renderRiderDashboard();
+}
+
 async function toggleMyAvailability(newState) {
   const { error } = await supabase.from('riders').update({ is_available: newState }).eq('user_id', currentUser.id);
   if (error) { showToast('Could not update availability: ' + error.message, 'error'); return; }
@@ -6314,7 +6370,8 @@ function renderRiderDashboard() {
     (available ? 'Go Offline' : 'Go Online') + '</button></div>';
 
   var activeOrders = myAssignedOrders.filter(function(o) { return o.status === 'preparing' || o.status === 'out_for_delivery'; });
-  var pastOrders = myAssignedOrders.filter(function(o) { return o.status === 'awaiting_confirmation' || o.status === 'delivered'; });
+  var pastOrdersAll = myAssignedOrders.filter(function(o) { return o.status === 'awaiting_confirmation' || o.status === 'delivered'; });
+  var pastOrders = pastOrdersAll.filter(function(o) { return orderMatchesDateFilter(o, riderHistoryDateFilter); });
 
   function orderCardHtml(o) {
     var itemsSummary = (o.order_items || []).map(function(it) { return it.product_name + ' x' + it.qty; }).join(', ');
@@ -6331,6 +6388,7 @@ function renderRiderDashboard() {
 
     return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">Order #' + o.order_code + ' \u2014 ' + statusInfo.label + '</p>' +
+      '<p style="margin:2px 0 0;color:#999;font-size:11.5px;"><i class="fas fa-clock"></i> ' + formatDate(o.created_at) + ' \u2022 ' + new Date(o.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + '</p>' +
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
       (o.not_arrived_reported_at ? '<p style="margin:8px 0 0;background:#FEE2E2;color:#DC2626;padding:8px;border-radius:6px;font-size:12px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reports this was NOT received. Please follow up.</p>' : '') +
@@ -6387,8 +6445,13 @@ function renderRiderDashboard() {
     (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="loadAvailableOrders().then(renderRiderDashboard)"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Active Deliveries</h3>' +
     (activeOrders.length ? activeOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No active deliveries right now.</p>') +
-    '<h3 style="margin:16px 0 8px;font-size:14px;">Completed</h3>' +
-    (pastOrders.length ? pastOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No completed deliveries yet.</p>');
+    '<h3 style="margin:16px 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+    '<span>Completed</span>' +
+    '<select onchange="changeRiderHistoryDateFilter(this.value)" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;">' +
+    [['all', 'All Time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Within a Week'], ['month', 'Within a Month'], ['year', 'Within a Year']]
+      .map(function(d) { return '<option value="' + d[0] + '"' + (riderHistoryDateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('') +
+    '</select></h3>' +
+    (pastOrders.length ? pastOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No completed deliveries' + (riderHistoryDateFilter !== 'all' ? ' in this period' : ' yet') + '.</p>');
 }
 
 async function riderAdvanceOrder(orderId, newStatus) {
@@ -6474,5 +6537,15 @@ document.addEventListener('DOMContentLoaded', async function() {
     renderHomeProducts();
     renderCategoryPage();
     if (currentUser) updateChatBadge();
+
+    // The DB function existed but was never actually called anywhere —
+    // this is what makes the 30-minute auto-cancel genuinely run. Safe
+    // to call from any logged-in client; the function's own logic only
+    // ever acts on orders that truly meet the stale condition. //
+    if (currentUser) {
+      supabase.rpc('check_and_cancel_stale_orders').then(function(res) {
+        if (res.error) console.error('check_and_cancel_stale_orders error:', res.error);
+      });
+    }
   }, 30000);
 });
