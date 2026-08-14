@@ -2874,7 +2874,7 @@ function renderOrderList() {
   var counts = { to_ship: 0, to_receive: 0, completed: 0 };
   orders.forEach(function(o) { counts[orderTrackingCategory(o.status)]++; });
 
-  var tabDefs = [['to_ship', 'To Ship'], ['to_receive', 'To Receive'], ['completed', 'Completed']];
+  var tabDefs = [['to_ship', 'To Prepare'], ['to_receive', 'To Receive'], ['completed', 'Completed']];
   var tabsHtml = '<div style="display:flex;gap:6px;margin-bottom:14px;">' +
     tabDefs.map(function(t) {
       var active = trackingActiveTab === t[0];
