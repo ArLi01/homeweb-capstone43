@@ -40,7 +40,7 @@ function openDaysLabel(merchant) {
 async function loadProducts() {
   const { data, error } = await supabase
     .from('products')
-    .select('*, merchants(id, store_name, merchant_type, open_days, is_verified, is_suspended)')
+    .select('*, merchants(id, store_name, merchant_type, open_days, is_verified, is_suspended, store_logo_url)')
     .eq('is_active', true)
     .order('created_at', { ascending: false });
 
@@ -77,6 +77,7 @@ async function loadProducts() {
       stock_qty: p.stock_qty,
       merchant_id: p.merchant_id,
       merchantVerified: !!(p.merchants && p.merchants.is_verified),
+      storeLogoUrl: (p.merchants && p.merchants.store_logo_url) || null,
       unit: p.unit || 'pc'
     };
   });
@@ -295,6 +296,98 @@ function renderHomeProducts() {
     ? list.map(renderProductCardHtml).join('')
     : '<p style="color:#999;padding:2rem;">No products available yet.</p>';
   attachCardClicks();
+}
+
+let recommendMode = 'products'; // 'products' | 'merchants'
+
+function switchRecommendMode(mode) {
+  recommendMode = mode;
+  var toggle = document.getElementById('rec-toggle');
+  if (toggle) {
+    toggle.querySelectorAll('.rec-toggle-btn').forEach(function(b) {
+      b.classList.toggle('active', b.getAttribute('data-rec') === mode);
+    });
+  }
+  var pGrid = document.getElementById('home-product-grid');
+  var mGrid = document.getElementById('home-merchant-grid');
+  if (mode === 'merchants') {
+    if (pGrid) pGrid.style.display = 'none';
+    if (mGrid) mGrid.style.display = '';
+    renderHomeMerchants();
+  } else {
+    if (mGrid) mGrid.style.display = 'none';
+    if (pGrid) pGrid.style.display = '';
+    renderHomeProducts();
+  }
+}
+
+// Store-level recommendations — the "by merchants" side of the toggle.
+// Each store is scored on the SAME two signals as products, but
+// aggregated: the store's total recent sales (summed across its
+// products) and its overall rating (weighted by review volume). Same
+// 60/40 recent-sales/rating split, same review-count dampening. //
+function renderHomeMerchants() {
+  var mGrid = document.getElementById('home-merchant-grid');
+  if (!mGrid) return;
+
+  // Aggregate products up to their merchant. //
+  var byMerchant = {};
+  products.forEach(function(p) {
+    if (!p.merchant_id) return;
+    if (!byMerchant[p.merchant_id]) {
+      byMerchant[p.merchant_id] = {
+        merchantId: p.merchant_id, storeName: p.location, verified: p.merchantVerified,
+        storeLogoUrl: p.storeLogoUrl,
+        recentSold: 0, ratingSum: 0, ratingCountSum: 0, productCount: 0, icon: p.icon
+      };
+    }
+    var m = byMerchant[p.merchant_id];
+    m.recentSold += (recentSalesByProduct[p.id] || 0);
+    m.ratingSum += (p.ratingAvg * p.ratingCount);
+    m.ratingCountSum += p.ratingCount;
+    m.productCount += 1;
+  });
+
+  var merchants = Object.values(byMerchant);
+  var maxRecent = merchants.reduce(function(mx, m) { return Math.max(mx, m.recentSold); }, 0);
+
+  merchants.forEach(function(m) {
+    var recentNorm = maxRecent > 0 ? (m.recentSold / maxRecent) : 0;
+    var avgRating = m.ratingCountSum > 0 ? (m.ratingSum / m.ratingCountSum) : 0;
+    var confidence = m.ratingCountSum > 0 ? Math.min(1, m.ratingCountSum / 10) : 0;
+    var ratingNorm = (avgRating / 5) * confidence;
+    m.score = recentNorm * 0.6 + ratingNorm * 0.4;
+    m.avgRating = avgRating;
+  });
+
+  merchants.sort(function(a, b) { return b.score - a.score; });
+  var list = merchants.slice(0, 8);
+
+  mGrid.innerHTML = list.length
+    ? list.map(renderMerchantCardHtml).join('')
+    : '<p style="color:#999;padding:2rem;">No stores available yet.</p>';
+
+  mGrid.querySelectorAll('[data-merchant-id]').forEach(function(card) {
+    card.addEventListener('click', function() {
+      openMerchantStorefront(card.getAttribute('data-merchant-id'));
+    });
+  });
+}
+
+function renderMerchantCardHtml(m) {
+  var ratingLine = m.ratingCountSum > 0
+    ? stars(m.avgRating) + Number(m.avgRating).toFixed(1) + ' <span style="color:#999;">(' + m.ratingCountSum + ')</span>'
+    : '<span style="color:#999;">No ratings yet</span>';
+  var imageHtml = m.storeLogoUrl
+    ? '<div class="product-image" style="background:#FAFAF8;overflow:hidden;"><img src="' + m.storeLogoUrl + '" style="width:100%;height:100%;object-fit:cover;"/></div>'
+    : '<div class="product-image" style="display:flex;align-items:center;justify-content:center;background:#FAFAF8;"><i class="fas fa-store" style="font-size:42px;color:#ccc;"></i></div>';
+  return '<div class="product-card" data-merchant-id="' + m.merchantId + '" style="cursor:pointer;">' +
+    imageHtml +
+    '<div class="product-info">' +
+    '<h3 class="product-name">' + m.storeName + (m.verified ? ' <i class="fas fa-circle-check" style="color:var(--primary);font-size:12px;"></i>' : '') + '</h3>' +
+    '<p style="margin:4px 0;color:#F59E0B;font-size:13px;">' + ratingLine + '</p>' +
+    '<p style="margin:2px 0 0;color:#999;font-size:12px;">' + m.productCount + ' product' + (m.productCount === 1 ? '' : 's') + '</p>' +
+    '</div></div>';
 }
 
 // Render the category page grid, filtered by ?cat= param //
@@ -520,6 +613,17 @@ function initSearch() {
   // Live filter //
   input.addEventListener('input', function() {
     filterProducts(this.value);
+    renderSearchSuggestions(this.value, input);
+  });
+
+  input.addEventListener('focus', function() {
+    if (this.value.trim()) renderSearchSuggestions(this.value, input);
+  });
+
+  // Hide suggestions when clicking away. //
+  document.addEventListener('click', function(ev) {
+    var box = document.getElementById('search-suggest-box');
+    if (box && !box.contains(ev.target) && ev.target !== input) box.style.display = 'none';
   });
 
   // Enter key: filter, then jump straight to the results //
@@ -548,6 +652,63 @@ function initSearch() {
       scrollToProductGrid();
     });
   }
+}
+
+// Predictive search suggestions drawn from real data already loaded —
+// matching product names and store names. Purely additive: clicking a
+// suggestion just fills the box and runs the same filter that typing
+// would, so it can't break the existing search behavior. //
+function renderSearchSuggestions(query, input) {
+  var box = document.getElementById('search-suggest-box');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'search-suggest-box';
+    box.className = 'search-suggest-box';
+    var wrap = input.closest('.search-input-wrap') || input.parentNode;
+    wrap.style.position = 'relative';
+    wrap.appendChild(box);
+  }
+
+  var q = (query || '').trim().toLowerCase();
+  if (q.length < 2) { box.style.display = 'none'; return; }
+
+  // Collect distinct product names and store names that contain the query. //
+  var productMatches = [];
+  var storeSet = {};
+  products.forEach(function(p) {
+    if (p.name && p.name.toLowerCase().indexOf(q) !== -1 && productMatches.length < 6) {
+      productMatches.push(p.name);
+    }
+    if (p.location && p.location.toLowerCase().indexOf(q) !== -1) storeSet[p.location] = true;
+  });
+  var storeMatches = Object.keys(storeSet).slice(0, 3);
+
+  if (!productMatches.length && !storeMatches.length) { box.style.display = 'none'; return; }
+
+  var html = '';
+  productMatches.forEach(function(name) {
+    html += '<div class="search-suggest-item" onclick="applySearchSuggestion(\'' + name.replace(/'/g, "\\'").replace(/"/g, '&quot;') + '\')">' +
+      '<i class="fas fa-box" style="color:#aaa;width:16px;"></i> ' + name + '</div>';
+  });
+  storeMatches.forEach(function(name) {
+    html += '<div class="search-suggest-item" onclick="applySearchSuggestion(\'' + name.replace(/'/g, "\\'").replace(/"/g, '&quot;') + '\')">' +
+      '<i class="fas fa-store" style="color:#aaa;width:16px;"></i> ' + name + ' <span style="color:#aaa;font-size:11px;">store</span></div>';
+  });
+
+  box.innerHTML = html;
+  box.style.display = 'block';
+}
+
+function applySearchSuggestion(text) {
+  var input = document.getElementById('site-search-input') ||
+    document.querySelector('.search-bar input, .search-input, input[placeholder*="earch"]');
+  if (input) {
+    input.value = text;
+    filterProducts(text);
+  }
+  var box = document.getElementById('search-suggest-box');
+  if (box) box.style.display = 'none';
+  scrollToProductGrid();
 }
 
 // Scrolls to wherever the product grid actually lives — the homepage's
@@ -709,31 +870,35 @@ async function loadAndRenderReviews(productId) {
   }
 
   currentProductReviews = data;
-  renderReviewsList(false);
+  renderReviewsList(5);
 }
 
-function renderReviewsList(showAll) {
+var reviewsVisibleCount = 5;
+
+function renderReviewsList(visibleCount) {
   var container = document.getElementById('pm-reviews');
   if (!container) return;
   var data = currentProductReviews;
 
-  var visible = showAll ? data : data.slice(0, 3);
+  if (typeof visibleCount === 'number') reviewsVisibleCount = visibleCount;
+  var shown = Math.min(reviewsVisibleCount, data.length);
+  var visible = data.slice(0, shown);
   var rowsHtml = visible.map(reviewRowHtml).join('');
 
   var toggleHtml = '';
-  if (!showAll && data.length > 3) {
-    toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(true)">Show all ' + data.length + ' reviews</button>';
-  } else if (showAll && data.length > 3) {
-    toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(false)">Show fewer reviews</button>';
+  if (data.length > shown) {
+    // How many the next click will reveal (up to 5 more). //
+    var remaining = data.length - shown;
+    var nextBatch = Math.min(5, remaining);
+    toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(' + (shown + 5) + ')">Show ' + nextBatch + ' more review' + (nextBatch === 1 ? '' : 's') + '</button>';
+  } else if (data.length > 5) {
+    // Everything is shown and there's more than the initial 5 — offer a
+    // way to collapse back down. //
+    toggleHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="renderReviewsList(5)">Show fewer reviews</button>';
   }
 
-  // Scrollable box for the review rows themselves — keeps the product info
-  // above from getting pushed out of view when there are many/long reviews.
-  // The toggle button sits outside this box so it's always reachable
-  // without needing to scroll to the bottom first.
   container.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews (' + data.length + ')</h3>' +
-    '<div style="max-height:280px;overflow-y:auto;">' + rowsHtml + '</div>' +
-    toggleHtml;
+    rowsHtml + toggleHtml;
 }
 
 // ============================================================
@@ -1148,11 +1313,24 @@ async function openContactProfileModal(userId) {
     return;
   }
 
-  var roleList = (roles || []).map(function(r) { return r.role; }).filter(function(r) { return r !== 'admin'; });
-  var roleTagColors = { customer: '#3B82F6', merchant: '#15803D', rider: '#B45309' };
-  var roleTagsHtml = roleList.map(function(r) {
-    return '<span style="display:inline-block;background:' + (roleTagColors[r] || '#999') + '1A;color:' + (roleTagColors[r] || '#999') + ';font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;text-transform:capitalize;margin:0 4px 4px 0;">' + r + '</span>';
-  }).join('');
+  var allRoles = (roles || []).map(function(r) { return r.role; });
+  var isAdmin = allRoles.indexOf('admin') !== -1;
+
+  // The admin filter below intentionally hides admin identity in normal
+  // peer chats — but the admin account also carries a default 'customer'
+  // role, so without special-casing it, the Support account would
+  // mislabel as "Customer". When the profile IS the admin, show a single
+  // "Support" tag instead. //
+  var roleList = allRoles.filter(function(r) { return r !== 'admin'; });
+  var roleTagColors = { customer: '#3B82F6', merchant: '#15803D', rider: '#B45309', support: 'var(--primary,#22C55E)' };
+  var roleTagsHtml;
+  if (isAdmin) {
+    roleTagsHtml = '<span style="display:inline-block;background:#F0FFF4;color:var(--primary,#22C55E);font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin:0 4px 4px 0;">Support</span>';
+  } else {
+    roleTagsHtml = roleList.map(function(r) {
+      return '<span style="display:inline-block;background:' + (roleTagColors[r] || '#999') + '1A;color:' + (roleTagColors[r] || '#999') + ';font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;text-transform:capitalize;margin:0 4px 4px 0;">' + r + '</span>';
+    }).join('');
+  }
 
   var avatarHtml = profile.avatar_url
     ? '<img src="' + profile.avatar_url + '" style="width:72px;height:72px;border-radius:50%;object-fit:cover;"/>'
@@ -1267,26 +1445,51 @@ async function fetchMyContacts() {
   return Object.values(contacts).sort(function(a, b) { return new Date(b.lastAt) - new Date(a.lastAt); });
 }
 
-function openHelpCenterModal(e) {
+async function openHelpCenterModal(e) {
+  if (e) e.preventDefault();
+
+  if (!currentUser) {
+    showToast('Please log in to message support', 'info');
+    if (typeof openLoginModal === 'function') openLoginModal();
+    return;
+  }
+
+  // Resolve the admin account to open a direct support conversation. //
+  const { data: adminRole } = await supabase
+    .from('user_roles')
+    .select('user_id')
+    .eq('role', 'admin')
+    .limit(1)
+    .maybeSingle();
+
+  if (!adminRole || !adminRole.user_id) {
+    showToast('Support is unavailable right now. Please try the contact details.', 'info');
+    return;
+  }
+
+  // Open a normal chat thread with the admin — no order attached, since
+  // this is general support. Until we have an AI assistant, this routes
+  // straight to a human admin. //
+  openChatThread(null, adminRole.user_id, 'HomeWeb Support');
+}
+
+function closeHelpCenterModal() {
+  document.getElementById('sn-helpOverlay').classList.remove('active');
+  document.getElementById('sn-helpModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function openAboutModal(e) {
   if (e) e.preventDefault();
   var body = document.getElementById('sn-help-body');
   body.innerHTML =
-    '<div class="login-icon"><i class="fas fa-headset"></i></div>' +
-    '<h2>Help Center</h2>' +
-    '<p class="login-sub">Reach the HomeWeb admin directly</p>' +
-    '<div style="text-align:left;background:#F9FAFB;border-radius:10px;padding:16px;margin-top:12px;">' +
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">' +
-    '<i class="fab fa-facebook" style="color:#1877F2;font-size:20px;width:22px;text-align:center;"></i>' +
-    '<div><p style="margin:0;font-size:11px;color:#999;">Facebook</p><p style="margin:0;font-weight:600;font-size:13.5px;">Alexis Dinsay</p></div>' +
-    '</div>' +
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">' +
-    '<i class="fas fa-envelope" style="color:var(--primary,#22C55E);font-size:18px;width:22px;text-align:center;"></i>' +
-    '<div><p style="margin:0;font-size:11px;color:#999;">Email</p><p style="margin:0;font-weight:600;font-size:13.5px;">alexisdinsay18@gmail.com</p></div>' +
-    '</div>' +
-    '<div style="display:flex;align-items:center;gap:10px;">' +
-    '<i class="fas fa-phone" style="color:#F59E0B;font-size:16px;width:22px;text-align:center;"></i>' +
-    '<div><p style="margin:0;font-size:11px;color:#999;">Contact Number</p><p style="margin:0;font-weight:600;font-size:13.5px;">0969 123 4567</p></div>' +
-    '</div>' +
+    '<div class="login-icon"><i class="fas fa-store"></i></div>' +
+    '<h2>About HomeWeb</h2>' +
+    '<div style="text-align:left;font-size:13.5px;line-height:1.6;color:#444;margin-top:8px;">' +
+    '<p style="margin:0 0 12px;">HomeWeb is a community-focused marketplace built specifically for the Sta. Barbara Market in Iloilo. We bring the local market online so customers can easily discover and buy from neighborhood vendors, while giving those sellers a simple way to reach more people.</p>' +
+    '<p style="margin:0 0 12px;">Everything the market offers lives in one accessible place \u2014 from everyday essentials and fresh goods to the locally made products the community knows and trusts. HomeWeb makes it easy to browse, connect with sellers, and support businesses right within the municipality.</p>' +
+    '<p style="margin:0 0 12px;">More than an online store, HomeWeb exists to strengthen local commerce and help small businesses grow. By giving market vendors a digital presence, we hope to help them adapt to how people shop today \u2014 without losing the sense of community that makes the Sta. Barbara Market what it is.</p>' +
+    '<p style="margin:0;font-weight:600;color:var(--primary,#22C55E);">HomeWeb \u2014 bringing the Sta. Barbara Market closer to home.</p>' +
     '</div>';
 
   document.getElementById('sn-helpOverlay').classList.add('active');
@@ -1294,10 +1497,191 @@ function openHelpCenterModal(e) {
   document.body.style.overflow = 'hidden';
 }
 
-function closeHelpCenterModal() {
-  document.getElementById('sn-helpOverlay').classList.remove('active');
-  document.getElementById('sn-helpModal').classList.remove('active');
-  document.body.style.overflow = '';
+
+// ============================================================
+// SELLER CENTER — informational pages (Guidelines, Help & Support,
+// Terms & Conditions, Privacy Policy). All four reuse the shared
+// help-modal shell, same as the About modal. Content is written to
+// match HomeWeb's actual seller features only: store profile + permit
+// verification, product add/edit, inventory/stock-in, order status
+// updates, rider-based delivery, COD payment, sales reports, and
+// order-linked messaging. Nothing here claims features the system
+// doesn't have (no payouts, no automated refunds, no analytics beyond
+// the sales report, no live chat bot). //
+// ============================================================
+
+function sellerInfoSection(title, icon, innerHtml) {
+  return '<div style="margin-bottom:18px;">' +
+    '<h3 style="display:flex;align-items:center;gap:8px;font-size:14px;margin:0 0 6px;color:#222;">' +
+    '<i class="fas ' + icon + '" style="color:var(--primary,#22C55E);font-size:13px;"></i> ' + title + '</h3>' +
+    '<div style="font-size:13px;line-height:1.6;color:#555;">' + innerHtml + '</div>' +
+    '</div>';
+}
+
+function sellerBullets(items) {
+  return '<ul style="margin:4px 0 0;padding-left:18px;">' +
+    items.map(function(t) { return '<li style="margin:2px 0;">' + t + '</li>'; }).join('') +
+    '</ul>';
+}
+
+function openSellerInfoModal(section) {
+  var body = document.getElementById('sn-help-body');
+  var html = '';
+
+  if (section === 'guidelines') {
+    html =
+      '<div class="login-icon"><i class="fas fa-store"></i></div>' +
+      '<h2>Seller Guidelines</h2>' +
+      '<p class="login-sub">How to sell well on HomeWeb, for the Sta. Barbara Market</p>' +
+      '<div style="text-align:left;margin-top:14px;">' +
+      sellerInfoSection('Getting Started', 'fa-rocket',
+        'HomeWeb lets you bring your Sta. Barbara Market stall online. Sign up as a seller, set up your store profile, add your products, and start receiving orders from customers in the community \u2014 all from your Seller dashboard.') +
+      sellerInfoSection('Store Profile', 'fa-id-card',
+        'Keep your store information accurate and complete: your store name, business type, contact details, and open days. Upload a clear photo of your business permit in the Verification tab so HomeWeb can verify your store \u2014 verified stores earn more trust from customers.') +
+      sellerInfoSection('Product Listings', 'fa-box-open',
+        'Every product you list should have:' + sellerBullets([
+          'An accurate, clear product name',
+          'A helpful description of what you\'re selling',
+          'The correct price and unit (per kilo, per piece, per pack, etc.)',
+          'A clear product photo',
+          'The right category',
+          'An accurate available stock count'
+        ])) +
+      sellerInfoSection('Product Availability', 'fa-boxes-stacked',
+        'Keep your stock updated so customers don\'t order items you\'ve run out of. Use the Inventory tab\'s Stock In feature whenever you restock, and the system automatically lowers your stock as orders come in.') +
+      sellerInfoSection('Order Management', 'fa-clipboard-list',
+        'You\'re responsible for handling your orders properly:' + sellerBullets([
+          'Watch for incoming orders in your Orders tab',
+          'Prepare products once an order is placed',
+          'Keep order details accurate',
+          'Let the delivery rider pick up the prepared order'
+        ]) + '<p style="margin:6px 0 0;">Delivery is handled by HomeWeb riders \u2014 your job is to have the order ready for pickup.</p>') +
+      sellerInfoSection('Product Quality', 'fa-award',
+        'Make sure what you deliver matches the product name, description, and photo you posted. Prepare and pack items properly before the rider picks them up, so customers receive what they expected.') +
+      sellerInfoSection('Customer Service', 'fa-comments',
+        'Customers can message you about their orders through HomeWeb. Reply politely and promptly, and handle concerns fairly \u2014 good communication builds repeat customers and a strong reputation in the market.') +
+      sellerInfoSection('Prohibited or Restricted Listings', 'fa-ban',
+        'Do not list items that are illegal, dangerous, counterfeit, fraudulent, expired, or otherwise unsafe or prohibited. Only sell genuine products you are allowed to sell.') +
+      sellerInfoSection('Seller Conduct', 'fa-handshake',
+        'Price honestly, describe products truthfully, treat customers with respect, and use the platform responsibly. HomeWeb is built on trust within the Sta. Barbara Market community.') +
+      sellerInfoSection('Account Security', 'fa-lock',
+        'Keep your login details private and never share your password. If you think someone else has accessed your account, change your password and contact HomeWeb support right away.') +
+      '</div>';
+  }
+
+  else if (section === 'support') {
+    html =
+      '<div class="login-icon"><i class="fas fa-headset"></i></div>' +
+      '<h2>Help &amp; Support</h2>' +
+      '<p class="login-sub">Getting help with your HomeWeb store</p>' +
+      '<div style="text-align:left;margin-top:14px;">' +
+      sellerInfoSection('Account &amp; Store', 'fa-user-gear',
+        sellerBullets([
+          '<b>Login problems:</b> use the Forgot Password link on the login screen to reset your password.',
+          '<b>Store profile:</b> update your store name, contact details, and open days from your Seller dashboard.',
+          '<b>Verification:</b> upload or replace your business permit in the Verification tab if your store isn\'t verified yet.'
+        ])) +
+      sellerInfoSection('Products', 'fa-box',
+        sellerBullets([
+          '<b>Adding products:</b> use the Products tab in your dashboard to add a new item with its name, price, unit, category, photo, and stock.',
+          '<b>Editing products:</b> open any product to update its details or price.',
+          '<b>Product images:</b> upload a clear photo so customers can recognize the item.',
+          '<b>Stock problems:</b> use Stock In under the Inventory tab to add stock; the system deducts stock automatically as orders come in.',
+          '<b>Pricing problems:</b> edit the product to correct its price and unit.'
+        ])) +
+      sellerInfoSection('Orders', 'fa-receipt',
+        sellerBullets([
+          '<b>New orders:</b> appear in your Orders tab \u2014 check it regularly.',
+          '<b>Order status:</b> the status updates as the order moves from placed, to preparing, to picked up by a rider, to delivered.',
+          '<b>Order preparation:</b> prepare the items so they\'re ready when the rider arrives.',
+          '<b>Order issues:</b> if there\'s a problem, message the customer through HomeWeb, or contact support for disputes.'
+        ])) +
+      sellerInfoSection('Delivery &amp; Fulfillment', 'fa-motorcycle',
+        'HomeWeb uses its own riders for delivery. Once you\'ve prepared an order, a rider accepts it and picks it up from your stall, then delivers it to the customer. Payment is Cash on Delivery (COD), collected by the rider on delivery. You don\'t arrange your own shipping.') +
+      sellerInfoSection('Technical Problems', 'fa-triangle-exclamation',
+        'If something isn\'t working \u2014 the dashboard won\'t load, a button doesn\'t respond, a product upload fails, or you hit an unexpected error \u2014 try refreshing the page first, then log out and back in. If it continues, contact support with a description of what happened.') +
+      sellerInfoSection('Contact Support', 'fa-envelope',
+        'Reach the HomeWeb admin directly through the <b>Help</b> option in the top menu, which opens a message thread to our support team. You can also reach us here:' +
+        '<div style="background:#F9FAFB;border-radius:10px;padding:12px;margin-top:8px;">' +
+        '<p style="margin:0 0 6px;"><i class="fab fa-facebook" style="color:#1877F2;width:18px;"></i> Facebook: <b>Alexis Dinsay</b></p>' +
+        '<p style="margin:0 0 6px;"><i class="fas fa-envelope" style="color:var(--primary,#22C55E);width:18px;"></i> Email: <b>alexisdinsay18@gmail.com</b></p>' +
+        '<p style="margin:0;"><i class="fas fa-phone" style="color:#F59E0B;width:18px;"></i> Contact: <b>0969 123 4567</b></p>' +
+        '</div>') +
+      '</div>';
+  }
+
+  else if (section === 'terms') {
+    html =
+      '<div class="login-icon"><i class="fas fa-file-contract"></i></div>' +
+      '<h2>Seller Terms &amp; Conditions</h2>' +
+      '<p class="login-sub">The basics of selling on HomeWeb</p>' +
+      '<div style="text-align:left;margin-top:14px;">' +
+      sellerInfoSection('Acceptance of Terms', 'fa-check',
+        'By using the HomeWeb Seller Center, you agree to follow these guidelines and HomeWeb\'s rules for selling within the Sta. Barbara Market.') +
+      sellerInfoSection('Seller Responsibilities', 'fa-user-check',
+        'You are responsible for the accuracy of your store information, product details, prices, stock levels, product photos, and order handling.') +
+      sellerInfoSection('Product Listings', 'fa-list-check',
+        'Only list legitimate products that you are authorized to sell. Listings must not be misleading, counterfeit, or prohibited.') +
+      sellerInfoSection('Pricing', 'fa-tag',
+        'You set and maintain your own prices. Keep them accurate and up to date so customers are charged correctly.') +
+      sellerInfoSection('Orders', 'fa-box-open',
+        'Process the orders you receive using HomeWeb\'s workflow \u2014 prepare the items and have them ready for the rider to pick up.') +
+      sellerInfoSection('Cancellations', 'fa-circle-xmark',
+        'Repeatedly failing to fulfill orders may lead to a review of your store or restrictions on your account, so customers can rely on the sellers on HomeWeb.') +
+      sellerInfoSection('Prohibited Activities', 'fa-ban',
+        'The following are not allowed:' + sellerBullets([
+          'Fraud or fake listings',
+          'Counterfeit or illegal products',
+          'Misleading product information',
+          'Abuse of the platform',
+          'Manipulating ratings or reviews',
+          'Trying to access other people\'s accounts'
+        ])) +
+      sellerInfoSection('Account Suspension', 'fa-user-lock',
+        'HomeWeb may restrict or suspend a seller\'s access when there are serious violations of these terms, following the platform\'s policies.') +
+      sellerInfoSection('Changes to the Platform', 'fa-arrows-rotate',
+        'HomeWeb may update its features, policies, or these terms as the platform improves. Continued use of the Seller Center means you accept the current version.') +
+      '<p style="font-size:11.5px;color:#aaa;margin-top:10px;">HomeWeb is a locally developed marketplace for the Sta. Barbara Market. These terms are written in plain language for that community and are not a substitute for formal legal agreements.</p>' +
+      '</div>';
+  }
+
+  else if (section === 'privacy') {
+    html =
+      '<div class="login-icon"><i class="fas fa-shield-halved"></i></div>' +
+      '<h2>Privacy Policy</h2>' +
+      '<p class="login-sub">How HomeWeb handles seller information</p>' +
+      '<div style="text-align:left;margin-top:14px;">' +
+      sellerInfoSection('Information We Collect', 'fa-database',
+        'To operate the marketplace, HomeWeb may collect:' + sellerBullets([
+          'Your seller account information',
+          'Your store information',
+          'Your product information',
+          'Order-related information',
+          'Other details needed to run the marketplace'
+        ])) +
+      sellerInfoSection('How Information Is Used', 'fa-gears',
+        'Your information is used to:' + sellerBullets([
+          'Manage your seller account',
+          'Operate your store',
+          'Process orders',
+          'Provide customer and seller support',
+          'Improve the HomeWeb system',
+          'Keep the platform secure'
+        ])) +
+      sellerInfoSection('Data Security', 'fa-lock',
+        'HomeWeb takes reasonable measures to protect the information it stores. No system is perfectly secure, so keep your own login details private as well.') +
+      sellerInfoSection('Data Sharing', 'fa-share-nodes',
+        'Your information is only used and shared as needed to operate the marketplace and its normal functions \u2014 for example, sharing an order\'s delivery details with the rider handling it. HomeWeb does not unnecessarily expose private seller information to the public.') +
+      sellerInfoSection('Seller Responsibility', 'fa-user-shield',
+        'Please avoid exposing customers\' personal information through product descriptions, messages, screenshots, or any other public content. Handle customer details with the same care you\'d want for your own.') +
+      '<p style="font-size:11.5px;color:#aaa;margin-top:10px;">HomeWeb aims to handle personal information responsibly and in the spirit of Philippine data privacy principles. As a student-developed project, this policy describes our intended practices rather than a formal legal certification.</p>' +
+      '</div>';
+  }
+
+  body.innerHTML = html;
+  document.getElementById('sn-helpOverlay').classList.add('active');
+  document.getElementById('sn-helpModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
 }
 
 async function messageSellerForOrder(orderId, productId) {
@@ -1386,7 +1770,9 @@ async function openMerchantStorefront(merchantId) {
 
   body.innerHTML =
     '<div style="text-align:center;margin:-8px -4px 20px;padding:28px 20px 22px;background:linear-gradient(135deg, var(--primary,#22C55E), #16A34A);border-radius:16px 16px 0 0;color:#fff;">' +
-    '<div style="width:72px;height:72px;border-radius:50%;background:rgba(255,255,255,0.15);border:3px solid rgba(255,255,255,0.4);color:#fff;font-size:28px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;"><i class="fas fa-store"></i></div>' +
+    (merchant.store_logo_url
+      ? '<div style="width:72px;height:72px;border-radius:50%;border:3px solid rgba(255,255,255,0.4);overflow:hidden;margin:0 auto 12px;"><img src="' + merchant.store_logo_url + '" style="width:100%;height:100%;object-fit:cover;"/></div>'
+      : '<div style="width:72px;height:72px;border-radius:50%;background:rgba(255,255,255,0.15);border:3px solid rgba(255,255,255,0.4);color:#fff;font-size:28px;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;"><i class="fas fa-store"></i></div>') +
     '<h2 style="margin:0;color:#fff;">' + merchant.store_name +
     (merchant.is_verified ? ' <i class="fas fa-badge-check" title="Verified Seller" style="color:#93F6D2;"></i>' : '') +
     '</h2>' +
@@ -2452,6 +2838,24 @@ function closeOrderTracking() {
   if (trackingDetailPollIntervalId) { clearInterval(trackingDetailPollIntervalId); trackingDetailPollIntervalId = null; }
 }
 
+var trackingActiveTab = 'to_ship';
+
+// Maps each order status into one of the three customer-facing buckets.
+// This auto-updates as the order moves: placed/preparing sit in To Ship,
+// then out_for_delivery/awaiting_confirmation move to To Receive, and
+// once the customer confirms receipt (delivered) it lands in Completed.
+// Cancelled orders also rest in Completed as a terminal state. //
+function orderTrackingCategory(status) {
+  if (status === 'placed' || status === 'preparing') return 'to_ship';
+  if (status === 'out_for_delivery' || status === 'awaiting_confirmation') return 'to_receive';
+  return 'completed'; // delivered, cancelled
+}
+
+function switchTrackingTab(tab) {
+  trackingActiveTab = tab;
+  renderOrderList();
+}
+
 function renderOrderList() {
   var container = document.getElementById('sn-tracking-list');
   if (!container) return;
@@ -2466,31 +2870,51 @@ function renderOrderList() {
     return;
   }
 
-  var html = '<div class="track-order-list">';
-  orders.forEach(function(order) {
-    var statusInfo = getOrderStatusInfo(order.status);
-    var dateStr = formatDate(order.created_at);
+  // Bucket counts for the tab labels. //
+  var counts = { to_ship: 0, to_receive: 0, completed: 0 };
+  orders.forEach(function(o) { counts[orderTrackingCategory(o.status)]++; });
 
-    var itemNames = (order.order_items || []).map(function(item) {
-      return item.product_name + (item.qty > 1 ? ' x' + item.qty : '');
-    }).join(', ');
+  var tabDefs = [['to_ship', 'To Ship'], ['to_receive', 'To Receive'], ['completed', 'Completed']];
+  var tabsHtml = '<div style="display:flex;gap:6px;margin-bottom:14px;">' +
+    tabDefs.map(function(t) {
+      var active = trackingActiveTab === t[0];
+      return '<button class="co-btn" style="flex:1;font-size:12.5px;padding:8px 4px;background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#333') + ';" onclick="switchTrackingTab(\'' + t[0] + '\')">' +
+        t[1] + (counts[t[0]] ? ' (' + counts[t[0]] + ')' : '') + '</button>';
+    }).join('') +
+    '</div>';
 
-    html += '<div class="track-order-card" onclick="openTrackingDetail(\'' + order.id + '\')">' +
-      '<div class="track-card-top">' +
-      '<div class="track-card-id">' + order.order_code + '</div>' +
-      '<span class="track-status-text"> - ' + statusInfo.label + '</span>' +
-      '</div>' +
-      (order._storeName ? '<div style="font-size:11.5px;color:#999;margin-top:2px;"><i class="fas fa-store"></i> ' + order._storeName + '</div>' : '') +
-      '<div class="track-card-items-text">' + itemNames + '</div>' +
-      '<div class="track-card-bottom">' +
-      '<span class="track-card-date">' + dateStr + '</span>' +
-      '<span class="track-card-total">' + fmt(order.total) + '</span>' +
-      '</div>' +
-      '</div>';
-  });
-  html += '</div>';
+  var filtered = orders.filter(function(o) { return orderTrackingCategory(o.status) === trackingActiveTab; });
 
-  container.innerHTML = html;
+  var listHtml;
+  if (!filtered.length) {
+    var emptyMsg = { to_ship: 'No orders waiting to ship.', to_receive: 'No orders on the way.', completed: 'No completed orders yet.' };
+    listHtml = '<div class="track-empty"><p>' + emptyMsg[trackingActiveTab] + '</p></div>';
+  } else {
+    listHtml = '<div class="track-order-list">';
+    filtered.forEach(function(order) {
+      var statusInfo = getOrderStatusInfo(order.status);
+      var dateStr = formatDate(order.created_at);
+      var itemNames = (order.order_items || []).map(function(item) {
+        return item.product_name + (item.qty > 1 ? ' x' + item.qty : '');
+      }).join(', ');
+
+      listHtml += '<div class="track-order-card" onclick="openTrackingDetail(\'' + order.id + '\')">' +
+        '<div class="track-card-top">' +
+        '<div class="track-card-id">' + order.order_code + '</div>' +
+        '<span class="track-status-text"> - ' + statusInfo.label + '</span>' +
+        '</div>' +
+        (order._storeName ? '<div style="font-size:11.5px;color:#999;margin-top:2px;"><i class="fas fa-store"></i> ' + order._storeName + '</div>' : '') +
+        '<div class="track-card-items-text">' + itemNames + '</div>' +
+        '<div class="track-card-bottom">' +
+        '<span class="track-card-date">' + dateStr + '</span>' +
+        '<span class="track-card-total">' + fmt(order.total) + '</span>' +
+        '</div>' +
+        '</div>';
+    });
+    listHtml += '</div>';
+  }
+
+  container.innerHTML = tabsHtml + listHtml;
 }
 
 // Lets a customer cancel their own order while still waiting for a rider
@@ -3614,9 +4038,20 @@ async function renderAdminCustomers() {
 let adminOrderFilter = 'all'; // 'all' | 'disputed'
 let adminOrderDateFilter = 'all'; // 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'all'
 
-function orderMatchesDateFilter(order, filter) {
-  if (filter === 'all') return true;
+function orderMatchesDateFilter(order, filter, specificDate) {
   var created = new Date(order.created_at);
+
+  // A specific calendar date takes precedence over the preset range —
+  // if the merchant picked an exact day, match only orders from that day
+  // (local time), ignoring the dropdown. //
+  if (specificDate) {
+    var d = new Date(specificDate + 'T00:00:00'); // parse as local midnight
+    var startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var endOfDay = new Date(startOfDay); endOfDay.setDate(endOfDay.getDate() + 1);
+    return created >= startOfDay && created < endOfDay;
+  }
+
+  if (filter === 'all') return true;
   var now = new Date();
   var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -4970,10 +5405,28 @@ let myMerchantProducts = [];
 let myMerchantSales = null;
 let merchantDashboardView = 'products'; // 'products' | 'sales'
 let merchantSalesDateFilter = 'all';
+let merchantActivityVisibleCount = 5;
+
+function showMoreMerchantActivity(count) {
+  merchantActivityVisibleCount = count;
+  renderMerchantSalesView();
+}
+let merchantSalesSpecificDate = ''; // '' = not set; otherwise 'YYYY-MM-DD'
 
 function changeMerchantSalesDateFilter(value) {
   merchantSalesDateFilter = value;
-  fetchMerchantSales(merchantSalesDateFilter).then(renderMerchantSalesView);
+  merchantSalesSpecificDate = ''; // choosing a preset range clears any exact date
+  fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
+}
+
+function changeMerchantSalesSpecificDate(value) {
+  merchantSalesSpecificDate = value;
+  fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
+}
+
+function clearMerchantSalesSpecificDate() {
+  merchantSalesSpecificDate = '';
+  fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
 }
 let editingProductId = null;
 let pendingProductImageFile = null;
@@ -5041,8 +5494,9 @@ async function loadMyMerchantProducts() {
 
 // Pull every order_item that belongs to one of this merchant's products,
 // along with the parent order's status/date/payment — then aggregate client-side.
-async function fetchMerchantSales(dateFilter) {
+async function fetchMerchantSales(dateFilter, specificDate) {
   dateFilter = dateFilter || 'all';
+  specificDate = specificDate || '';
   const { data, error } = await supabase
     .from('order_items')
     .select('qty, price, cost_price, product_id, product_name, products!inner(name, merchant_id, category), orders(id, status, created_at, payment_method, order_code, not_arrived_reported_at, user_id)')
@@ -5056,7 +5510,7 @@ async function fetchMerchantSales(dateFilter) {
   }
 
   var rows = (data || []).filter(function(r) {
-    return r.orders && orderMatchesDateFilter(r.orders, dateFilter);
+    return r.orders && orderMatchesDateFilter(r.orders, dateFilter, specificDate);
   });
   var totalRevenue = 0, totalItems = 0;
   var byProduct = {};
@@ -5158,6 +5612,7 @@ async function fetchMerchantSales(dateFilter) {
     topProducts: topProducts,
     productProfits: productProfits,
     dateFilter: dateFilter,
+    specificDate: specificDate,
     recentOrders: recentOrders,
     activity: activity,
     byCategory: byCategory,
@@ -5340,7 +5795,6 @@ function renderMerchantOrdersView(data) {
   }
 
   body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
-    '<p class="login-sub" style="margin:0 0 14px;">All orders \u2014 separate from the Sales Report summary</p>' +
     groupToggle + subFilter + content;
 }
 
@@ -5357,9 +5811,15 @@ function orderRowHtml(o) {
 }
 
 let merchantInventoryProductFilter = 'all';
+let merchantInventoryTypeFilter = 'all'; // 'all' | 'in' | 'out'
 
 function changeInventoryProductFilter(value) {
   merchantInventoryProductFilter = value;
+  renderMerchantDashboard();
+}
+
+function changeInventoryTypeFilter(value) {
+  merchantInventoryTypeFilter = value;
   renderMerchantDashboard();
 }
 
@@ -5434,18 +5894,29 @@ function renderMerchantInventoryView(data) {
   });
   productOrder.sort();
 
-  var productFilterDropdown = '<select onchange="changeInventoryProductFilter(this.value)" style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:14px;">' +
+  var productFilterDropdown = '<select onchange="changeInventoryProductFilter(this.value)" style="flex:1;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;">' +
     '<option value="all"' + (merchantInventoryProductFilter === 'all' ? ' selected' : '') + '>All Products</option>' +
     productOrder.map(function(pname) {
       return '<option value="' + pname.replace(/"/g, '&quot;') + '"' + (merchantInventoryProductFilter === pname ? ' selected' : '') + '>' + pname + '</option>';
     }).join('') +
     '</select>';
 
+  var typeFilterDropdown = '<select onchange="changeInventoryTypeFilter(this.value)" style="flex:1;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;">' +
+    [['all', 'Stock In & Out'], ['in', 'Stock In only'], ['out', 'Stock Out only']]
+      .map(function(t) { return '<option value="' + t[0] + '"' + (merchantInventoryTypeFilter === t[0] ? ' selected' : '') + '>' + t[1] + '</option>'; }).join('') +
+    '</select>';
+
+  var inventoryFilters = '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">' + productFilterDropdown + typeFilterDropdown + '</div>';
+
   var shownProducts = merchantInventoryProductFilter === 'all' ? productOrder : productOrder.filter(function(p) { return p === merchantInventoryProductFilter; });
 
   var ledgerHtml = shownProducts.length
     ? shownProducts.map(function(pname) {
-        var entries = byProduct[pname];
+        var entries = byProduct[pname].filter(function(m) {
+          return merchantInventoryTypeFilter === 'all' || m.type === merchantInventoryTypeFilter;
+        });
+        if (!entries.length) return ''; // nothing of this type for this product
+
         var entriesHtml = entries.map(function(m) {
           var detailLine = '';
           if (m.type === 'in') {
@@ -5468,19 +5939,25 @@ function renderMerchantInventoryView(data) {
         return '<div style="margin-bottom:16px;">' +
           (merchantInventoryProductFilter === 'all' ? '<p style="margin:0 0 6px;font-weight:700;font-size:13px;color:#333;">' + pname + '</p>' : '') +
           entriesHtml + '</div>';
-      }).join('')
-    : '<p style="color:#999;font-size:13px;">No stock movements' + (merchantInventoryProductFilter !== 'all' ? ' for ' + merchantInventoryProductFilter : '') + ' yet.</p>';
+      }).filter(function(html) { return html !== ''; }).join('')
+    : '';
+
+  // If the type filter left nothing to show, say so explicitly. //
+  if (!ledgerHtml) {
+    var typeLabel = merchantInventoryTypeFilter === 'in' ? 'stock in' : (merchantInventoryTypeFilter === 'out' ? 'stock out' : 'stock movements');
+    ledgerHtml = '<p style="color:#999;font-size:13px;">No ' + typeLabel +
+      (merchantInventoryProductFilter !== 'all' ? ' for ' + merchantInventoryProductFilter : '') + ' yet.</p>';
+  }
 
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
-    '<p class="login-sub" style="margin:0 0 14px;">Inventory tracking \u2014 separate from sales revenue</p>' +
     '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
     '</div>' +
     summaryCards +
     '<h3 style="margin:0 0 8px;font-size:14px;">Current Stock</h3>' + stockTable +
-    '<h3 style="margin:18px 0 8px;font-size:14px;">Stock In / Out Ledger</h3>' + productFilterDropdown + ledgerHtml;
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Stock In / Out Ledger</h3>' + inventoryFilters + ledgerHtml;
 }
 
 // Renders a circular percentage gauge as inline SVG — used only for
@@ -5597,10 +6074,15 @@ function renderMerchantSalesView() {
       }).join('') + '</tbody></table></div>'
     : '';
 
-  var dateFilterDropdown = '<select onchange="changeMerchantSalesDateFilter(this.value)" style="padding:7px 12px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;margin-bottom:14px;">' +
+  var dateFilterDropdown = '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">' +
+    '<select onchange="changeMerchantSalesDateFilter(this.value)" style="padding:7px 12px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;"' + (s.specificDate ? ' disabled' : '') + '>' +
     [['all', 'All Time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Within a Week'], ['month', 'Within a Month'], ['year', 'Within a Year']]
       .map(function(d) { return '<option value="' + d[0] + '"' + (s.dateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('') +
-    '</select>';
+    '</select>' +
+    '<span style="font-size:11.5px;color:#aaa;">or</span>' +
+    '<input type="date" onchange="changeMerchantSalesSpecificDate(this.value)" value="' + (s.specificDate || '') + '" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;" title="Pick an exact date"/>' +
+    (s.specificDate ? '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="clearMerchantSalesSpecificDate()"><i class="fas fa-times"></i> Clear date</button>' : '') +
+    '</div>';
 
   // Week-over-week — real comparison using actual timestamps, not a
   // fabricated year-over-year figure the store has no history for. //
@@ -5641,8 +6123,9 @@ function renderMerchantSalesView() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
 
+  var activityShown = Math.min(merchantActivityVisibleCount, (s.activity || []).length);
   var activityHtml = (s.activity && s.activity.length)
-    ? s.activity.map(function(e) {
+    ? s.activity.slice(0, activityShown).map(function(e) {
         return '<div style="display:flex;gap:10px;padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
           '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:#F5F5F3;color:' + e.color + ';display:flex;align-items:center;justify-content:center;font-size:12px;"><i class="fas ' + e.icon + '"></i></div>' +
           '<div style="flex:1;min-width:0;">' +
@@ -5652,6 +6135,13 @@ function renderMerchantSalesView() {
           '</div></div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">No activity yet. Sales, stock changes, and reviews will appear here.</p>';
+
+  if (s.activity && s.activity.length > activityShown) {
+    var actNext = Math.min(5, s.activity.length - activityShown);
+    activityHtml += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="showMoreMerchantActivity(' + (activityShown + 5) + ')">Show ' + actNext + ' more</button>';
+  } else if (s.activity && s.activity.length > 5) {
+    activityHtml += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="showMoreMerchantActivity(5)">Show fewer</button>';
+  }
 
   var exportButtons = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
@@ -5730,7 +6220,7 @@ function buildSalesReportPDF() {
   y += 22;
   doc.setFontSize(10);
   doc.setTextColor(120, 120, 120);
-  doc.text('Period: ' + (filterLabels[s.dateFilter] || 'All Time'), margin, y);
+  doc.text('Period: ' + (s.specificDate ? s.specificDate : (filterLabels[s.dateFilter] || 'All Time')), margin, y);
   y += 14;
   doc.text('Generated: ' + new Date().toLocaleString(), margin, y);
   y += 24;
@@ -5863,7 +6353,7 @@ function renderMerchantDashboard() {
 
   if (merchantDashboardView === 'sales') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading sales report...</p></div>';
-    fetchMerchantSales(merchantSalesDateFilter).then(renderMerchantSalesView);
+    fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
     return;
   }
 
@@ -5923,8 +6413,25 @@ async function renderMerchantVerificationView(tabs) {
       '</div>'
     : '';
 
+  var logoPreview = merchant.store_logo_url
+    ? '<img src="' + merchant.store_logo_url + '" style="width:96px;height:96px;border-radius:50%;object-fit:cover;border:2px solid #eee;"/>'
+    : '<div style="width:96px;height:96px;border-radius:50%;background:#FAFAF8;border:2px solid #eee;display:flex;align-items:center;justify-content:center;"><i class="fas fa-store" style="font-size:36px;color:#ccc;"></i></div>';
+
+  var storePhotoSection =
+    '<h3 style="margin:0 0 10px;font-size:14px;">Store Photo</h3>' +
+    '<div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;">' +
+    logoPreview +
+    '<div style="flex:1;">' +
+    '<button type="button" class="co-btn" style="background:#F3F4F6;color:#333;font-size:12.5px;width:100%;margin-bottom:6px;" onclick="document.getElementById(\'store-logo-input\').click()"><i class="fas fa-camera"></i> ' + (merchant.store_logo_url ? 'Change Photo' : 'Upload Photo') + '</button>' +
+    (merchant.store_logo_url ? '<button type="button" class="co-btn" style="background:#FEE2E2;color:#DC2626;font-size:12.5px;width:100%;" onclick="removeStoreLogo()"><i class="fas fa-trash"></i> Remove Photo</button>' : '') +
+    '</div>' +
+    '</div>' +
+    '<input type="file" id="store-logo-input" accept="image/*" style="display:none;" onchange="uploadStoreLogo(this.files[0])"/>' +
+    '<p style="margin:0 0 20px;font-size:11.5px;color:#999;">This photo appears on your store card and storefront. A clear square photo or logo works best.</p>';
+
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+    storePhotoSection +
     '<h3 style="margin:16px 0 10px;font-size:14px;">Business Permit Verification</h3>' +
     statusBanner +
     permitPreview +
@@ -5973,6 +6480,40 @@ async function removeBusinessPermit() {
 
   showToast('Permit removed');
   renderMerchantDashboard();
+}
+
+async function uploadStoreLogo(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { showToast('Please choose an image', 'error'); return; }
+  if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB', 'error'); return; }
+
+  showToast('Uploading store photo...', 'info');
+  var ext = file.name.split('.').pop();
+  var path = 'store-logos/' + myMerchantId + '/' + Date.now() + '.' + ext;
+
+  const { error: uploadErr } = await supabase.storage.from('uploads').upload(path, file, { upsert: true });
+  if (uploadErr) { showToast('Could not upload photo: ' + uploadErr.message, 'error'); return; }
+
+  const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(path);
+
+  const { error: updateErr } = await supabase.from('merchants').update({ store_logo_url: urlData.publicUrl }).eq('id', myMerchantId);
+  if (updateErr) { showToast('Could not save photo: ' + updateErr.message, 'error'); return; }
+
+  showToast('Store photo updated \u2705');
+  renderMerchantDashboard();
+  // Refresh the storefront-facing data so the new photo shows on cards. //
+  await loadProducts();
+}
+
+async function removeStoreLogo() {
+  if (!confirm('Remove your store photo? Your store will show the default icon again.')) return;
+
+  const { error } = await supabase.from('merchants').update({ store_logo_url: null }).eq('id', myMerchantId);
+  if (error) { showToast('Could not remove photo: ' + error.message, 'error'); return; }
+
+  showToast('Store photo removed');
+  renderMerchantDashboard();
+  await loadProducts();
 }
 
 async function viewProductReviews(productId, productName) {
@@ -6895,7 +7436,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     await loadProducts();
     await loadRecentSalesTrend();
-    renderHomeProducts();
+    if (recommendMode === 'merchants') renderHomeMerchants(); else renderHomeProducts();
     renderCategoryPage();
     if (currentUser) updateChatBadge();
 

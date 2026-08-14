@@ -23,7 +23,7 @@
 				<i class="fas fa-comment-dots"></i> Messages
 				<span class="msg-badge" id="msg-badge" style="display:none;"></span>
 			</a>
-			<a href="#"><i class="fas fa-question-circle"></i> Help</a>
+			<a href="#" onclick="openHelpCenterModal(event); return false;"><i class="fas fa-question-circle"></i> Help</a>
 			<a href="#" class="sn-signup-link" onclick="openSignupModal(event); return false;"><i class="fas fa-user"></i> Sign Up</a>
 			<a href="#" class="sn-login-link"><i class="fas fa-sign-in-alt"></i> Log In</a>
 			<a href="#" class="sn-track-link" onclick="openOrderTracking(); return false;">Track Orders</a>
@@ -130,11 +130,17 @@
 			<h2 class="section-title">Recommended For You</h2>
 			<a href="category.html" class="see-all">See All <i class="fas fa-chevron-right"></i></a>
 		</div>
+		<div class="rec-toggle" id="rec-toggle">
+			<button type="button" class="rec-toggle-btn active" data-rec="products" onclick="switchRecommendMode('products')">Products</button>
+			<button type="button" class="rec-toggle-btn" data-rec="merchants" onclick="switchRecommendMode('merchants')">Stores</button>
+		</div>
 		<div class="product-grid" id="home-product-grid">
 			<p style="color:#999;padding:2rem;">Loading products...</p>
 		</div>
+		<div class="product-grid" id="home-merchant-grid" style="display:none;"></div>
 	</div>
 </section>
+<!-- /RECOMMENDED -->
 
 
 <!-- FOOTER -->
@@ -155,11 +161,18 @@
 			</ul>
 		</div>
 		<div class="footer-col">
+			<h4>Seller Center</h4>
+			<ul>
+				<li><a href="#" onclick="openSellerInfoModal('guidelines'); return false;">Seller Guidelines</a></li>
+				<li><a href="#" onclick="openSellerInfoModal('support'); return false;">Help &amp; Support</a></li>
+				<li><a href="#" onclick="openSellerInfoModal('terms'); return false;">Terms &amp; Conditions</a></li>
+				<li><a href="#" onclick="openSellerInfoModal('privacy'); return false;">Privacy Policy</a></li>
+			</ul>
+		</div>
+		<div class="footer-col">
 			<h4>HomeWeb</h4>
 			<ul>
-				<li><a href="#">About Us</a></li>
-				<li><a href="#">Seller Center</a></li>
-
+				<li><a href="#" onclick="openAboutModal(event); return false;">About Us</a></li>
 			</ul>
 		</div>
 		<div class="footer-col">
