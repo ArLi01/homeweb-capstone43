@@ -229,10 +229,68 @@ function stockLabelHtml(qty) {
 }
 
 // Render the homepage "Recommended For You" grid //
+// Recommendations are scored on two signals, per spec:
+//   1. Recent sold trend — units sold in the last 30 days (not lifetime
+//      sales), so a product that's selling *now* is favoured over one
+//      that sold a lot months ago and has since gone quiet.
+//   2. Rating quality — the average rating, weighted by how many ratings
+//      back it (a 5.0 from one review shouldn't outrank a 4.7 from forty).
+// The two are normalised to 0-1 against the current best in each signal,
+// then combined, so neither can dominate purely by raw magnitude. //
+var recentSalesByProduct = {};
+
+async function loadRecentSalesTrend() {
+  var cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('order_items')
+    .select('product_id, qty, orders!inner(created_at, status)')
+    .gte('orders.created_at', cutoff);
+
+  recentSalesByProduct = {};
+  if (error) { console.error('loadRecentSalesTrend error:', error); return; }
+  (data || []).forEach(function(r) {
+    if (!r.product_id) return;
+    // Don't count cancelled orders toward "trending" — those units were
+    // never really sold. //
+    if (r.orders && r.orders.status === 'cancelled') return;
+    recentSalesByProduct[r.product_id] = (recentSalesByProduct[r.product_id] || 0) + r.qty;
+  });
+}
+
+function recommendationScore(p, maxRecent) {
+  var recent = recentSalesByProduct[p.id] || 0;
+  var recentNorm = maxRecent > 0 ? (recent / maxRecent) : 0;
+
+  // Rating signal: average scaled to 0-1 (out of 5), dampened when there
+  // are few ratings so a lone 5-star can't dominate. //
+  var confidence = p.ratingCount > 0 ? Math.min(1, p.ratingCount / 10) : 0;
+  var ratingNorm = (p.ratingAvg / 5) * confidence;
+
+  // Recent sales weighted slightly higher than rating, since "trending"
+  // is the primary intent of a recommendations row. //
+  return recentNorm * 0.6 + ratingNorm * 0.4;
+}
+
 function renderHomeProducts() {
   var grid = document.getElementById('home-product-grid');
   if (!grid) return;
-  var list = products.slice(0, 8);
+
+  var maxRecent = 0;
+  products.forEach(function(p) {
+    var r = recentSalesByProduct[p.id] || 0;
+    if (r > maxRecent) maxRecent = r;
+  });
+
+  var scored = products
+    .filter(function(p) { return p.stock_qty > 0; }) // don't recommend out-of-stock items
+    .map(function(p) { return { p: p, score: recommendationScore(p, maxRecent) }; })
+    .sort(function(a, b) { return b.score - a.score; });
+
+  // If nothing has any sales or ratings yet (brand-new shop), fall back
+  // to just showing available products so the row is never empty. //
+  var list = scored.map(function(x) { return x.p; }).slice(0, 8);
+  if (!list.length) list = products.slice(0, 8);
+
   grid.innerHTML = list.length
     ? list.map(renderProductCardHtml).join('')
     : '<p style="color:#999;padding:2rem;">No products available yet.</p>';
@@ -6818,6 +6876,7 @@ document.addEventListener('DOMContentLoaded', async function() {
   if (window.location.hash === '#admin') openAdminLoginModal();
 
   await loadProducts();
+  await loadRecentSalesTrend();
   renderHomeProducts();
   renderCategoryPage();
 
@@ -6835,6 +6894,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (isBusy) return;
 
     await loadProducts();
+    await loadRecentSalesTrend();
     renderHomeProducts();
     renderCategoryPage();
     if (currentUser) updateChatBadge();
