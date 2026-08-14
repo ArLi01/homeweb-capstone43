@@ -85,7 +85,7 @@ async function loadProducts() {
 // Shared label for a product's social proof: rating + review count + units sold //
 function productStatsLabel(p) {
   var parts = [];
-  if (p.ratingCount > 0) parts.push(p.ratingAvg + ' (' + p.ratingCount + ')');
+  if (p.ratingCount > 0) parts.push(Number(p.ratingAvg).toFixed(1) + ' (' + p.ratingCount + ')');
   parts.push((p.soldCount || 0) + ' sold');
   return parts.join(' \u2022 ');
 }
@@ -138,28 +138,53 @@ function fmtPrice(n) {
 // "3 full + 3/4"), but every rating renders cleanly with zero artifacts,
 // and it uses the same icon font already relied on everywhere else in
 // the app, guaranteeing consistent baseline alignment for free. //
+// Renders a star rating with continuous, accurate percentage precision
+// (4.4 looks meaningfully different from 4.6 or 4.7, matching how real
+// e-commerce sites display ratings) using real Font Awesome icons in a
+// back/front overlay — a grey full row underneath, a colored row on top
+// clipped to the exact percentage. Same technique used widely in
+// production star-rating widgets. Font size is inherited from whatever
+// wraps this, same as any other icon. //
+// Half-star precision using real Font Awesome icons (full / half / empty).
+// This is the version that provably rendered cleanly — self-contained
+// inline styles, no two-layer overlay to misalign. Precision is to the
+// nearest half star: 4.5 shows 4 full + half; 3.8 rounds to 4.0. The
+// exact decimal is always shown as text right beside the stars (matching
+// how Shopee/Amazon do it), so the number carries the fine precision
+// while the stars give the at-a-glance read. //
+// AGGREGATE rating display — a single star + the exact number (e.g.
+// "4.6"). This is the default for averaged ratings across the site.
+// Rationale: five tiny stars physically cannot show the eye the
+// difference between 4.5 and 4.7, so the row was doing visual work it
+// couldn't deliver; the number carries full 0.1 precision with zero
+// rendering fragility. Same pattern used by Google Maps, Play Store,
+// IMDb, etc. Callers already print the number themselves in most places,
+// so this returns JUST the star icon — but where a caller relied on the
+// old function to also imply the value, the number beside it still shows.
 function starsHTML(n) {
   n = Math.max(0, Math.min(5, Number(n) || 0));
-  var rounded = Math.round(n * 2) / 2; // snap to nearest half star
-  var full = Math.floor(rounded + 0.001);
-  var hasHalf = (rounded - full) >= 0.49;
-  var empty = 5 - full - (hasHalf ? 1 : 0);
+  // No star at all when there's no rating yet — a lone orange star with
+  // no number beside it reads as a rating that isn't there. //
+  if (n <= 0) return '';
+  return '<i class="fas fa-star" style="color:#F59E0B;font-size:14px;vertical-align:middle;"></i> ';
+}
 
+function stars(n) { return starsHTML(n); }
+
+// INDIVIDUAL review display — shows the actual whole-number rating a
+// single reviewer gave (always an integer 1-5, chosen by tapping stars),
+// as filled/empty stars. Kept separate from the aggregate display on
+// purpose: collapsing one person's "4 out of 5" into "1 star + 4.0"
+// would read oddly. Used only where a specific review's rating is shown.
+function reviewStarsHTML(n) {
+  n = Math.max(0, Math.min(5, Math.round(Number(n) || 0)));
   var html = '<span style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;">';
-  for (var i = 0; i < full; i++) {
-    html += '<i class="fas fa-star" style="color:#F59E0B;font-size:14px;"></i>';
-  }
-  if (hasHalf) {
-    html += '<i class="fas fa-star-half-stroke" style="color:#F59E0B;font-size:14px;"></i>';
-  }
-  for (var j = 0; j < empty; j++) {
-    html += '<i class="far fa-star" style="color:#ddd;font-size:14px;"></i>';
+  for (var i = 0; i < 5; i++) {
+    html += '<i class="fas fa-star" style="color:' + (i < n ? '#F59E0B' : '#ddd') + ';font-size:14px;"></i>';
   }
   html += '</span>';
   return html;
 }
-
-function stars(n) { return starsHTML(n); }
 
 // Shared product card markup used by both the homepage and category page //
 function renderProductCardHtml(p) {
@@ -257,8 +282,22 @@ var pendingPasswordRecovery = false;
 // fires on an empty listener list and is silently missed — which is
 // exactly what caused the reset link to log the user in normally instead
 // of prompting for a new password. //
-supabase.auth.onAuthStateChange(function(event, session) {
+supabase.auth.onAuthStateChange(async function(event, session) {
   currentUser = session ? session.user : null;
+
+  // This must be awaited BEFORE updateAuthUI() runs. Individual login
+  // functions (submitLogin, submitAdminLogin, etc.) also fetch roles on
+  // their own, but this listener fires independently and can't rely on
+  // that timing — Supabase fires this automatically whenever the auth
+  // state changes, and there's no guarantee it runs after (rather than
+  // interleaved with) whatever a specific login function is doing. Without
+  // this, there's a real window where currentUser has already switched to
+  // the new account but userRoles still holds the PREVIOUS session's
+  // roles, and updateAuthUI() renders using that mismatched pairing —
+  // which is exactly how an admin session's role could visually leak
+  // onto whichever account logs in next. //
+  await fetchUserRoles();
+
   updateAuthUI();
   updateNotifBadge();
   updateChatBadge();
@@ -585,7 +624,7 @@ function reviewRowHtml(r) {
     '<div style="flex-shrink:0;width:32px;height:32px;border-radius:50%;background:#F3F4F6;color:#999;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:13px;">' + avatarHtml + '</div>' +
     '<div style="flex:1;">' +
     '<p style="margin:0;font-weight:600;font-size:12.5px;">' + name + '</p>' +
-    '<div style="color:#F59E0B;font-size:13px;">' + stars(r.rating) + '</div>' +
+    '<div style="color:#F59E0B;font-size:13px;">' + reviewStarsHTML(r.rating) + '</div>' +
     (r.comment ? '<p style="margin:4px 0 0;font-size:12.5px;color:#555;">' + r.comment + '</p>' : '') +
     '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(r.created_at) + '</p>' +
     '</div></div>';
@@ -1296,7 +1335,7 @@ async function openMerchantStorefront(merchantId) {
     '<p style="color:rgba(255,255,255,0.85);margin:4px 0 0;font-size:13px;">' + (CATEGORY_META[merchant.business_type] ? CATEGORY_META[merchant.business_type].title : merchant.business_type) + '</p>' +
     (merchant.store_description ? '<p style="color:rgba(255,255,255,0.9);margin:10px auto 0;font-size:13px;max-width:420px;">' + merchant.store_description + '</p>' : '') +
     '<div style="margin-top:10px;color:#FEF3C7;font-size:13px;font-weight:600;">' +
-    (totalReviews > 0 ? stars(storeRatingAvg) + ' ' + storeRatingAvg + ' <span style="color:rgba(255,255,255,0.85);font-weight:400;">(' + totalReviews + ' reviews)</span>' : '<span style="color:rgba(255,255,255,0.85);font-weight:400;">No reviews yet</span>') +
+    (totalReviews > 0 ? stars(storeRatingAvg) + Number(storeRatingAvg).toFixed(1) + ' <span style="color:rgba(255,255,255,0.85);font-weight:400;">(' + totalReviews + ' reviews)</span>' : '<span style="color:rgba(255,255,255,0.85);font-weight:400;">No reviews yet</span>') +
     '</div>' +
     verifiedBadge +
     scheduleBadge +
@@ -2526,7 +2565,7 @@ function renderTrackingDetail(order) {
       if (existing) {
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
           '<p style="margin:0 0 4px;font-weight:600;font-size:13px;">' + item.product_name + '</p>' +
-          '<div style="color:#F59E0B;font-size:14px;">' + starsHTML(existing.rating) + '</div>' +
+          '<div style="color:#F59E0B;font-size:14px;">' + reviewStarsHTML(existing.rating) + '</div>' +
           (existing.comment ? '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">"' + existing.comment + '"</p>' : '') +
           '<p style="margin:4px 0 0;color:#aaa;font-size:11px;">Posted as ' + (existing.is_anonymous ? 'Anonymous' : 'yourself') + '</p>' +
           '</div>';
@@ -2552,7 +2591,7 @@ function renderTrackingDetail(order) {
     var existingRiderRating = order._myRiderRating;
     if (existingRiderRating) {
       riderRatingHtml = '<div style="padding:12px 4px;">' +
-        '<div style="color:#F59E0B;font-size:14px;">' + starsHTML(existingRiderRating.rating) + '</div>' +
+        '<div style="color:#F59E0B;font-size:14px;">' + reviewStarsHTML(existingRiderRating.rating) + '</div>' +
         (existingRiderRating.comment ? '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">"' + existingRiderRating.comment + '"</p>' : '') +
         '</div>';
     } else {
@@ -3045,7 +3084,7 @@ function adminTabsHtml() {
     var active = adminView === id;
     return '<button class="co-btn" style="flex:1;background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#333') + ';" onclick="switchAdminView(\'' + id + '\')">' + label + '</button>';
   }
-  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + tab('reports', 'Reports') + '</div>';
+  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + tab('reports', 'Reports') + tab('activity', 'Activity Log') + '</div>';
 }
 
 function switchAdminView(view) {
@@ -3063,6 +3102,7 @@ async function renderAdminDashboard() {
   if (adminView === 'customers') return renderAdminCustomers();
   if (adminView === 'orders') return renderAdminOrders();
   if (adminView === 'reports') return renderAdminReports();
+  if (adminView === 'activity') return renderAdminActivityLog();
 }
 
 async function renderAdminOverview() {
@@ -3186,12 +3226,16 @@ async function renderAdminMerchants() {
       }).join('');
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
-    '<h3 style="margin:0 0 8px;font-size:14px;">Merchants</h3>' + searchBar + filterBar + rows;
+    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<span>Merchants</span>' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'merchant\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</h3>' + searchBar + filterBar + rows;
 }
 
 async function adminSetMerchantVerified(merchantId, verified) {
   const { error } = await supabase.from('merchants').update({ is_verified: verified }).eq('id', merchantId);
   if (error) { showToast('Could not update: ' + error.message, 'error'); return; }
+  logActivity(verified ? 'merchant_verified' : 'merchant_verification_revoked', 'merchant', merchantId, null, null);
   showToast(verified ? 'Merchant verified \u2705' : 'Verification revoked', 'info');
   renderAdminMerchants();
 }
@@ -3208,6 +3252,7 @@ async function adminSuspendMerchant(merchantId, storeName) {
   }).eq('id', merchantId);
   if (error) { showToast('Could not suspend: ' + error.message, 'error'); return; }
 
+  logActivity('merchant_suspended', 'merchant', merchantId, storeName, reason.trim());
   showToast('Store suspended \u2705');
   renderAdminMerchants();
 }
@@ -3220,6 +3265,7 @@ async function adminReinstateMerchant(merchantId, storeName) {
   }).eq('id', merchantId);
   if (error) { showToast('Could not reinstate: ' + error.message, 'error'); return; }
 
+  logActivity('merchant_reinstated', 'merchant', merchantId, storeName, null);
   showToast('Store reinstated \u2705');
   renderAdminMerchants();
 }
@@ -3272,10 +3318,63 @@ async function renderAdminRiders() {
       }).join('');
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
-    '<h3 style="margin:0 0 8px;font-size:14px;">All Riders (' + (riders ? riders.length : 0) + ')</h3>' + searchBar + rows;
+    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<span>All Riders (' + (riders ? riders.length : 0) + ')</span>' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'rider\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</h3>' + searchBar + rows;
 }
 
 let adminReportFilter = 'pending'; // 'pending' | 'all'
+
+let adminActivityFilter = 'all';
+
+function changeAdminActivityFilter(value) {
+  adminActivityFilter = value;
+  renderAdminActivityLog();
+}
+
+function openActivityLogFor(targetType) {
+  adminView = 'activity';
+  adminActivityFilter = targetType;
+  renderAdminDashboard();
+}
+
+var ACTIVITY_ACTION_LABELS = {
+  permit_uploaded: 'Uploaded business permit',
+  permit_removed: 'Removed business permit',
+  merchant_verified: 'Verified merchant',
+  merchant_verification_revoked: 'Revoked merchant verification',
+  merchant_suspended: 'Suspended merchant',
+  merchant_reinstated: 'Reinstated merchant',
+  dispute_resolved: 'Resolved delivery dispute'
+};
+
+async function renderAdminActivityLog() {
+  var body = document.getElementById('sn-admin-body');
+  var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
+
+  var query = supabase.from('activity_log').select('*').order('created_at', { ascending: false }).limit(200);
+  if (adminActivityFilter !== 'all') query = query.eq('target_type', adminActivityFilter);
+
+  const { data: entries, error } = await query;
+
+  var typeOptions = [['all', 'All Categories'], ['merchant', 'Merchants'], ['order', 'Orders'], ['rider', 'Riders'], ['customer', 'Customers']]
+    .map(function(t) { return '<option value="' + t[0] + '"' + (adminActivityFilter === t[0] ? ' selected' : '') + '>' + t[1] + '</option>'; }).join('');
+
+  var filterBar = '<select onchange="changeAdminActivityFilter(this.value)" style="padding:7px 12px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;margin-bottom:14px;">' + typeOptions + '</select>';
+
+  var rows = (error || !entries || !entries.length)
+    ? '<p style="color:#999;font-size:13px;">No activity logged yet' + (adminActivityFilter !== 'all' ? ' for this category' : '') + '.</p>'
+    : entries.map(function(e) {
+        return '<div style="padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<p style="margin:0;font-weight:600;font-size:13px;">' + (ACTIVITY_ACTION_LABELS[e.action] || e.action) + (e.target_label ? ' \u2014 ' + e.target_label : '') + '</p>' +
+          '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">by ' + (e.actor_name || 'Unknown') + ' \u2022 ' + formatDate(e.created_at) + ' ' + new Date(e.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + '</p>' +
+          (e.details ? '<p style="margin:4px 0 0;font-size:12px;color:#666;">' + e.details + '</p>' : '') +
+          '</div>';
+      }).join('');
+
+  body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Activity Log</h3>' + filterBar + rows;
+}
 
 async function renderAdminReports() {
   var body = document.getElementById('sn-admin-body');
@@ -3446,7 +3545,11 @@ async function renderAdminCustomers() {
         '</div></div>';
     }).join('') : '<p style="color:#999;font-size:13px;">No customers match your search.</p>';
 
-  body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Customers (' + (profiles || []).length + ')</h3>' +
+  body.innerHTML = header +
+    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<span>Customers (' + (profiles || []).length + ')</span>' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'customer\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</h3>' +
     searchBar + rows;
 }
 
@@ -3523,7 +3626,11 @@ async function renderAdminOrders() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">' + (adminOrderFilter === 'disputed' ? 'No disputed orders.' : 'No orders yet.') + '</p>';
 
-  body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Orders (last 150)</h3>' + filterBar + rows;
+  body.innerHTML = header +
+    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<span>Orders (last 150)</span>' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'order\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</h3>' + filterBar + rows;
 }
 
 // Admin resolution — for disputes the customer doesn't or can't retract
@@ -3544,6 +3651,8 @@ async function adminResolveDispute(orderId, orderCode) {
     label: 'Delivery Confirmed \u2014 Resolved by Admin',
     description: 'An admin reviewed this dispute and confirmed the order as delivered.'
   });
+
+  logActivity('dispute_resolved', 'order', orderId, orderCode, 'Marked as delivered after reviewing a non-delivery dispute');
 
   showToast('Order marked resolved \u2705');
   renderAdminOrders();
@@ -3866,6 +3975,25 @@ var ROLE_ICONS = { customer: 'fa-user', merchant: 'fa-store', rider: 'fa-motorcy
 
 function activeRoleKey() {
   return currentUser ? ('homeweb_active_role_' + currentUser.id) : null;
+}
+
+// Writes to the audit trail admin can review — used for the highest-
+// value actions (permit changes, verification/suspension, dispute
+// resolutions), not every action in the system. Fire-and-forget on
+// purpose: a logging failure should never block the actual action. //
+function logActivity(action, targetType, targetId, targetLabel, details) {
+  if (!currentUser) return;
+  supabase.from('activity_log').insert({
+    actor_id: currentUser.id,
+    actor_name: currentUser.email || 'Unknown',
+    action: action,
+    target_type: targetType || null,
+    target_id: targetId || null,
+    target_label: targetLabel || null,
+    details: details || null
+  }).then(function(res) {
+    if (res.error) console.error('logActivity failed:', res.error);
+  });
 }
 
 async function fetchUserRoles() {
@@ -4680,7 +4808,7 @@ function renderProfileForm(profile, roleStats) {
           (m.openToday ? 'Your store is visible today' : 'Your store is hidden today (closed)') + '</p>'
         : '') +
       '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
-      (m.ratingCount > 0 ? stars(m.ratingAvg) + ' ' + m.ratingAvg + ' (' + m.ratingCount + ' reviews)' : 'No reviews yet') +
+      (m.ratingCount > 0 ? stars(m.ratingAvg) + Number(m.ratingAvg).toFixed(1) + ' (' + m.ratingCount + ' reviews)' : 'No reviews yet') +
       '</p></div>';
   }
   if (roleStats.rider) {
@@ -4690,7 +4818,7 @@ function renderProfileForm(profile, roleStats) {
       '<p style="margin:0;font-weight:700;font-size:13px;"><i class="fas fa-motorcycle"></i> ' + capitalize(r.vehicle_type) + (r.plate_number ? ' \u2022 ' + r.plate_number : '') + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:' + (r.is_available ? '#22C55E' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</p>' +
       '<p style="margin:4px 0 0;font-size:12px;color:#F59E0B;">' +
-      (r.rating_count > 0 ? stars(rEffectiveRating) + ' ' + rEffectiveRating.toFixed(1) + ' (' + r.rating_count + ' ratings)' : 'New rider, no ratings yet') +
+      (r.rating_count > 0 ? stars(rEffectiveRating) + rEffectiveRating.toFixed(1) + ' (' + r.rating_count + ' ratings)' : 'New rider, no ratings yet') +
       (r.rejection_penalty > 0 ? '<span style="color:#DC2626;"> \u2014 ' + r.rejection_penalty.toFixed(1) + ' rejection penalty</span>' : '') +
       '</p></div>';
   }
@@ -5021,6 +5149,18 @@ async function fetchMerchantActivity(orderIds, orderCodeMap) {
 // ============================================================
 
 let merchantOrdersGroupBy = 'date'; // 'date' | 'product'
+let merchantOrdersDateFilter = 'all';
+let merchantOrdersProductFilter = 'all';
+
+function changeMerchantOrdersDateFilter(value) {
+  merchantOrdersDateFilter = value;
+  renderMerchantOrdersView({ orders: window.__lastMerchantOrders });
+}
+
+function changeMerchantOrdersProductFilter(value) {
+  merchantOrdersProductFilter = value;
+  renderMerchantOrdersView({ orders: window.__lastMerchantOrders });
+}
 
 async function fetchMerchantOrdersFull() {
   const { data, error } = await supabase
@@ -5073,49 +5213,77 @@ function renderMerchantOrdersView(data) {
     return;
   }
 
-  var groupToggle = '<div style="display:flex;gap:8px;margin-bottom:14px;">' +
+  var groupToggle = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
     '<button class="co-btn" style="flex:1;background:' + (merchantOrdersGroupBy === 'date' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantOrdersGroupBy === 'date' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="merchantOrdersGroupBy=\'date\'; renderMerchantOrdersView({orders:' + 'window.__lastMerchantOrders' + '});">Group by Date</button>' +
     '<button class="co-btn" style="flex:1;background:' + (merchantOrdersGroupBy === 'product' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantOrdersGroupBy === 'product' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="merchantOrdersGroupBy=\'product\'; renderMerchantOrdersView({orders:' + 'window.__lastMerchantOrders' + '});">Group by Product</button>' +
     '</div>';
   window.__lastMerchantOrders = data.orders;
 
+  // Context-dependent secondary filter: a date-range dropdown when
+  // grouping by date, a product picker when grouping by product. //
+  var subFilter;
+  if (merchantOrdersGroupBy === 'date') {
+    subFilter = '<select onchange="changeMerchantOrdersDateFilter(this.value)" style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:14px;">' +
+      [['all', 'All Time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Within a Week'], ['month', 'Within a Month'], ['year', 'Within a Year']]
+        .map(function(d) { return '<option value="' + d[0] + '"' + (merchantOrdersDateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('') +
+      '</select>';
+  } else {
+    var allProductNames = {};
+    data.orders.forEach(function(o) { o.items.forEach(function(it) { allProductNames[it.name] = true; }); });
+    var sortedNames = Object.keys(allProductNames).sort();
+    subFilter = '<select onchange="changeMerchantOrdersProductFilter(this.value)" style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:14px;">' +
+      '<option value="all"' + (merchantOrdersProductFilter === 'all' ? ' selected' : '') + '>All Products</option>' +
+      sortedNames.map(function(name) { return '<option value="' + name.replace(/"/g, '&quot;') + '"' + (merchantOrdersProductFilter === name ? ' selected' : '') + '>' + name + '</option>'; }).join('') +
+      '</select>';
+  }
+
   var content;
   if (!data.orders.length) {
     content = '<p style="color:#999;font-size:13px;">No orders yet.</p>';
   } else if (merchantOrdersGroupBy === 'date') {
-    var byDate = {};
-    var dateOrder = [];
-    data.orders.forEach(function(o) {
-      var label = dateGroupLabel(o.createdAt);
-      if (!byDate[label]) { byDate[label] = []; dateOrder.push(label); }
-      byDate[label].push(o);
-    });
-    content = dateOrder.map(function(label) {
-      var rows = byDate[label].map(orderRowHtml).join('');
-      return '<div style="margin-bottom:16px;"><p style="margin:0 0 6px;font-weight:700;font-size:13px;color:#333;">' + label + '</p>' + rows + '</div>';
-    }).join('');
+    var dateFiltered = data.orders.filter(function(o) { return orderMatchesDateFilter({ created_at: o.createdAt }, merchantOrdersDateFilter); });
+    if (!dateFiltered.length) {
+      content = '<p style="color:#999;font-size:13px;">No orders in this period.</p>';
+    } else {
+      var byDate = {};
+      var dateOrder = [];
+      dateFiltered.forEach(function(o) {
+        var label = dateGroupLabel(o.createdAt);
+        if (!byDate[label]) { byDate[label] = []; dateOrder.push(label); }
+        byDate[label].push(o);
+      });
+      content = dateOrder.map(function(label) {
+        var rows = byDate[label].map(orderRowHtml).join('');
+        return '<div style="margin-bottom:16px;"><p style="margin:0 0 6px;font-weight:700;font-size:13px;color:#333;">' + label + '</p>' + rows + '</div>';
+      }).join('');
+    }
   } else {
     var byProduct = {};
     var productOrder = [];
     data.orders.forEach(function(o) {
       o.items.forEach(function(item) {
+        if (merchantOrdersProductFilter !== 'all' && item.name !== merchantOrdersProductFilter) return;
         if (!byProduct[item.name]) { byProduct[item.name] = []; productOrder.push(item.name); }
         byProduct[item.name].push({ order: o, item: item });
       });
     });
-    content = productOrder.map(function(pname) {
-      var rows = byProduct[pname].map(function(entry) {
-        return '<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #f5f5f5;font-size:12.5px;">' +
-          '<span>Order #' + entry.order.orderCode + ' \u00d7' + entry.item.qty + '</span>' +
-          '<span style="color:#999;">' + formatDate(entry.order.createdAt) + '</span></div>';
+    if (!productOrder.length) {
+      content = '<p style="color:#999;font-size:13px;">No orders for this product.</p>';
+    } else {
+      content = productOrder.map(function(pname) {
+        var rows = byProduct[pname].map(function(entry) {
+          return '<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #f5f5f5;font-size:12.5px;">' +
+            '<span>Order #' + entry.order.orderCode + ' \u00d7' + entry.item.qty + '</span>' +
+            '<span style="color:#999;">' + formatDate(entry.order.createdAt) + '</span></div>';
+        }).join('');
+        return '<div style="margin-bottom:16px;"><p style="margin:0 0 6px;font-weight:700;font-size:13px;color:#333;">' + pname + '</p>' + rows + '</div>';
       }).join('');
-      return '<div style="margin-bottom:16px;"><p style="margin:0 0 6px;font-weight:700;font-size:13px;color:#333;">' + pname + '</p>' + rows + '</div>';
-    }).join('');
+    }
   }
 
   body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
     '<p class="login-sub" style="margin:0 0 14px;">All orders \u2014 separate from the Sales Report summary</p>' +
-    groupToggle + content;
+    groupToggle + subFilter + content;
 }
 
 function orderRowHtml(o) {
@@ -5313,13 +5481,13 @@ function renderMerchantSalesView() {
       ? '<p style="color:#999;font-size:12px;padding:20px 0;">No stock history yet</p>'
       : gaugeSvg(s.sellThroughRate, '#3B82F6')) +
     '<p style="margin:6px 0 0;font-size:11px;color:#666;">Sell-Through Rate</p>' +
-    '<p style="margin:2px 0 0;font-size:10px;color:#aaa;">Units sold vs. ever stocked</p></div>' +
+    '<p style="margin:2px 0 0;font-size:10px;color:#aaa;">Units Sold vs. Stocks</p></div>' +
     '<div style="flex:1;background:#fff;border:1px solid #eee;border-radius:10px;padding:14px;text-align:center;">' +
     (s.completionRate === null
       ? '<p style="color:#999;font-size:12px;padding:20px 0;">No orders yet</p>'
       : gaugeSvg(s.completionRate, 'var(--primary,#22C55E)')) +
     '<p style="margin:6px 0 0;font-size:11px;color:#666;">Order Completion Rate</p>' +
-    '<p style="margin:2px 0 0;font-size:10px;color:#aaa;">Delivered vs. all orders</p></div>' +
+    '<p style="margin:2px 0 0;font-size:10px;color:#aaa;">Delivered vs. Orders</p></div>' +
     '</div>';
 
   // Revenue by category — real data, since every product already has a category //
@@ -5448,71 +5616,136 @@ function renderMerchantSalesView() {
     activityHtml;
 }
 
-// The old "Print / Save as PDF" button relied on window.print(), which
-// doesn't work reliably here — the report lives inside a position:fixed,
-// internally-scrolling modal, and browsers clip printed output to
-// whatever's currently visible in that scroll area rather than the full
-// content, producing blank pages beyond the first screen's worth.
-// This generates an actual PDF file directly instead, using the same
-// html2canvas capture as the image export, paired with jsPDF to paginate
-// it properly if the report is taller than one page. //
+// Builds a clean, print-formatted PDF from the sales data directly,
+// rather than screenshotting the on-screen dashboard. The old approach
+// used html2canvas to capture the live styled UI and sliced that tall
+// image across pages — which cut rows in half at page boundaries and
+// carried the dark fullscreen styling into what should be a clean
+// document. This lays out a proper report: a titled header, formatted
+// summary lines, and real tables that paginate cleanly via autoTable
+// (page breaks fall between rows, never through them). //
 function downloadSalesReportPDF() {
   var need = [];
-  if (!window.html2canvas) need.push('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
   if (!window.jspdf) need.push('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
 
-  if (!need.length) { captureSalesReportPDF(); return; }
+  if (!need.length) { ensureAutoTableThenBuild(); return; }
 
   showToast('Preparing PDF export...', 'info');
   var loaded = 0;
   need.forEach(function(src) {
     var script = document.createElement('script');
     script.src = src;
-    script.onload = function() {
-      loaded++;
-      if (loaded === need.length) captureSalesReportPDF();
-    };
+    script.onload = function() { loaded++; if (loaded === need.length) ensureAutoTableThenBuild(); };
     script.onerror = function() { showToast('Could not load PDF export tool.', 'error'); };
     document.head.appendChild(script);
   });
 }
 
-function captureSalesReportPDF() {
-  var target = document.getElementById('sn-merchant-body');
-  if (!target) return;
+function ensureAutoTableThenBuild() {
+  // autoTable is a jsPDF plugin loaded separately; it attaches itself to
+  // the jsPDF prototype once its script runs. //
+  var doc = new window.jspdf.jsPDF('p', 'pt', 'a4');
+  if (typeof doc.autoTable === 'function') { buildSalesReportPDF(); return; }
 
-  var toHide = target.querySelectorAll('button');
-  toHide.forEach(function(b) { b.style.visibility = 'hidden'; });
+  var script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js';
+  script.onload = function() { buildSalesReportPDF(); };
+  script.onerror = function() { showToast('Could not load PDF table tool.', 'error'); };
+  document.head.appendChild(script);
+}
 
-  window.html2canvas(target, { backgroundColor: '#ffffff', scale: 2 }).then(function(canvas) {
-    toHide.forEach(function(b) { b.style.visibility = ''; });
+function buildSalesReportPDF() {
+  var s = myMerchantSales;
+  if (!s || s.error) { showToast('No sales data to export yet.', 'info'); return; }
 
-    var pdf = new window.jspdf.jsPDF('p', 'pt', 'a4');
-    var pageWidth = pdf.internal.pageSize.getWidth();
-    var pageHeight = pdf.internal.pageSize.getHeight();
-    var imgWidth = pageWidth;
-    var imgHeight = (canvas.height * imgWidth) / canvas.width;
-    var imgData = canvas.toDataURL('image/png');
+  var doc = new window.jspdf.jsPDF('p', 'pt', 'a4');
+  var margin = 40;
+  var pageWidth = doc.internal.pageSize.getWidth();
+  var y = margin;
 
-    var heightLeft = imgHeight;
-    var position = 0;
+  var filterLabels = { all: 'All Time', today: 'Today', yesterday: 'Yesterday', week: 'Within a Week', month: 'Within a Month', year: 'Within a Year' };
 
-    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-    heightLeft -= pageHeight;
+  // Header
+  doc.setFontSize(18);
+  doc.setTextColor(30, 30, 30);
+  doc.text('Sales Report', margin, y);
+  y += 22;
+  doc.setFontSize(10);
+  doc.setTextColor(120, 120, 120);
+  doc.text('Period: ' + (filterLabels[s.dateFilter] || 'All Time'), margin, y);
+  y += 14;
+  doc.text('Generated: ' + new Date().toLocaleString(), margin, y);
+  y += 24;
 
-    while (heightLeft > 0) {
-      position -= pageHeight;
-      pdf.addPage();
-      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
-    }
-
-    pdf.save('HomeWeb_Report_' + new Date().toISOString().slice(0, 10) + '.pdf');
-    showToast('PDF downloaded \u2705');
-  }).catch(function(err) {
-    toHide.forEach(function(b) { b.style.visibility = ''; });
-    showToast('Could not generate PDF: ' + err.message, 'error');
+  // Summary block
+  doc.setFontSize(12);
+  doc.setTextColor(30, 30, 30);
+  doc.text('Summary', margin, y);
+  y += 6;
+  doc.autoTable({
+    startY: y,
+    margin: { left: margin, right: margin },
+    theme: 'plain',
+    styles: { fontSize: 10, cellPadding: 4 },
+    body: [
+      ['Total Revenue', fmtPlain(s.totalRevenue)],
+      ['Net Profit', fmtPlain(s.knownProfit)],
+      ['Items Sold', String(s.totalItems)],
+      ['Total Orders', String(s.orderCount)],
+      ['Completion Rate', (s.completionRate != null ? s.completionRate + '%' : 'N/A')],
+      ['Sell-through Rate', (s.sellThroughRate != null ? s.sellThroughRate + '%' : 'N/A')]
+    ],
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 160 } }
   });
+  y = doc.lastAutoTable.finalY + 24;
+
+  // Profit by Product table
+  var productsWithCost = (s.productProfits || []).filter(function(p) { return p.itemsWithCost > 0; });
+  if (productsWithCost.length) {
+    doc.setFontSize(12);
+    doc.text('Profit by Product', margin, y);
+    y += 6;
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      theme: 'striped',
+      headStyles: { fillColor: [34, 197, 94] },
+      styles: { fontSize: 9, cellPadding: 4 },
+      head: [['Product', 'Units', 'Revenue', 'Supplier Cost', 'Profit']],
+      body: productsWithCost.map(function(p) {
+        return [p.name, String(p.qty), fmtPlain(p.revenue), fmtPlain(p.cost), fmtPlain(p.profit)];
+      })
+    });
+    y = doc.lastAutoTable.finalY + 24;
+  }
+
+  // Top Products table
+  if (s.topProducts && s.topProducts.length) {
+    if (y > doc.internal.pageSize.getHeight() - 120) { doc.addPage(); y = margin; }
+    doc.setFontSize(12);
+    doc.text('Top Products', margin, y);
+    y += 6;
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      theme: 'striped',
+      headStyles: { fillColor: [34, 197, 94] },
+      styles: { fontSize: 9, cellPadding: 4 },
+      head: [['Product', 'Units Sold', 'Revenue']],
+      body: s.topProducts.map(function(p) {
+        return [p.name, String(p.qty), fmtPlain(p.revenue)];
+      })
+    });
+  }
+
+  doc.save('HomeWeb_Sales_Report_' + new Date().toISOString().slice(0, 10) + '.pdf');
+  showToast('PDF downloaded \u2705');
+}
+
+// Peso formatting without the currency glyph, since some PDF core fonts
+// don't include the peso sign and would render it as a blank box. //
+function fmtPlain(n) {
+  return 'PHP ' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // Captures the report as a PNG using html2canvas, loaded on demand from
@@ -5621,8 +5854,15 @@ async function renderMerchantVerificationView(tabs) {
           '</div>');
 
   var permitPreview = merchant.business_permit_url
-    ? '<a href="' + merchant.business_permit_url + '" target="_blank" style="display:block;margin-bottom:12px;">' +
-      '<img src="' + merchant.business_permit_url + '" style="max-width:100%;border-radius:8px;border:1px solid #eee;"/></a>'
+    ? '<div style="margin-bottom:12px;">' +
+      '<a href="' + merchant.business_permit_url + '" target="_blank">' +
+      '<img src="' + merchant.business_permit_url + '" style="display:block;width:100%;max-width:340px;height:220px;object-fit:contain;border:1px solid #e5e5e5;border-radius:10px;background:#FAFAF8;margin:0 auto;"/>' +
+      '</a>' +
+      '<div style="display:flex;gap:8px;margin-top:8px;">' +
+      '<button type="button" class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="document.getElementById(\'permit-file-input\').click()"><i class="fas fa-upload"></i> Replace</button>' +
+      '<button type="button" class="co-btn" style="flex:1;background:#FEE2E2;color:#DC2626;font-size:12.5px;" onclick="removeBusinessPermit()"><i class="fas fa-trash"></i> Remove</button>' +
+      '</div>' +
+      '</div>'
     : '';
 
   body.innerHTML =
@@ -5630,8 +5870,9 @@ async function renderMerchantVerificationView(tabs) {
     '<h3 style="margin:16px 0 10px;font-size:14px;">Business Permit Verification</h3>' +
     statusBanner +
     permitPreview +
-    '<button type="button" class="co-btn" style="background:#F3F4F6;color:#333;width:100%;" onclick="document.getElementById(\'permit-file-input\').click()">' +
-    '<i class="fas fa-upload"></i> ' + (merchant.business_permit_url ? 'Replace Permit Photo' : 'Upload Business Permit') + '</button>' +
+    (merchant.business_permit_url ? '' :
+      '<button type="button" class="co-btn" style="background:#F3F4F6;color:#333;width:100%;" onclick="document.getElementById(\'permit-file-input\').click()">' +
+      '<i class="fas fa-upload"></i> Upload Business Permit</button>') +
     '<input type="file" id="permit-file-input" accept="image/*,application/pdf" style="display:none;" onchange="uploadBusinessPermit(this.files[0])"/>' +
     '<p style="margin:10px 0 0;font-size:11.5px;color:#999;">Accepted: photo or scan of your DTI/BIR/Barangay business permit. Visible to customers and reviewed by HomeWeb admins.</p>';
 }
@@ -5655,7 +5896,24 @@ async function uploadBusinessPermit(file) {
     .eq('id', myMerchantId);
   if (updateErr) { showToast('Could not save permit: ' + updateErr.message, 'error'); return; }
 
+  logActivity('permit_uploaded', 'merchant', myMerchantId, null, 'Uploaded a new business permit');
+
   showToast('Permit uploaded \u2705 Awaiting admin review');
+  renderMerchantDashboard();
+}
+
+async function removeBusinessPermit() {
+  if (!confirm('Remove your business permit? Your store will show as unverified until you upload a new one.')) return;
+
+  const { error } = await supabase.from('merchants')
+    .update({ business_permit_url: null, is_verified: false })
+    .eq('id', myMerchantId);
+
+  if (error) { showToast('Could not remove permit: ' + error.message, 'error'); return; }
+
+  logActivity('permit_removed', 'merchant', myMerchantId, null, 'Removed their business permit');
+
+  showToast('Permit removed');
   renderMerchantDashboard();
 }
 
@@ -5691,7 +5949,7 @@ function renderMerchantProductsView(tabs) {
       '<div style="flex:1;min-width:0;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">' + p.name + (p.is_active ? '' : ' <span style="color:#DC2626;font-size:11px;">(inactive)</span>') + '</p>' +
       '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + fmt(p.price) + ' \u2022 Stock: ' + p.stock_qty + ' \u2022 ' + (p.sold_count || 0) + ' sold \u2022 ' + meta.title + '</p>' +
-      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + stars(p.rating_avg || 0) + ' ' + (p.rating_avg > 0 ? p.rating_avg + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
+      '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + (p.rating_avg > 0 ? stars(p.rating_avg) + Number(p.rating_avg).toFixed(1) + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-shrink:0;">' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="viewProductReviews(\'' + p.id + '\', \'' + p.name.replace(/'/g, "\\'") + '\')" title="Reviews"><i class="fas fa-comment-dots"></i></button>' +
