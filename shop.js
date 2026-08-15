@@ -2887,7 +2887,7 @@ function renderOrderList() {
 
   var listHtml;
   if (!filtered.length) {
-    var emptyMsg = { to_ship: 'No orders waiting to ship.', to_receive: 'No orders on the way.', completed: 'No completed orders yet.' };
+    var emptyMsg = { to_ship: 'No orders to prepare.', to_receive: 'No orders on the way.', completed: 'No completed orders yet.' };
     listHtml = '<div class="track-empty"><p>' + emptyMsg[trackingActiveTab] + '</p></div>';
   } else {
     listHtml = '<div class="track-order-list">';
