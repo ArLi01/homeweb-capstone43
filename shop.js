@@ -1941,12 +1941,14 @@ function renderCheckout() {
     }).join('');
 
     const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    const ship = calcDeliveryFee(sub);
+    const shipBreakdown = calcDeliveryFeeBreakdown(shippingInfo.city, sub);
+    const ship = shipBreakdown.total;
 
     body = '<div class="co-cart-list">' + rows + '</div>' +
       '<div class="co-summary">' +
       '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
       '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
+      deliverySurchargeNoteHtml(shipBreakdown) +
       '<div class="co-summary-row total"><span>Total</span><span>' + fmt(sub + ship) + '</span></div>' +
       '</div>';
 
@@ -1962,7 +1964,14 @@ function renderCheckout() {
       '<div class="co-field"><label>Street Address <span class="co-required">*</span></label><input type="text" id="co-street" placeholder="House No., Street" value="' + shippingInfo.street + '"/><span class="co-field-error">Street address is required</span></div>' +
       '<div class="co-form-row">' +
       '<div class="co-field"><label>Barangay <span class="co-required">*</span></label><input type="text" id="co-barangay" placeholder="e.g. Cabalabaguan" value="' + (shippingInfo.barangay || '') + '"/><span class="co-field-error">Barangay is required \u2014 used to match you with nearby riders</span></div>' +
-      '<div class="co-field"><label>City / Municipality <span class="co-required">*</span></label><input type="text" id="co-city" placeholder="Sta. Barbara" value="' + shippingInfo.city + '"/><span class="co-field-error">City is required</span></div>' +
+      '<div class="co-field"><label>City / Municipality <span class="co-required">*</span></label>' +
+      '<select id="co-city" onchange="updateCheckoutDeliveryEstimate()">' +
+      Object.keys(MUNICIPALITY_DISTANCES).map(function(name) {
+        return '<option value="' + name + '"' + (shippingInfo.city === name ? ' selected' : '') + '>' + name + '</option>';
+      }).join('') +
+      '</select>' +
+      '<p id="co-delivery-estimate" style="margin:4px 0 0;font-size:11.5px;color:#666;"><i class="fas fa-motorcycle"></i> Delivery fee: ' + fmt(calcDeliveryFee(shippingInfo.city, cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0))) + '</p>' +
+      '<span class="co-field-error">City is required</span></div>' +
       '</div>' +
       '<div class="co-field"><label>ZIP Code <span class="co-required">*</span></label><input type="text" id="co-zip" placeholder="5002" value="' + shippingInfo.zip + '"/><span class="co-field-error">ZIP code is required</span></div>' +
       '<div class="co-field"><label>Estimated Delivery Time</label>' +
@@ -1993,7 +2002,8 @@ function renderCheckout() {
 
     var groupsHtml = groups.map(function(g) {
       var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-      var ship = calcDeliveryFee(sub);
+      var shipBreakdown = calcDeliveryFeeBreakdown(shippingInfo.city, sub);
+      var ship = shipBreakdown.total;
       grandTotal += sub + ship;
       var itemList = g.items.map(function(i) {
         return '<li><span>' + i.name + ' (' + (i.unit || 'pc') + ') \u00D7 ' + i.qty + '</span><span>' + fmt(i.price * i.qty) + '</span></li>';
@@ -2006,6 +2016,7 @@ function renderCheckout() {
         '<div class="co-summary" style="margin-top:8px;">' +
         '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
         '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
+        deliverySurchargeNoteHtml(shipBreakdown) +
         '<div class="co-summary-row total"><span>Order Total</span><span>' + fmt(sub + ship) + '</span></div>' +
         '</div></div>';
     }).join('');
@@ -2079,6 +2090,15 @@ function validateShippingForm() {
   });
 
   if (firstInvalidEl) firstInvalidEl.focus();
+
+  // Even if every field is filled, block proceeding if the selected
+  // municipality is outside our delivery range. //
+  var cityEl = document.getElementById('co-city');
+  if (isValid && cityEl && !isWithinDeliveryRange(cityEl.value)) {
+    isValid = false;
+    showToast('Sorry, we don\'t deliver to this area yet.', 'error');
+  }
+
   return isValid;
 }
 
@@ -2190,7 +2210,7 @@ function gcashOrderTotal() {
   var groups = groupCartByMerchant();
   return groups.reduce(function(total, g) {
     var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    return total + sub + calcDeliveryFee(sub);
+    return total + sub + calcDeliveryFee(shippingInfo.city, sub);
   }, 0);
 }
 
@@ -2315,11 +2335,112 @@ function groupCartByMerchant() {
   return order.map(function(k) { return groups[k]; });
 }
 
-// Delivery fee: free at ₱200+, otherwise a small fee that's capped at the
-// subtotal itself so it can never cost more than the products being bought. //
-function calcDeliveryFee(sub) {
-  if (sub >= 200) return 0;
-  return Math.min(49, Math.round(sub));
+// Approximate road distances (in km) from the Sta. Barbara Public Market
+// to nearby municipalities and Iloilo City. These are reasonable estimates
+// for demo/capstone purposes, not live GPS/routing data — adding a real
+// geocoding API this close to the defense would introduce external cost,
+// quota limits, and an internet-dependency risk during a live demo. The
+// list covers Sta. Barbara itself plus the municipalities/city districts
+// a Sta. Barbara Market customer would realistically order from. //
+var MUNICIPALITY_DISTANCES = {
+  'Sta. Barbara': 1,
+  'New Lucena': 6,
+  'San Miguel': 9,
+  'Cabatuan': 8,
+  'Zarraga': 12,
+  'Alimodian': 11,
+  'Leganes': 15,
+  'Leon': 17,
+  'Pavia': 10,
+  'Oton': 15,
+  'Iloilo City \u2014 Jaro': 13,
+  'Iloilo City \u2014 City Proper': 17,
+  'Pototan': 20,
+  'Dingle': 22
+};
+
+var MAX_DELIVERY_KM = 25; // beyond this, we don't offer delivery yet
+
+// Distance brackets — flat fee per zone rather than a smooth per-km
+// formula, matching how real local courier services actually price
+// (LBC, motorcycle couriers, etc. price in zones, not continuous rates).
+// If a distance falls between two brackets, the HIGHER bracket applies. //
+var DELIVERY_FEE_BRACKETS = [
+  { min: 0, max: 2, fee: 49 },
+  { min: 3, max: 5, fee: 69 },
+  { min: 6, max: 10, fee: 99 },
+  { min: 11, max: 15, fee: 129 },
+  { min: 16, max: 20, fee: 159 },
+  { min: 21, max: 25, fee: 189 }
+];
+
+function getDeliveryBracket(distance) {
+  for (var i = 0; i < DELIVERY_FEE_BRACKETS.length; i++) {
+    if (distance <= DELIVERY_FEE_BRACKETS[i].max) return DELIVERY_FEE_BRACKETS[i];
+  }
+  return null; // beyond every bracket — out of delivery range
+}
+
+// Returns the full fee breakdown (base bracket + any surcharges), not just
+// the total — so the checkout can show the customer exactly what they're
+// paying for, rather than a single mystery number. Surcharges are
+// deliberately kept to things we can check locally (clock time, cart
+// subtotal) — no external weather API, since that would introduce cost,
+// rate limits, and an internet-dependency risk during a live demo for a
+// cosmetic feature. //
+function calcDeliveryFeeBreakdown(municipality, subtotal) {
+  var distance = MUNICIPALITY_DISTANCES[municipality];
+  if (distance === undefined) distance = 1; // unknown/legacy address, treat as local
+
+  var bracket = getDeliveryBracket(distance);
+  var baseFee = bracket ? bracket.fee : DELIVERY_FEE_BRACKETS[DELIVERY_FEE_BRACKETS.length - 1].fee;
+
+  var surcharges = [];
+  var hour = new Date().getHours();
+  var isPeak = (hour >= 11 && hour < 13) || (hour >= 17 && hour < 20);
+  if (isPeak) surcharges.push({ label: 'Peak hours', amount: 15 });
+  if (subtotal !== undefined && subtotal !== null && subtotal < 100) surcharges.push({ label: 'Small order', amount: 10 });
+
+  var total = baseFee + surcharges.reduce(function(sum, s) { return sum + s.amount; }, 0);
+  return { distance: distance, baseFee: baseFee, surcharges: surcharges, total: total };
+}
+
+function calcDeliveryFee(municipality, subtotal) {
+  return calcDeliveryFeeBreakdown(municipality, subtotal).total;
+}
+
+function isWithinDeliveryRange(municipality) {
+  var distance = MUNICIPALITY_DISTANCES[municipality];
+  if (distance === undefined) return true; // unrecognized value shouldn't hard-block existing data
+  return distance <= MAX_DELIVERY_KM;
+}
+
+// Small note under the Delivery Fee row listing which surcharges applied
+// (e.g. "+₱15 peak hours"), so the total is never a mystery number. //
+function deliverySurchargeNoteHtml(breakdown) {
+  if (!breakdown.surcharges.length) return '';
+  var parts = breakdown.surcharges.map(function(s) { return '+' + fmt(s.amount) + ' ' + s.label.toLowerCase(); });
+  return '<p style="margin:2px 0 6px;font-size:11px;color:#999;text-align:right;">' + parts.join(', ') + '</p>';
+}
+
+// Updates the fee note live as the customer changes the municipality
+// dropdown, so they see exactly what they'll pay before submitting. //
+function updateCheckoutDeliveryEstimate() {
+  var select = document.getElementById('co-city');
+  var note = document.getElementById('co-delivery-estimate');
+  if (!select || !note) return;
+  var city = select.value;
+
+  if (!isWithinDeliveryRange(city)) {
+    note.innerHTML = '<i class="fas fa-triangle-exclamation" style="color:#DC2626;"></i> <span style="color:#DC2626;">Sorry, this area is outside our delivery range.</span>';
+    return;
+  }
+  var sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+  var breakdown = calcDeliveryFeeBreakdown(city, sub);
+  var surchargeText = breakdown.surcharges.length
+    ? ' <span style="color:#B45309;">(' + breakdown.surcharges.map(function(s) { return '+' + fmt(s.amount) + ' ' + s.label.toLowerCase(); }).join(', ') + ')</span>'
+    : '';
+  note.innerHTML = '<i class="fas fa-motorcycle"></i> Delivery fee: ' + fmt(breakdown.total) + surchargeText;
 }
 
 function randomBetween(min, max) {
@@ -2383,10 +2504,18 @@ async function placeOrder() {
   var groups = groupCartByMerchant();
   var placedOrders = []; // { id, code, merchantName, total }
 
+  // Final safety check — the shipping form already validates this, but
+  // don't let an order through if the selected municipality somehow ended
+  // up outside our delivery range. //
+  if (!isWithinDeliveryRange(shippingInfo.city)) {
+    showToast('Sorry, we don\'t deliver to this area yet.', 'error');
+    return;
+  }
+
   for (var g = 0; g < groups.length; g++) {
     var group = groups[g];
     var sub = group.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    var shipFee = calcDeliveryFee(sub);
+    var shipFee = calcDeliveryFee(shippingInfo.city, sub);
     var orderCode = groups.length > 1 ? baseCode + '-' + String.fromCharCode(65 + g) : baseCode;
 
     const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
@@ -2874,7 +3003,7 @@ function renderOrderList() {
   var counts = { to_ship: 0, to_receive: 0, completed: 0 };
   orders.forEach(function(o) { counts[orderTrackingCategory(o.status)]++; });
 
-  var tabDefs = [['to_ship', 'To Prepare'], ['to_receive', 'To Receive'], ['completed', 'Completed']];
+  var tabDefs = [['to_ship', 'To Ship'], ['to_receive', 'To Receive'], ['completed', 'Completed']];
   var tabsHtml = '<div style="display:flex;gap:6px;margin-bottom:14px;">' +
     tabDefs.map(function(t) {
       var active = trackingActiveTab === t[0];
@@ -2887,7 +3016,7 @@ function renderOrderList() {
 
   var listHtml;
   if (!filtered.length) {
-    var emptyMsg = { to_ship: 'No orders to prepare.', to_receive: 'No orders on the way.', completed: 'No completed orders yet.' };
+    var emptyMsg = { to_ship: 'No orders waiting to ship.', to_receive: 'No orders on the way.', completed: 'No completed orders yet.' };
     listHtml = '<div class="track-empty"><p>' + emptyMsg[trackingActiveTab] + '</p></div>';
   } else {
     listHtml = '<div class="track-order-list">';
@@ -3708,9 +3837,12 @@ async function renderAdminMerchants() {
       }).join('');
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
-    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">' +
     '<span>Merchants</span>' +
+    '<span style="display:flex;gap:6px;">' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openSuspensionPolicyModal()"><i class="fas fa-gavel"></i> Suspension Policy</button>' +
     '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'merchant\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</span>' +
     '</h3>' + searchBar + filterBar + rows;
 }
 
@@ -3720,6 +3852,46 @@ async function adminSetMerchantVerified(merchantId, verified) {
   logActivity(verified ? 'merchant_verified' : 'merchant_verification_revoked', 'merchant', merchantId, null, null);
   showToast(verified ? 'Merchant verified \u2705' : 'Verification revoked', 'info');
   renderAdminMerchants();
+}
+
+// Defines concrete grounds for suspending a vendor or rider — grounded in
+// what the system actually tracks (filed reports, a rider's accumulated
+// rejection_penalty, non-delivery disputes) rather than vague language, so
+// an admin can point to a specific, real condition when suspending someone,
+// and it's defensible as an actual policy rather than just aspirational
+// text. Reachable from both the Merchants and Riders tabs. //
+function openSuspensionPolicyModal() {
+  var body = document.getElementById('sn-help-body');
+  body.innerHTML =
+    '<div class="login-icon"><i class="fas fa-gavel"></i></div>' +
+    '<h2>Grounds for Suspension</h2>' +
+    '<p class="login-sub">What justifies restricting a vendor or rider\'s access</p>' +
+    '<div style="text-align:left;margin-top:14px;">' +
+    sellerInfoSection('Vendor (Merchant) Violations', 'fa-store-slash', sellerBullets([
+      '<b>Repeated order failure</b> \u2014 consistently not preparing or fulfilling accepted orders',
+      '<b>Prohibited listings</b> \u2014 selling illegal, counterfeit, expired, or otherwise unsafe products',
+      '<b>False product information</b> \u2014 prices, quality, or availability that repeatedly don\'t match what\'s delivered',
+      '<b>Multiple verified customer reports</b> \u2014 several distinct, substantiated complaints filed against the same store',
+      '<b>Fraudulent activity</b> \u2014 fake listings, manipulated ratings/reviews, or permit fraud',
+      '<b>Abusive conduct</b> \u2014 disrespectful or unprofessional treatment of customers or riders'
+    ])) +
+    sellerInfoSection('Rider Violations', 'fa-motorcycle',
+      '<p style="margin:0 0 6px;">The system already tracks two of these automatically \u2014 a rider\'s rejection penalty (accumulates on repeated declined deliveries) and non-delivery disputes (customer reports of "not received"), both visible on the rider\'s profile.</p>' +
+      sellerBullets([
+        '<b>Excessive delivery rejections</b> \u2014 a high accumulated rejection penalty from repeatedly declining assigned deliveries',
+        '<b>Repeated non-delivery disputes</b> \u2014 multiple customer reports that an order was never actually received',
+        '<b>Delivery fraud</b> \u2014 marking an order delivered (with proof-of-delivery photo) that the customer genuinely never received',
+        '<b>Multiple verified customer reports</b> \u2014 several distinct, substantiated complaints against the same rider',
+        '<b>Unsafe or reckless conduct</b> \u2014 behavior that puts orders, customers, or the platform\'s reputation at risk',
+        '<b>Persistent unavailability</b> \u2014 marked online but consistently failing to respond to alerts'
+      ])) +
+    sellerInfoSection('How This Is Applied', 'fa-scale-balanced',
+      'A single isolated incident is generally a warning, not a suspension \u2014 the "repeated" and "multiple" language above is deliberate. Suspension is for a pattern, or for a serious single violation (fraud, prohibited products, delivery fraud). Every suspension requires the admin to enter a reason, which is recorded in the Activity Log for accountability.') +
+    '</div>';
+
+  document.getElementById('sn-helpOverlay').classList.add('active');
+  document.getElementById('sn-helpModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
 }
 
 // Suspends a merchant's store — hides their products from the storefront
@@ -3800,9 +3972,12 @@ async function renderAdminRiders() {
       }).join('');
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
-    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">' +
     '<span>All Riders (' + (riders ? riders.length : 0) + ')</span>' +
+    '<span style="display:flex;gap:6px;">' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openSuspensionPolicyModal()"><i class="fas fa-gavel"></i> Suspension Policy</button>' +
     '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'rider\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</span>' +
     '</h3>' + searchBar + rows;
 }
 
