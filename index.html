@@ -13,7 +13,8 @@
 <!-- TOP BAR -->
 <div class="topbar">
 	<div class="topbar-inner">
-		<span class="topbar-promo">Free delivery on orders over &#8369;200 &middot; Fresh from sellers near you</span>
+		<!-- #GLOBAL_TOPBAR_PROMO -->
+		<span class="topbar-promo">Fresh from sellers near you</span>
 		<div class="topbar-right">
 			<a href="#" class="sn-notif-link" onclick="openNotificationsModal(event); return false;">
 				<i class="fas fa-bell"></i> Notifications
@@ -38,6 +39,7 @@
 			<span class="logo-icon"><i class="fas fa-shopping-bag"></i></span>
 			<span class="logo-text">HomeWeb</span>
 		</div>
+		<!-- #CUSTOMER_SEARCH_BAR_HTML -->
 		<div class="search-bar">
 			<div class="search-input-wrap">
 				<input type="text" id="site-search-input" name="site_search_query" autocomplete="off" data-lpignore="true" data-1p-ignore readonly onfocus="this.removeAttribute('readonly')" placeholder="Search: products, categories..." />
@@ -114,9 +116,9 @@
 
 			<a class="cat-card" href="category.html?cat=drinks">
 				<div class="cat-icon">
-					<img src="https://images.unsplash.com/photo-1506617420156-8e4536971650?w=200&h=200&fit=crop&q=80&auto=format" alt="Drinks" loading="lazy"/>
+					<img src="https://images.unsplash.com/photo-1506617420156-8e4536971650?w=200&h=200&fit=crop&q=80&auto=format" alt="Beverages" loading="lazy"/>
 				</div>
-				<span>Drinks</span>
+				<span>Beverages</span>
 			</a>
 
 		</div>
@@ -134,6 +136,7 @@
 			<button type="button" class="rec-toggle-btn active" data-rec="products" onclick="switchRecommendMode('products')">Products</button>
 			<button type="button" class="rec-toggle-btn" data-rec="merchants" onclick="switchRecommendMode('merchants')">Stores</button>
 		</div>
+		<!-- #CUSTOMER_RECOMMENDATIONS_GRID -->
 		<div class="product-grid" id="home-product-grid">
 			<p style="color:#999;padding:2rem;">Loading products...</p>
 		</div>
@@ -144,6 +147,7 @@
 
 
 <!-- FOOTER -->
+<!-- #GLOBAL_FOOTER -->
 <footer class="footer">
 	<div class="footer-inner">
 		<div class="footer-col">

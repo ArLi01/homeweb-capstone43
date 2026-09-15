@@ -8,7 +8,7 @@ var CATEGORY_META = {
   meat:      { title: 'Meat',           bg: '#FFF0F0', color: '#EF4444', icon: 'fa-drumstick-bite' },
   seafood:   { title: 'Sea Food',       bg: '#F0F8FF', color: '#3B82F6', icon: 'fa-fish-fins' },
   sarisari:  { title: 'Sari-sari Store',bg: '#FFFBEB', color: '#F59E0B', icon: 'fa-store' },
-  drinks:    { title: 'Drinks',         bg: '#EFF6FF', color: '#0EA5E9', icon: 'fa-bottle-water' },
+  drinks:    { title: 'Beverages',      bg: '#EFF6FF', color: '#0EA5E9', icon: 'fa-bottle-water' },
   other:     { title: 'Other',          bg: '#F9F9F9', color: '#888888', icon: 'fa-box' }
 };
 var DEFAULT_CATEGORY_META = { bg: '#F9F9F9', color: '#CBD5E1', icon: 'fa-box' };
@@ -91,77 +91,32 @@ function productStatsLabel(p) {
   return parts.join(' \u2022 ');
 }
 
-function fmtPrice(n) {
-  return '\u20B1' + Number(n).toLocaleString();
+// Many market vendors don't have an email address and only use a mobile
+// number — Supabase Auth still requires SOME email internally to create
+// an account, so when no real email is given, we generate one from the
+// phone number instead. This stays entirely behind the scenes: the
+// person never sees or needs to know this string exists, they just sign
+// up and log in with their phone number like normal. //
+function normalizePhoneDigits(phone) {
+  return (phone || '').replace(/\D/g, '');
 }
 
-// Renders a star rating with pixel-precise fractional fill (4.5 shows as
-// 4 full + exactly half; 3.8 shows as 3 full + exactly 3/4, not just
-// rounded to the nearest half-star) by overlaying a full-color star row
-// clipped to the exact percentage on top of a grey empty-star row. //
-// Renders a star rating with genuinely precise fractional fill (4.5
-// shows as 4 solid stars + exactly half; 3.8 shows as 3 solid stars +
-// exactly 3/4). The previous version clipped a percentage-width overlay
-// against a 5-character string inside a shrink-to-fit container — that's
-// a real CSS ambiguity (the containing block's computed width for the
-// percentage can subtly disagree with the shrink-to-fit content width,
-// especially with letter-spacing on multi-glyph text), and in practice
-// it was silently rounding up to look like 5 full stars regardless of
-// the actual rating. This version sidesteps that entirely: full and
-// empty stars are just individually-colored characters — no clipping,
-// no ambiguity — and at most ONE character ever needs a partial fill,
-// using an explicit fixed pixel width instead of a percentage of an
-// unreliable shrink-to-fit parent. //
-// Renders a star rating using real SVG star shapes, not clipped text
-// characters. This matters: a Unicode ★ glyph's internal shape varies by
-// font and has uneven padding around its points, so clipping it at a
-// mathematically-correct 50% width doesn't visually read as "half a
-// star" — the clip cuts through an irregular shape, not a clean vector
-// path, and mixing plain text glyphs with absolutely-positioned wrapper
-// spans is also what caused the misalignment. Every position here is the
-// exact same SVG element with only its fill-clip percentage changed, so
-// all 5 are guaranteed to sit on the same baseline, and a real vector
-// star clips predictably at any percentage — this is the same technique
-// Google/Amazon-style rating widgets use, not a shortcut. //
-// Renders a star rating using real Font Awesome star icons — full, half,
-// and empty — instead of clipping a custom star shape by percentage.
-// Three previous attempts at continuous-precision clipping each fixed
-// one visual artifact but exposed another (misaligned partial star, then
-// a partial fill that visually read as fuller than its true percentage,
-// then a diagonal-looking clip boundary). That last one turned out to be
-// a genuine geometric limitation, not a bug: a 5-pointed star's outline
-// is diagonal almost everywhere, so any straight clip through it will
-// visually appear to follow a slant, no matter how carefully the
-// percentage is calculated. Real half-star icons don't have this
-// problem — they're professionally drawn to look correct, not derived
-// by cutting a full star in half. The tradeoff: precision drops from
-// continuous/quarter-star to half-star (3.8 now shows as 4 stars, not
-// "3 full + 3/4"), but every rating renders cleanly with zero artifacts,
-// and it uses the same icon font already relied on everywhere else in
-// the app, guaranteeing consistent baseline alignment for free. //
-// Renders a star rating with continuous, accurate percentage precision
-// (4.4 looks meaningfully different from 4.6 or 4.7, matching how real
-// e-commerce sites display ratings) using real Font Awesome icons in a
-// back/front overlay — a grey full row underneath, a colored row on top
-// clipped to the exact percentage. Same technique used widely in
-// production star-rating widgets. Font size is inherited from whatever
-// wraps this, same as any other icon. //
-// Half-star precision using real Font Awesome icons (full / half / empty).
-// This is the version that provably rendered cleanly — self-contained
-// inline styles, no two-layer overlay to misalign. Precision is to the
-// nearest half star: 4.5 shows 4 full + half; 3.8 rounds to 4.0. The
-// exact decimal is always shown as text right beside the stars (matching
-// how Shopee/Amazon do it), so the number carries the fine precision
-// while the stars give the at-a-glance read. //
-// AGGREGATE rating display — a single star + the exact number (e.g.
-// "4.6"). This is the default for averaged ratings across the site.
-// Rationale: five tiny stars physically cannot show the eye the
-// difference between 4.5 and 4.7, so the row was doing visual work it
-// couldn't deliver; the number carries full 0.1 precision with zero
-// rendering fragility. Same pattern used by Google Maps, Play Store,
-// IMDb, etc. Callers already print the number themselves in most places,
-// so this returns JUST the star icon — but where a caller relied on the
-// old function to also imply the value, the number beside it still shows.
+function phoneToSyntheticEmail(phone) {
+  return normalizePhoneDigits(phone) + '@homeweb.local';
+}
+
+function looksLikePhone(value) {
+  return /^09\d{9}$/.test(normalizePhoneDigits(value));
+}
+
+function fmtPrice(n) {
+  return '\u20B1' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Single star + exact number for averaged ratings (five tiny stars can't
+// show the difference between 4.5 and 4.7, the number can). Individual
+// review stars use reviewStarsHTML() below instead. //
+// #GLOBAL_STAR_RATING
 function starsHTML(n) {
   n = Math.max(0, Math.min(5, Number(n) || 0));
   // No star at all when there's no rating yet — a lone orange star with
@@ -172,11 +127,8 @@ function starsHTML(n) {
 
 function stars(n) { return starsHTML(n); }
 
-// INDIVIDUAL review display — shows the actual whole-number rating a
-// single reviewer gave (always an integer 1-5, chosen by tapping stars),
-// as filled/empty stars. Kept separate from the aggregate display on
-// purpose: collapsing one person's "4 out of 5" into "1 star + 4.0"
-// would read oddly. Used only where a specific review's rating is shown.
+// individual review's whole-number rating as filled/empty stars —
+// kept separate from the averaged display above
 function reviewStarsHTML(n) {
   n = Math.max(0, Math.min(5, Math.round(Number(n) || 0)));
   var html = '<span style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;">';
@@ -188,6 +140,7 @@ function reviewStarsHTML(n) {
 }
 
 // Shared product card markup used by both the homepage and category page //
+// #CUSTOMER_PRODUCT_CARD
 function renderProductCardHtml(p) {
   var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
   var badge = p.discount
@@ -218,7 +171,7 @@ function renderProductCardHtml(p) {
 function stockLabelHtml(qty) {
   if (typeof qty !== 'number') return '';
   if (qty <= 0) {
-    return '<p class="product-location" style="color:#DC2626;font-weight:600;"><i class="fas fa-ban"></i> Out of stock</p>';
+    return '<p class="product-location" style="color:#DC2626;font-weight:600;"><i class="fas fa-ban"></i> Sold Out</p>';
   }
   if (qty <= 5) {
     return '<p class="product-location" style="color:#DC2626;font-weight:600;"><i class="fas fa-box"></i> Only ' + qty + ' left</p>';
@@ -230,14 +183,8 @@ function stockLabelHtml(qty) {
 }
 
 // Render the homepage "Recommended For You" grid //
-// Recommendations are scored on two signals, per spec:
-//   1. Recent sold trend — units sold in the last 30 days (not lifetime
-//      sales), so a product that's selling *now* is favoured over one
-//      that sold a lot months ago and has since gone quiet.
-//   2. Rating quality — the average rating, weighted by how many ratings
-//      back it (a 5.0 from one review shouldn't outrank a 4.7 from forty).
-// The two are normalised to 0-1 against the current best in each signal,
-// then combined, so neither can dominate purely by raw magnitude. //
+// Scored on 2 signals: recent sales (last 30 days, not lifetime) and
+// rating (weighted by review count so 1 review can't beat 40). //
 var recentSalesByProduct = {};
 
 async function loadRecentSalesTrend() {
@@ -272,6 +219,7 @@ function recommendationScore(p, maxRecent) {
   return recentNorm * 0.6 + ratingNorm * 0.4;
 }
 
+// #CUSTOMER_RECOMMENDATIONS
 function renderHomeProducts() {
   var grid = document.getElementById('home-product-grid');
   if (!grid) return;
@@ -300,6 +248,7 @@ function renderHomeProducts() {
 
 let recommendMode = 'products'; // 'products' | 'merchants'
 
+// #CUSTOMER_RECOMMENDATIONS_TOGGLE
 function switchRecommendMode(mode) {
   recommendMode = mode;
   var toggle = document.getElementById('rec-toggle');
@@ -321,11 +270,7 @@ function switchRecommendMode(mode) {
   }
 }
 
-// Store-level recommendations — the "by merchants" side of the toggle.
-// Each store is scored on the SAME two signals as products, but
-// aggregated: the store's total recent sales (summed across its
-// products) and its overall rating (weighted by review volume). Same
-// 60/40 recent-sales/rating split, same review-count dampening. //
+// Same scoring as products above, aggregated to store level. //
 function renderHomeMerchants() {
   var mGrid = document.getElementById('home-merchant-grid');
   if (!mGrid) return;
@@ -419,35 +364,23 @@ function renderCategoryPage() {
 
 
 //  STATE //
-let cart = JSON.parse(localStorage.getItem('shopnow_cart') || '[]');
+let cart = [];
 let currentProduct = null;    
 let checkoutStep = 1;         
 let currentUser = null;
 var pendingPasswordRecovery = false;
 
-// Subscribed immediately, at the top of the script — not nested inside an
-// async function called later from DOMContentLoaded. This matters: Supabase
-// starts scanning the URL for a password-reset token the instant the client
-// is created, and fires PASSWORD_RECOVERY as soon as that async check
-// resolves. If our listener isn't already registered by then, the event
-// fires on an empty listener list and is silently missed — which is
-// exactly what caused the reset link to log the user in normally instead
-// of prompting for a new password. //
+// Has to be registered here at the top, not inside DOMContentLoaded —
+// Supabase fires PASSWORD_RECOVERY almost immediately on page load, and
+// we missed it before when this was set up later. //
 supabase.auth.onAuthStateChange(async function(event, session) {
   currentUser = session ? session.user : null;
 
-  // This must be awaited BEFORE updateAuthUI() runs. Individual login
-  // functions (submitLogin, submitAdminLogin, etc.) also fetch roles on
-  // their own, but this listener fires independently and can't rely on
-  // that timing — Supabase fires this automatically whenever the auth
-  // state changes, and there's no guarantee it runs after (rather than
-  // interleaved with) whatever a specific login function is doing. Without
-  // this, there's a real window where currentUser has already switched to
-  // the new account but userRoles still holds the PREVIOUS session's
-  // roles, and updateAuthUI() renders using that mismatched pairing —
-  // which is exactly how an admin session's role could visually leak
-  // onto whichever account logs in next. //
+  // Must await before updateAuthUI() — otherwise there's a window where
+  // currentUser already switched but userRoles is still the old
+  // session's, which is how an admin role could leak to the next login. //
   await fetchUserRoles();
+  loadCartForCurrentUser();
 
   updateAuthUI();
   updateNotifBadge();
@@ -455,10 +388,8 @@ supabase.auth.onAuthStateChange(async function(event, session) {
   if (currentUser) startRiderAlertPolling(); else stopRiderAlertPolling();
 
   if (event === 'PASSWORD_RECOVERY') {
-    // The reset-password modal is injected dynamically by injectModals(),
-    // which only runs once DOMContentLoaded fires — this event can arrive
-    // before that. If the modal isn't in the DOM yet, flag it and let the
-    // init block show it right after injecting modals instead. //
+    // Modal might not be in the DOM yet if this fires before
+    // DOMContentLoaded — flag it and show it after modals are injected. //
     if (document.getElementById('sn-resetModal')) {
       openSetNewPasswordModal();
     } else {
@@ -484,13 +415,35 @@ let selectedPaymentMethod = 'cod';
 let orders = [];
 
 //  HELPERS //
-const fmt = n => '\u20B1' + Number(n).toLocaleString();
+// #GLOBAL_CURRENCY_FORMAT
+const fmt = n => '\u20B1' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // Star rating icons //
 
 // Save cart localStorage //
+// Each account has its own cart key so logging into a different account
+// never shows someone else's items — this is what was missing before,
+// causing a freshly logged-in account to inherit whatever was left in
+// the single shared cart key from the previous session. //
+function cartStorageKey() {
+  return currentUser ? ('shopnow_cart_' + currentUser.id) : 'shopnow_cart_guest';
+}
+
 function saveCart() {
-  localStorage.setItem('shopnow_cart', JSON.stringify(cart));
+  localStorage.setItem(cartStorageKey(), JSON.stringify(cart));
+}
+
+// Called whenever the logged-in account changes (login, logout, signup) —
+// loads whatever cart belongs to the NEW current account/guest state,
+// replacing whatever was in memory from before. //
+function loadCartForCurrentUser() {
+  cart = JSON.parse(localStorage.getItem(cartStorageKey()) || '[]');
+  updateCartBadge();
+  // If the cart drawer/checkout happens to be open when this fires,
+  // refresh what it's showing too, not just the badge count. //
+  if (typeof renderCheckout === 'function' && document.getElementById('sn-checkoutModal') && document.getElementById('sn-checkoutModal').classList.contains('active')) {
+    renderCheckout();
+  }
 }
 
 function updateCartBadge() {
@@ -597,6 +550,7 @@ function filterProducts(query) {
   }
 }
 
+// #CUSTOMER_SEARCH_BAR
 function initSearch() {
   var input = document.querySelector(
     'input[type="search"], ' +
@@ -654,10 +608,8 @@ function initSearch() {
   }
 }
 
-// Predictive search suggestions drawn from real data already loaded —
-// matching product names and store names. Purely additive: clicking a
-// suggestion just fills the box and runs the same filter that typing
-// would, so it can't break the existing search behavior. //
+// Suggestions pulled from real loaded product/store names. //
+// #CUSTOMER_SEARCH_SUGGESTIONS
 function renderSearchSuggestions(query, input) {
   var box = document.getElementById('search-suggest-box');
   if (!box) {
@@ -749,13 +701,13 @@ function attachCardClicks() {
 }
 
 // PRODUCT MODAL //
+// #CUSTOMER_PRODUCT_MODAL
 function openProductModal(id) {
   const p = products.find(function(x) { return x.id === id; });
   if (!p) return;
   currentProduct = Object.assign({}, p, { qty: 1 });
 
-  // If opened from within a store view, hide it first so the product
-  // modal is never stuck stacking behind it //
+  // Close the store view first so this doesn't stack behind it //
   var storeModal = document.getElementById('sn-storeModal');
   if (storeModal && storeModal.classList.contains('active')) {
     document.getElementById('sn-storeOverlay').classList.remove('active');
@@ -795,9 +747,8 @@ function openProductModal(id) {
   refreshProductStats(p.id);
 }
 
-// The global `products` cache is loaded once at page load, so ratings and
-// sold counts go stale as soon as anyone else reviews or buys the item.
-// Re-fetch the live numbers whenever a product is actually opened. //
+// products cache goes stale fast (ratings/stock change often), so
+// re-fetch fresh numbers when a product is actually opened //
 async function refreshProductStats(productId) {
   const { data, error } = await supabase
     .from('products')
@@ -875,6 +826,7 @@ async function loadAndRenderReviews(productId) {
 
 var reviewsVisibleCount = 5;
 
+// #CUSTOMER_REVIEWS_DISPLAY
 function renderReviewsList(visibleCount) {
   var container = document.getElementById('pm-reviews');
   if (!container) return;
@@ -994,17 +946,15 @@ var currentChatOtherUserId = null;
 var currentChatOtherName = null;
 var chatThreadPollId = null;
 
-// Every async chat render checks this token after its await, before
-// touching the DOM. Any view switch bumps the token, so a slow render
-// from a view the user already navigated away from can never land on
-// top of whatever's actually showing now — this is what "Back" was
-// racing against before. //
+// token check prevents a slow render from landing after the user
+// already navigated away (this was the old "Back" button bug) //
 var chatViewToken = 0;
 
 function chatCloseBtnHtml() {
   return '<button class="chat-close-btn" onclick="closeChatModal()"><i class="fas fa-times"></i></button>';
 }
 
+// #CUSTOMER_CHAT_THREAD
 function openChatThread(orderId, otherUserId, otherName) {
   if (!currentUser) { showToast('Please log in to send a message', 'info'); openLoginModal(); return; }
   var myToken = ++chatViewToken;
@@ -1048,8 +998,7 @@ function closeChatModal() {
   currentChatOtherUserId = null;
 }
 
-// Groups consecutive messages under one timestamp when they're close
-// together in time, instead of stamping every single bubble. //
+// group nearby messages under one timestamp instead of stamping every bubble //
 function formatChatDivider(iso) {
   var d = new Date(iso);
   var now = new Date();
@@ -1153,6 +1102,7 @@ async function sendChatMessage() {
 
 // Inbox — lists every conversation this account has across all their
 // orders (as customer, merchant, or rider), most recent first. //
+// #CUSTOMER_CHAT_INBOX
 async function openChatInbox(e) {
   if (e) e.preventDefault();
   if (!currentUser) { showToast('Please log in to view messages', 'info'); openLoginModal(); return; }
@@ -1232,9 +1182,7 @@ async function openChatInbox(e) {
   }).join('');
 }
 
-// Deleting a conversation only hides it from YOUR inbox — the other
-// person's copy of the messages is untouched, and it reappears if they
-// send something new. Consistent with how notification-clearing works. //
+// only hides it from your own inbox, other person's copy is untouched //
 function chatHiddenKey() {
   return currentUser ? ('homeweb_hidden_convos_' + currentUser.id) : null;
 }
@@ -1289,10 +1237,7 @@ async function openNewMessagePicker() {
   }).join('');
 }
 
-// Shows a contact's profile card — avatar, name, phone (if set), and
-// role tags. Reachable by tapping their avatar in an inbox row or a
-// chat thread's header. Only works for people you actually share an
-// order with, same as the profiles RLS boundary. //
+// contact card, reachable from an inbox row or chat header //
 async function openContactProfileModal(userId) {
   if (!userId) return;
 
@@ -1316,11 +1261,8 @@ async function openContactProfileModal(userId) {
   var allRoles = (roles || []).map(function(r) { return r.role; });
   var isAdmin = allRoles.indexOf('admin') !== -1;
 
-  // The admin filter below intentionally hides admin identity in normal
-  // peer chats — but the admin account also carries a default 'customer'
-  // role, so without special-casing it, the Support account would
-  // mislabel as "Customer". When the profile IS the admin, show a single
-  // "Support" tag instead. //
+  // admin also has a default customer role, so without this it'd
+  // mislabel as "Customer" instead of "Support" //
   var roleList = allRoles.filter(function(r) { return r !== 'admin'; });
   var roleTagColors = { customer: '#3B82F6', merchant: '#15803D', rider: '#B45309', support: 'var(--primary,#22C55E)' };
   var roleTagsHtml;
@@ -1445,6 +1387,7 @@ async function fetchMyContacts() {
   return Object.values(contacts).sort(function(a, b) { return new Date(b.lastAt) - new Date(a.lastAt); });
 }
 
+// #CUSTOMER_HELP_SUPPORT
 async function openHelpCenterModal(e) {
   if (e) e.preventDefault();
 
@@ -1479,6 +1422,7 @@ function closeHelpCenterModal() {
   document.body.style.overflow = '';
 }
 
+// #CUSTOMER_ABOUT_US
 function openAboutModal(e) {
   if (e) e.preventDefault();
   var body = document.getElementById('sn-help-body');
@@ -1499,15 +1443,8 @@ function openAboutModal(e) {
 
 
 // ============================================================
-// SELLER CENTER — informational pages (Guidelines, Help & Support,
-// Terms & Conditions, Privacy Policy). All four reuse the shared
-// help-modal shell, same as the About modal. Content is written to
-// match HomeWeb's actual seller features only: store profile + permit
-// verification, product add/edit, inventory/stock-in, order status
-// updates, rider-based delivery, COD payment, sales reports, and
-// order-linked messaging. Nothing here claims features the system
-// doesn't have (no payouts, no automated refunds, no analytics beyond
-// the sales report, no live chat bot). //
+// SELLER CENTER — Guidelines, Help & Support, Terms, Privacy.
+// Content matches real features only, nothing invented.
 // ============================================================
 
 function sellerInfoSection(title, icon, innerHtml) {
@@ -1524,6 +1461,7 @@ function sellerBullets(items) {
     '</ul>';
 }
 
+// #VENDOR_GUIDELINES_HELP_TERMS_PRIVACY
 function openSellerInfoModal(section) {
   var body = document.getElementById('sn-help-body');
   var html = '';
@@ -1701,6 +1639,7 @@ async function messageSellerForOrder(orderId, productId) {
   openChatThread(orderId, data.merchants.user_id, data.merchants.store_name);
 }
 
+// #CUSTOMER_STOREFRONT_VIEW
 async function openMerchantStorefront(merchantId) {
   if (!merchantId) { showToast('This product has no store information', 'info'); return; }
 
@@ -1759,6 +1698,9 @@ async function openMerchantStorefront(merchantId) {
     '<i class="fas ' + (merchant.merchant_type === 'bolanteros' ? 'fa-calendar-days' : 'fa-shop') + '"></i> ' +
     (merchant.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + ' \u2022 ' + openDaysLabel(merchant) +
     '</span>' +
+    (merchant.merchant_type === 'bolanteros'
+      ? '<p style="margin:4px 0 0;font-size:11px;color:rgba(255,255,255,0.75);">Non-permanent vendor \u2014 trades only on designated market days</p>'
+      : '') +
     (merchant.merchant_type === 'bolanteros'
       ? '<p style="margin:8px 0 0;font-size:12px;color:' + (openToday ? '#DCFCE7' : '#FEE2E2') + ';font-weight:600;">' +
         (openToday ? '<i class="fas fa-circle-check"></i> Open today (' + DAY_NAMES[new Date().getDay()] + ')'
@@ -1827,8 +1769,8 @@ function updateBuyButtonsState(stockQty) {
     btn.style.cursor = outOfStock ? 'not-allowed' : '';
   });
 
-  if (cartBtn) cartBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Out of Stock' : '<i class="fas fa-cart-plus"></i> Add to Cart';
-  if (buyBtn) buyBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Out of Stock' : '<i class="fas fa-bolt"></i> Buy Now';
+  if (cartBtn) cartBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Sold Out' : '<i class="fas fa-cart-plus"></i> Add to Cart';
+  if (buyBtn) buyBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Sold Out' : '<i class="fas fa-bolt"></i> Buy Now';
 }
 
 function changeQty(delta) {
@@ -1879,6 +1821,7 @@ function addToCart(andCheckout) {
 
 // CHECKOUT FLOW //
 
+// #CUSTOMER_CART_CHECKOUT
 function openCheckout() {
   if (!currentUser) {
     showToast('Please log in to check out', 'info');
@@ -2071,6 +2014,7 @@ function renderCheckout() {
 }
 
 // Validate shipping form //
+// #CUSTOMER_SHIPPING_FORM
 function validateShippingForm() {
   const requiredIds = ['co-firstName', 'co-lastName', 'co-phone', 'co-street', 'co-barangay', 'co-city', 'co-zip'];
   let isValid = true;
@@ -2335,13 +2279,8 @@ function groupCartByMerchant() {
   return order.map(function(k) { return groups[k]; });
 }
 
-// Approximate road distances (in km) from the Sta. Barbara Public Market
-// to nearby municipalities and Iloilo City. These are reasonable estimates
-// for demo/capstone purposes, not live GPS/routing data — adding a real
-// geocoding API this close to the defense would introduce external cost,
-// quota limits, and an internet-dependency risk during a live demo. The
-// list covers Sta. Barbara itself plus the municipalities/city districts
-// a Sta. Barbara Market customer would realistically order from. //
+// Estimated distances, not live GPS data — a geocoding API felt like
+// too much risk to add this close to the defense. //
 var MUNICIPALITY_DISTANCES = {
   'Sta. Barbara': 1,
   'New Lucena': 6,
@@ -2361,10 +2300,8 @@ var MUNICIPALITY_DISTANCES = {
 
 var MAX_DELIVERY_KM = 25; // beyond this, we don't offer delivery yet
 
-// Distance brackets — flat fee per zone rather than a smooth per-km
-// formula, matching how real local courier services actually price
-// (LBC, motorcycle couriers, etc. price in zones, not continuous rates).
-// If a distance falls between two brackets, the HIGHER bracket applies. //
+// Flat fee per zone (how local couriers actually price), not per-km.
+// Falls between two brackets = use the higher one. //
 var DELIVERY_FEE_BRACKETS = [
   { min: 0, max: 2, fee: 49 },
   { min: 3, max: 5, fee: 69 },
@@ -2381,13 +2318,9 @@ function getDeliveryBracket(distance) {
   return null; // beyond every bracket — out of delivery range
 }
 
-// Returns the full fee breakdown (base bracket + any surcharges), not just
-// the total — so the checkout can show the customer exactly what they're
-// paying for, rather than a single mystery number. Surcharges are
-// deliberately kept to things we can check locally (clock time, cart
-// subtotal) — no external weather API, since that would introduce cost,
-// rate limits, and an internet-dependency risk during a live demo for a
-// cosmetic feature. //
+// Returns base + surcharges separately so checkout can show a breakdown,
+// not just a mystery total. No weather API, same reasoning as above. //
+// #CUSTOMER_DELIVERY_FEE_CALC
 function calcDeliveryFeeBreakdown(municipality, subtotal) {
   var distance = MUNICIPALITY_DISTANCES[municipality];
   if (distance === undefined) distance = 1; // unknown/legacy address, treat as local
@@ -2453,6 +2386,7 @@ function capitalize(str) {
 }
 
 // Place order — writes to Supabase (orders, order_items, order_status_history) //
+// #CUSTOMER_PLACE_ORDER
 async function placeOrder() {
   if (!currentUser) {
     showToast('Please log in to place an order', 'info');
@@ -2464,9 +2398,7 @@ async function placeOrder() {
   const nextBtn = document.querySelector('#sn-checkoutModal .co-btn--next');
   if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = 'Checking stock...'; }
 
-  // Validate against LIVE stock right before placing — the cart may have
-  // been sitting open while stock changed (another customer bought it,
-  // the merchant adjusted it, etc). This is the authoritative check. //
+  // Recheck stock right before placing — cart may be stale by now //
   var productIds = cart.map(function(i) { return i.id; });
   const { data: freshProducts, error: stockErr } = await supabase.from('products').select('id, name, stock_qty, cost_price').in('id', productIds);
 
@@ -2633,14 +2565,8 @@ async function advanceOrderStatus(orderDbId, newStatus) {
   if (listEl && listEl.style.display !== 'none') renderOrderList();
 }
 
-// Customer confirms they actually received the order — this is the
-// ONLY way an order becomes fully 'delivered' and unlocks reviews.
-// Independent from the rider's "Mark Delivered" action on purpose,
-// so a rider can't unilaterally close out an order they never delivered.
-// Customer fetches a short-lived signed URL for their assigned rider's
-// license — RLS on storage only allows this if this rider is actually
-// assigned to one of this customer's orders, so access is enforced
-// server-side, not just hidden in the UI. //
+// Only the customer confirming receipt finalizes an order as delivered —
+// a rider can't close it out unilaterally. //
 async function viewRiderLicenseForOrder(orderId) {
   const { data: order, error: orderErr } = await supabase.from('orders').select('rider_license_path').eq('id', orderId).single();
   if (orderErr || !order || !order.rider_license_path) {
@@ -2656,7 +2582,10 @@ async function viewRiderLicenseForOrder(orderId) {
   window.open(data.signedUrl, '_blank');
 }
 
+// #CUSTOMER_CONFIRM_RECEIPT
 async function confirmDelivery(orderDbId) {
+  if (!confirm('Confirm that you actually received this order? This can\'t be undone, and falsely confirming an order you haven\'t received may affect your account.')) return;
+
   const { data: existing } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderDbId).single();
   if (!existing || existing.status !== 'awaiting_confirmation') {
     showToast('This order isn\'t ready to confirm yet', 'info');
@@ -2673,9 +2602,8 @@ async function confirmDelivery(orderDbId) {
   openTrackingDetail(orderDbId);
 }
 
-// Customer reports non-delivery after the grace period — this does NOT
-// change the order's core status (still awaiting_confirmation), it just
-// flags it prominently for the merchant and rider to see and follow up. //
+// Flags non-delivery without changing the order's actual status //
+// #CUSTOMER_REPORT_NOT_ARRIVED
 async function reportNotArrived(orderDbId) {
   const { data: existing } = await supabase.from('orders').select('status, order_code, not_arrived_reported_at').eq('id', orderDbId).single();
   if (!existing || existing.status !== 'awaiting_confirmation') {
@@ -2699,11 +2627,7 @@ async function reportNotArrived(orderDbId) {
   openTrackingDetail(orderDbId);
 }
 
-// Lets the customer who filed a non-delivery report retract it once the
-// order genuinely does arrive — without this, a dispute would be a
-// permanent dead end even after the rider successfully delivers. Only
-// the customer who filed it can retract it (enforced by orders RLS,
-// same as confirmDelivery/reportNotArrived). //
+// Lets the customer retract a non-delivery report once it does arrive //
 async function retractNotArrivedAndConfirm(orderDbId) {
   const { data: existing } = await supabase.from('orders').select('status, order_code, not_arrived_reported_at').eq('id', orderDbId).single();
   if (!existing || existing.status !== 'awaiting_confirmation' || !existing.not_arrived_reported_at) {
@@ -2744,6 +2668,7 @@ function setStarRating(productId, n) {
   });
 }
 
+// #CUSTOMER_SUBMIT_REVIEW
 async function submitReview(orderId, productId) {
   var ratingInput = document.getElementById('review-rating-' + productId);
   var rating = ratingInput ? parseInt(ratingInput.value, 10) : 0;
@@ -2808,11 +2733,7 @@ function showOrderSuccess(orderCode) {
 }
 
 // ============================================================
-// RIDER SEARCH
-// Real riders only — assignment happens exclusively through a rider
-// manually accepting via the alert popup or "Available Orders" list
-// (see acceptOrder()). This modal just waits and polls for that to
-// happen; it never assigns anyone itself.
+// RIDER SEARCH — waits/polls for a rider to accept; never auto-assigns
 // ============================================================
 
 let riderSearchOrderId = null;
@@ -2829,9 +2750,7 @@ function openRiderSearchModal(orderId, orderCode) {
   document.getElementById('sn-riderModal').classList.add('active');
   document.body.style.overflow = 'hidden';
 
-  // Poll for a rider claiming this order — from their own dashboard or the
-  // alert popup, on a different device/session. No live realtime
-  // connection here, so polling is how this screen catches that update. //
+  // Polling since there's no realtime connection here //
   if (riderPollIntervalId) clearInterval(riderPollIntervalId);
   riderPollIntervalId = setInterval(async function() {
     if (riderSearchStep !== 1 || riderSearchOrderId !== orderId) {
@@ -2969,11 +2888,8 @@ function closeOrderTracking() {
 
 var trackingActiveTab = 'to_ship';
 
-// Maps each order status into one of the three customer-facing buckets.
-// This auto-updates as the order moves: placed/preparing sit in To Ship,
-// then out_for_delivery/awaiting_confirmation move to To Receive, and
-// once the customer confirms receipt (delivered) it lands in Completed.
-// Cancelled orders also rest in Completed as a terminal state. //
+// placed/preparing = To Ship, out_for_delivery/awaiting_confirmation =
+// To Receive, delivered/cancelled = Completed //
 function orderTrackingCategory(status) {
   if (status === 'placed' || status === 'preparing') return 'to_ship';
   if (status === 'out_for_delivery' || status === 'awaiting_confirmation') return 'to_receive';
@@ -2985,6 +2901,7 @@ function switchTrackingTab(tab) {
   renderOrderList();
 }
 
+// #CUSTOMER_TRACK_ORDERS_TABS
 function renderOrderList() {
   var container = document.getElementById('sn-tracking-list');
   if (!container) return;
@@ -3046,9 +2963,8 @@ function renderOrderList() {
   container.innerHTML = tabsHtml + listHtml;
 }
 
-// Lets a customer cancel their own order while still waiting for a rider
-// to accept — reachable from Track Orders even if they navigated away
-// from the "finding a rider" screen and come back later. //
+// Customer can cancel while still waiting for a rider //
+// #CUSTOMER_CANCEL_ORDER
 async function cancelOrderByCustomer(orderId, orderCode) {
   if (!confirm('Cancel Order #' + orderCode + '? This can\'t be undone.')) return;
 
@@ -3069,6 +2985,7 @@ async function cancelOrderByCustomer(orderId, orderCode) {
   openTrackingDetail(orderId);
 }
 
+// #CUSTOMER_TRACKING_DETAIL
 async function openTrackingDetail(orderId) {
   const { data: order, error } = await supabase
     .from('orders')
@@ -3133,12 +3050,8 @@ function renderTrackingDetail(order) {
   var container = document.getElementById('sn-tracking-detail');
   if (!container) return;
 
-  // This view is reachable by anyone with a legitimate reason to see the
-  // order (customer, merchant, rider — RLS correctly allows all three to
-  // fetch it), but actions like reviewing a product, rating the rider, or
-  // messaging/reporting the rider only make sense from the customer's
-  // side. A rider viewing their own delivery shouldn't be able to rate
-  // themselves or message themselves. Compute this once, use everywhere. //
+  // Customer/merchant/rider can all view this order, but review/rate/
+  // report actions only make sense for the customer to see //
   var isCustomerViewer = order.user_id === currentUser.id;
 
   var statusInfo = getOrderStatusInfo(order.status);
@@ -3151,7 +3064,7 @@ function renderTrackingDetail(order) {
   });
   sortedHistory.forEach(function(entry) {
     timelineHtml += '<div class="track-tl-row">' +
-      '<span class="track-tl-label">' + entry.label + '</span>' +
+      '<span class="track-tl-label"><i class="fas fa-circle-check" style="color:var(--primary,#22C55E);margin-right:6px;"></i>' + entry.label + '</span>' +
       '<span class="track-tl-time">' + formatTime(entry.created_at) + '</span>' +
       '</div>' +
       '<div class="track-tl-desc">' + entry.description + '</div>';
@@ -3311,16 +3224,8 @@ function renderTrackingDetail(order) {
     '</div>' +
     '</div>';
 
-  // Customer confirms receipt — only appears once the rider has actually
-  // marked it delivered, never at any earlier status. This is the only
-  // way an order finalizes as 'delivered' and unlocks reviews.
-  //
-  // Merchants and riders can legitimately load this same order (they're
-  // real participants and RLS correctly allows it), but these actions
-  // belong to the customer alone — finalizing receipt or disputing
-  // non-delivery isn't something a seller or rider should be able to do
-  // on the customer's behalf. Gate the whole block on actually being
-  // the customer; everyone else just sees a plain status line instead.
+  // Confirm-receipt only shows once actually delivered, and only to the
+  // customer — merchant/rider can view the order but not act on it here.
   if (order.status === 'awaiting_confirmation') {
     if (order.user_id !== currentUser.id) {
       html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
@@ -3330,10 +3235,8 @@ function renderTrackingDetail(order) {
           : 'Delivered by the rider — awaiting the customer\'s confirmation.') +
         '</p></div>';
     } else if (order.not_arrived_reported_at) {
-      // Disputed — Confirm Receipt is hidden by default (confirming right
-      // after claiming non-receipt would be self-contradictory), but the
-      // customer needs a way forward if the rider does show up afterward.
-      // Only the person who filed the report can retract it. //
+      // Confirm Receipt stays hidden during a dispute, but they can
+      // retract their own report if the order does show up //
       html += '<div style="background:#FEE2E2;border-radius:10px;padding:14px;margin-top:16px;">' +
         '<p style="margin:0 0 10px;font-size:13px;color:#DC2626;"><i class="fas fa-flag"></i> You reported this order as not received. The seller and rider have been notified.</p>' +
         '<button class="co-btn co-btn--next" style="width:100%;" onclick="retractNotArrivedAndConfirm(\'' + order.id + '\')">Actually, I Received It \u2014 Confirm Receipt</button>' +
@@ -3342,8 +3245,8 @@ function renderTrackingDetail(order) {
       var elapsedSinceDelivered = Date.now() - new Date(order.updated_at).getTime();
       var gracePeriodPassed = elapsedSinceDelivered >= CONFIRMATION_GRACE_PERIOD_MS;
 
-      html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;">' +
-        '<p style="margin:0 0 10px;font-size:13px;color:#92400E;"><i class="fas fa-info-circle"></i> Your rider marked this order as delivered. Please confirm you actually received it.</p>' +
+      html += '<div style="background:#FFFBEB;border-radius:10px;padding:14px;margin-top:16px;border:1px solid #FDE68A;">' +
+        '<p style="margin:0 0 10px;font-size:13px;color:#92400E;"><i class="fas fa-triangle-exclamation"></i> <b>Please check before confirming:</b> your rider marked this order as delivered. Only tap Confirm Receipt once you\'ve actually received it \u2014 this action is final.</p>' +
         '<button class="co-btn co-btn--next track-mark-delivered" onclick="confirmDelivery(\'' + order.id + '\')">Confirm Receipt</button>';
 
       if (gracePeriodPassed) {
@@ -3361,6 +3264,7 @@ function renderTrackingDetail(order) {
 }
 
 // Helpers for order tracking
+// #GLOBAL_ORDER_STATUS_DEFINITIONS
 function getOrderStatusInfo(status) {
   var map = {
     'placed':                { label: 'Order Placed',        icon: '' },
@@ -3391,6 +3295,7 @@ function formatTime(isoStr) {
 // LOGIN MODAL //
 
 // Open login modal //
+// #CUSTOMER_LOGIN_FORM
 function openLoginModal(e) {
   if (e) e.preventDefault();
   if (currentUser) return; 
@@ -3427,6 +3332,7 @@ function openForgotPasswordModal(e) {
     '<div class="login-icon"><i class="fas fa-key"></i></div>' +
     '<h2>Reset Password</h2>' +
     '<p class="login-sub">Enter the email on your account and we\'ll send a reset link.</p>' +
+    '<p style="font-size:11.5px;color:#999;margin:-8px 0 14px;">Signed up with just a phone number, no email? Email reset won\'t reach you \u2014 use the Help button to message HomeWeb support instead.</p>' +
     '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
     '<input type="email" id="forgot-email" placeholder="you@example.com"/>' +
     '<span class="co-field-error">Enter a valid email address</span></div>' +
@@ -3467,8 +3373,7 @@ async function submitForgotPassword() {
   btn.disabled = false;
   btn.textContent = 'Send Reset Link';
 
-  // Deliberately vague on success either way — confirming or denying that
-  // an email exists in the system is an account-enumeration leak. //
+  // Same message either way — confirming an email exists is a leak //
   var body = document.getElementById('sn-forgot-body');
   body.innerHTML =
     '<div class="login-icon" style="color:#22C55E;"><i class="fas fa-envelope-circle-check"></i></div>' +
@@ -3504,8 +3409,7 @@ function openSetNewPasswordModal() {
 }
 
 async function cancelPasswordReset() {
-  // The reset link leaves the browser in a temporary authenticated
-  // "recovery" session — sign out rather than leaving that dangling. //
+  // Sign out of the temporary recovery session instead of leaving it dangling //
   await supabase.auth.signOut();
   document.getElementById('sn-resetOverlay').classList.remove('active');
   document.getElementById('sn-resetModal').classList.remove('active');
@@ -3557,7 +3461,8 @@ function validateLoginForm() {
   let firstInvalidEl = null;
 
   const emailField = emailEl.closest('.co-field');
-  const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailEl.value.trim());
+  const inputVal = emailEl.value.trim();
+  const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inputVal) || looksLikePhone(inputVal);
   if (!emailOk) {
     isValid = false;
     emailField.classList.add('co-field--error');
@@ -3585,7 +3490,8 @@ async function submitLogin() {
     showToast('Please fix the errors below', 'info');
     return;
   }
-  const email = document.getElementById('login-email').value.trim();
+  const rawInput = document.getElementById('login-email').value.trim();
+  const email = looksLikePhone(rawInput) ? phoneToSyntheticEmail(rawInput) : rawInput;
   const password = document.getElementById('login-password').value;
 
   const btn = document.querySelector('#sn-loginModal .login-submit');
@@ -3604,7 +3510,9 @@ async function submitLogin() {
   closeLoginModal();
   await fetchUserRoles();
   updateAuthUI();
-  showToast('Welcome back, ' + (currentUser.email || '').split('@')[0] + '!');
+  const { data: profileRow } = await supabase.from('profiles').select('full_name').eq('id', currentUser.id).single();
+  var displayName = (profileRow && profileRow.full_name) ? profileRow.full_name.split(' ')[0] : (currentUser.email || '').split('@')[0];
+  showToast('Welcome back, ' + displayName + '!');
 }
 
 // Logout //
@@ -3640,6 +3548,7 @@ function closeAdminLoginModal() {
   history.replaceState(null, '', window.location.pathname + window.location.search);
 }
 
+// #ADMIN_LOGIN
 async function submitAdminLogin() {
   var username = document.getElementById('admin-access-code').value.trim().toLowerCase();
   var password = document.getElementById('admin-access-secret').value;
@@ -3695,7 +3604,7 @@ function adminTabsHtml() {
     var active = adminView === id;
     return '<button class="co-btn" style="flex:1;background:' + (active ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (active ? '#fff' : '#333') + ';" onclick="switchAdminView(\'' + id + '\')">' + label + '</button>';
   }
-  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Merchants') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + tab('reports', 'Reports') + tab('activity', 'Activity Log') + '</div>';
+  return '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;">' + tab('overview', 'Overview') + tab('merchants', 'Vendors') + tab('riders', 'Riders') + tab('customers', 'Customers') + tab('orders', 'Orders') + tab('reports', 'Reports') + tab('activity', 'Activity Log') + '</div>';
 }
 
 function switchAdminView(view) {
@@ -3716,6 +3625,7 @@ async function renderAdminDashboard() {
   if (adminView === 'activity') return renderAdminActivityLog();
 }
 
+// #ADMIN_OVERVIEW_TAB
 async function renderAdminOverview() {
   var body = document.getElementById('sn-admin-body');
 
@@ -3738,7 +3648,7 @@ async function renderAdminOverview() {
   var body2 =
     '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
     '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">' +
-    card('Merchants', merchantCount || 0, '#15803D') +
+    card('Vendors', merchantCount || 0, '#15803D') +
     card('Riders', riderCount || 0, '#3B82F6') +
     card('Customers', customerCount || 0, '#854F0B') +
     card('Products', productCount || 0, '#0F6E56') +
@@ -3764,6 +3674,7 @@ let adminMerchantFilter = 'all'; // 'all' | 'pending' | 'suspended'
 let adminMerchantTypeFilter = 'all';
 let adminMerchantSearch = '';
 
+// #ADMIN_MERCHANTS_TAB
 async function renderAdminMerchants() {
   var body = document.getElementById('sn-admin-body');
   const { data: allMerchants, error } = await supabase.from('merchants').select('*').order('created_at', { ascending: false });
@@ -3816,7 +3727,7 @@ async function renderAdminMerchants() {
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;' + (m.is_suspended ? 'opacity:0.65;' : '') + '">' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
           '<span style="font-weight:700;font-size:13px;">' + m.store_name + (m.is_verified ? ' <i class="fas fa-badge-check" style="color:var(--primary,#22C55E);"></i>' : '') + '</span>' +
-          '<span style="font-size:11px;color:' + typeColor + ';font-weight:600;">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
+          '<span style="font-size:11px;color:' + typeColor + ';font-weight:600;" title="Non-permanent vendor, trades Tue/Fri only">' + (m.merchant_type === 'bolanteros' ? 'Bolanteros' : 'Permanent') + '</span>' +
           '</div>' +
           '<p style="margin:4px 0 0;font-size:12px;color:#777;">' + (CATEGORY_META[m.business_type] ? CATEGORY_META[m.business_type].title : m.business_type) + '</p>' +
           '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + (merchantEmailById[m.user_id] || 'No email on file') + '</p>' +
@@ -3838,7 +3749,7 @@ async function renderAdminMerchants() {
 
   body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() +
     '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">' +
-    '<span>Merchants</span>' +
+    '<span>Vendors</span>' +
     '<span style="display:flex;gap:6px;">' +
     '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openSuspensionPolicyModal()"><i class="fas fa-gavel"></i> Suspension Policy</button>' +
     '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'merchant\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
@@ -3850,16 +3761,13 @@ async function adminSetMerchantVerified(merchantId, verified) {
   const { error } = await supabase.from('merchants').update({ is_verified: verified }).eq('id', merchantId);
   if (error) { showToast('Could not update: ' + error.message, 'error'); return; }
   logActivity(verified ? 'merchant_verified' : 'merchant_verification_revoked', 'merchant', merchantId, null, null);
-  showToast(verified ? 'Merchant verified \u2705' : 'Verification revoked', 'info');
+  showToast(verified ? 'Vendor verified \u2705' : 'Verification revoked', 'info');
   renderAdminMerchants();
 }
 
-// Defines concrete grounds for suspending a vendor or rider — grounded in
-// what the system actually tracks (filed reports, a rider's accumulated
-// rejection_penalty, non-delivery disputes) rather than vague language, so
-// an admin can point to a specific, real condition when suspending someone,
-// and it's defensible as an actual policy rather than just aspirational
-// text. Reachable from both the Merchants and Riders tabs. //
+// Grounds tied to what the system actually tracks (reports, rejection
+// penalty, disputes), not vague language //
+// #ADMIN_SUSPENSION_POLICY
 function openSuspensionPolicyModal() {
   var body = document.getElementById('sn-help-body');
   body.innerHTML =
@@ -3867,7 +3775,7 @@ function openSuspensionPolicyModal() {
     '<h2>Grounds for Suspension</h2>' +
     '<p class="login-sub">What justifies restricting a vendor or rider\'s access</p>' +
     '<div style="text-align:left;margin-top:14px;">' +
-    sellerInfoSection('Vendor (Merchant) Violations', 'fa-store-slash', sellerBullets([
+    sellerInfoSection('Vendor Violations', 'fa-store-slash', sellerBullets([
       '<b>Repeated order failure</b> \u2014 consistently not preparing or fulfilling accepted orders',
       '<b>Prohibited listings</b> \u2014 selling illegal, counterfeit, expired, or otherwise unsafe products',
       '<b>False product information</b> \u2014 prices, quality, or availability that repeatedly don\'t match what\'s delivered',
@@ -3894,9 +3802,8 @@ function openSuspensionPolicyModal() {
   document.body.style.overflow = 'hidden';
 }
 
-// Suspends a merchant's store — hides their products from the storefront
-// and blocks new listings, without deleting their real order history
-// (which would break every past order's product references). //
+// Hides products/listings but keeps order history intact //
+// #ADMIN_SUSPEND_MERCHANT
 async function adminSuspendMerchant(merchantId, storeName) {
   var reason = prompt('Reason for suspending "' + storeName + '"? (shown in admin logs, required)');
   if (!reason || !reason.trim()) { showToast('A reason is required to suspend a store', 'info'); return; }
@@ -3926,6 +3833,38 @@ async function adminReinstateMerchant(merchantId, storeName) {
 
 let adminRiderSearch = '';
 
+// Suspends a rider — blocks them from receiving new delivery alerts or
+// accepting orders (checked in checkForRiderOrderAlert/acceptOrder), and
+// forces them offline so they don't sit "available" while suspended. //
+// #ADMIN_SUSPEND_RIDER
+async function adminSuspendRider(riderId, riderName) {
+  var reason = prompt('Reason for suspending "' + riderName + '"? (shown in admin logs, required)');
+  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a rider', 'info'); return; }
+
+  const { error } = await supabase.from('riders').update({
+    is_suspended: true, suspended_reason: reason.trim(), suspended_at: new Date().toISOString(), is_available: false
+  }).eq('id', riderId);
+  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return; }
+
+  logActivity('rider_suspended', 'rider', riderId, riderName, reason.trim());
+  showToast('Rider suspended \u2705');
+  renderAdminRiders();
+}
+
+async function adminReinstateRider(riderId, riderName) {
+  if (!confirm('Reinstate "' + riderName + '"? They\'ll be able to go online and accept deliveries again.')) return;
+
+  const { error } = await supabase.from('riders').update({
+    is_suspended: false, suspended_reason: null, suspended_at: null
+  }).eq('id', riderId);
+  if (error) { showToast('Could not reinstate: ' + error.message, 'error'); return; }
+
+  logActivity('rider_reinstated', 'rider', riderId, riderName, null);
+  showToast('Rider reinstated \u2705');
+  renderAdminRiders();
+}
+
+// #ADMIN_RIDERS_TAB
 async function renderAdminRiders() {
   var body = document.getElementById('sn-admin-body');
   const { data: riders, error } = await supabase.from('riders').select('*').order('created_at', { ascending: false });
@@ -3955,7 +3894,8 @@ async function renderAdminRiders() {
   var rows = (error || !shownRiders.length)
     ? '<p style="color:#999;font-size:13px;">' + (adminRiderSearch.trim() ? 'No riders match your search.' : 'No riders yet.') + '</p>'
     : shownRiders.map(function(r) {
-        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+        var escapedName = (riderNameById[r.user_id] || 'this rider').replace(/'/g, "\\'");
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;' + (r.is_suspended ? 'opacity:0.65;' : '') + '">' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
           '<span style="font-weight:700;font-size:13px;">' + (riderNameById[r.user_id] || capitalize(r.vehicle_type)) + '</span>' +
           '<span style="font-size:11px;color:' + (r.is_available ? '#15803D' : '#999') + ';">' + (r.is_available ? 'Online' : 'Offline') + '</span>' +
@@ -3965,9 +3905,17 @@ async function renderAdminRiders() {
           (r.rating_count > 0 ? r.rating_avg + ' \u2605 (' + r.rating_count + ')' : 'No ratings yet') +
           (r.rejection_penalty > 0 ? ' \u2022 <span style="color:#DC2626;">-' + r.rejection_penalty.toFixed(1) + ' penalty</span>' : '') +
           '</p>' +
+          (r.is_suspended
+            ? '<p style="margin:6px 0 0;background:#FEE2E2;color:#DC2626;padding:6px 8px;border-radius:6px;font-size:11.5px;font-weight:600;"><i class="fas fa-ban"></i> Suspended: ' + (r.suspended_reason || 'No reason given') + '</p>'
+            : '') +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">' +
           (r.license_path
-            ? '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;margin-top:8px;" onclick="adminViewRiderLicense(\'' + r.user_id + '\')">View License</button>'
-            : '<span style="font-size:11.5px;color:#aaa;">No license uploaded</span>') +
+            ? '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;" onclick="adminViewRiderLicense(\'' + r.user_id + '\')">View License</button>'
+            : '<span style="font-size:11.5px;color:#aaa;align-self:center;">No license uploaded</span>') +
+          (r.is_suspended
+            ? '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminReinstateRider(\'' + r.id + '\', \'' + escapedName + '\')">Reinstate</button>'
+            : '<button class="co-btn" style="padding:6px 12px;background:#1F2937;color:#fff;font-size:12px;" onclick="adminSuspendRider(\'' + r.id + '\', \'' + escapedName + '\')"><i class="fas fa-ban"></i> Suspend Rider</button>') +
+          '</div>' +
           '</div>';
       }).join('');
 
@@ -4003,9 +3951,12 @@ var ACTIVITY_ACTION_LABELS = {
   merchant_verification_revoked: 'Revoked merchant verification',
   merchant_suspended: 'Suspended merchant',
   merchant_reinstated: 'Reinstated merchant',
+  rider_suspended: 'Suspended rider',
+  rider_reinstated: 'Reinstated rider',
   dispute_resolved: 'Resolved delivery dispute'
 };
 
+// #ADMIN_ACTIVITY_LOG
 async function renderAdminActivityLog() {
   var body = document.getElementById('sn-admin-body');
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
@@ -4015,7 +3966,7 @@ async function renderAdminActivityLog() {
 
   const { data: entries, error } = await query;
 
-  var typeOptions = [['all', 'All Categories'], ['merchant', 'Merchants'], ['order', 'Orders'], ['rider', 'Riders'], ['customer', 'Customers']]
+  var typeOptions = [['all', 'All Categories'], ['merchant', 'Vendors'], ['order', 'Orders'], ['rider', 'Riders'], ['customer', 'Customers']]
     .map(function(t) { return '<option value="' + t[0] + '"' + (adminActivityFilter === t[0] ? ' selected' : '') + '>' + t[1] + '</option>'; }).join('');
 
   var filterBar = '<select onchange="changeAdminActivityFilter(this.value)" style="padding:7px 12px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;margin-bottom:14px;">' + typeOptions + '</select>';
@@ -4033,6 +3984,7 @@ async function renderAdminActivityLog() {
   body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Activity Log</h3>' + filterBar + rows;
 }
 
+// #ADMIN_REPORTS_TAB
 async function renderAdminReports() {
   var body = document.getElementById('sn-admin-body');
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
@@ -4057,13 +4009,14 @@ async function renderAdminReports() {
 
   var typeIcon = { merchant: 'fa-store', rider: 'fa-motorcycle', customer: 'fa-user' };
   var statusColor = { pending: '#B45309', reviewed: '#15803D', dismissed: '#999' };
+  var statusLabel = { pending: 'Pending', reviewed: 'Reviewed', dismissed: 'Disregarded' };
 
   var rows = shown.length
     ? shown.map(function(r) {
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
           '<span style="font-weight:700;font-size:13px;"><i class="fas ' + (typeIcon[r.reported_type] || 'fa-flag') + '"></i> ' + (r.reported_name || 'Unknown') + '</span>' +
-          '<span style="font-size:11px;color:' + (statusColor[r.status] || '#999') + ';font-weight:700;text-transform:uppercase;">' + r.status + '</span>' +
+          '<span style="font-size:11px;color:' + (statusColor[r.status] || '#999') + ';font-weight:700;text-transform:uppercase;">' + (statusLabel[r.status] || r.status) + '</span>' +
           '</div>' +
           '<p style="margin:4px 0 0;font-size:12.5px;color:#DC2626;font-weight:600;">' + r.reason + '</p>' +
           (r.details ? '<p style="margin:4px 0 0;font-size:12.5px;color:#666;">"' + r.details + '"</p>' : '') +
@@ -4071,7 +4024,7 @@ async function renderAdminReports() {
           (r.status === 'pending'
             ? '<div style="display:flex;gap:6px;margin-top:8px;">' +
               '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'reviewed\')">Mark Reviewed</button>' +
-              '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'dismissed\')">Dismiss</button>' +
+              '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'dismissed\')">Disregard</button>' +
               '</div>'
             : '') +
           (r.order_id
@@ -4084,9 +4037,7 @@ async function renderAdminReports() {
   body.innerHTML = header + '<h3 style="margin:0 0 8px;font-size:14px;">Reports</h3>' + filterBar + rows;
 }
 
-// Admin views the message history for a reported order — RLS only allows
-// this because a report referencing that order_id exists; there is no
-// general admin access to messages otherwise. Read-only, no composer. //
+// Read-only — only accessible when a report references this order //
 async function adminViewReportedConversation(orderId, reportedName) {
   document.getElementById('sn-chatOverlay').classList.add('active');
   document.getElementById('sn-chatModal').classList.add('active');
@@ -4150,6 +4101,7 @@ async function adminViewRiderLicense(riderUserId) {
 
 let adminCustomerSearch = '';
 
+// #ADMIN_CUSTOMERS_TAB
 async function renderAdminCustomers() {
   var body = document.getElementById('sn-admin-body');
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
@@ -4216,9 +4168,7 @@ let adminOrderDateFilter = 'all'; // 'today' | 'yesterday' | 'week' | 'month' | 
 function orderMatchesDateFilter(order, filter, specificDate) {
   var created = new Date(order.created_at);
 
-  // A specific calendar date takes precedence over the preset range —
-  // if the merchant picked an exact day, match only orders from that day
-  // (local time), ignoring the dropdown. //
+  // Exact date picked overrides the preset range dropdown //
   if (specificDate) {
     var d = new Date(specificDate + 'T00:00:00'); // parse as local midnight
     var startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -4241,6 +4191,7 @@ function orderMatchesDateFilter(order, filter, specificDate) {
   return true;
 }
 
+// #ADMIN_ORDERS_TAB
 async function renderAdminOrders() {
   var body = document.getElementById('sn-admin-body');
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
@@ -4301,10 +4252,7 @@ async function renderAdminOrders() {
     '</h3>' + filterBar + rows;
 }
 
-// Admin resolution — for disputes the customer doesn't or can't retract
-// themselves (e.g. the rider confirms delivery happened, investigation
-// resolves it another way). Requires the "Admin can update all orders"
-// policy, since admin has never had order-write access before this. //
+// For disputes the customer can't/won't retract themselves //
 async function adminResolveDispute(orderId, orderCode) {
   if (!confirm('Mark Order #' + orderCode + ' as resolved and delivered? This clears the dispute and finalizes the order.')) return;
 
@@ -4342,7 +4290,6 @@ async function logout() {
 
 let signupRole = 'customer';
 let signupMerchantType = 'permanent';
-let signupOpenDays = [2, 3, 5];
 
 function merchantTypeCardHtml(type, icon, label, sub) {
   var active = signupMerchantType === type;
@@ -4358,28 +4305,13 @@ function merchantTypeCardHtml(type, icon, label, sub) {
 
 function selectMerchantType(type) {
   var keep = {
-    name: getVal('signup-name'), email: getVal('signup-email'),
+    name: getVal('signup-name'), email: getVal('signup-email'), phone: getVal('signup-phone'),
     pass: getVal('signup-password'), pass2: getVal('signup-password2'),
     store: getVal('signup-store-name'), biz: getVal('signup-business-type')
   };
   signupMerchantType = type;
   renderSignupForm();
-  setVal('signup-name', keep.name); setVal('signup-email', keep.email);
-  setVal('signup-password', keep.pass); setVal('signup-password2', keep.pass2);
-  setVal('signup-store-name', keep.store); setVal('signup-business-type', keep.biz);
-}
-
-function toggleSignupDay(dayIndex) {
-  var i = signupOpenDays.indexOf(dayIndex);
-  if (i === -1) signupOpenDays.push(dayIndex); else signupOpenDays.splice(i, 1);
-
-  var keep = {
-    name: getVal('signup-name'), email: getVal('signup-email'),
-    pass: getVal('signup-password'), pass2: getVal('signup-password2'),
-    store: getVal('signup-store-name'), biz: getVal('signup-business-type')
-  };
-  renderSignupForm();
-  setVal('signup-name', keep.name); setVal('signup-email', keep.email);
+  setVal('signup-name', keep.name); setVal('signup-email', keep.email); setVal('signup-phone', keep.phone);
   setVal('signup-password', keep.pass); setVal('signup-password2', keep.pass2);
   setVal('signup-store-name', keep.store); setVal('signup-business-type', keep.biz);
 }
@@ -4389,7 +4321,7 @@ var BUSINESS_TYPES = [
   { value: 'meat', label: 'Meat' },
   { value: 'seafood', label: 'Sea Food' },
   { value: 'sarisari', label: 'Sari-sari Store' },
-  { value: 'drinks', label: 'Drinks' },
+  { value: 'drinks', label: 'Beverages' },
   { value: 'other', label: 'Other' }
 ];
 
@@ -4408,6 +4340,7 @@ function setVal(id, val) {
   if (el && val) el.value = val;
 }
 
+// #CUSTOMER_SIGNUP_FORM
 function openSignupModal(e) {
   if (e) e.preventDefault();
   if (currentUser) return;
@@ -4428,11 +4361,11 @@ function closeSignupModal() {
 
 // Switch the role selector without losing what's already typed //
 function selectSignupRole(role) {
-  var name = getVal('signup-name'), email = getVal('signup-email'),
+  var name = getVal('signup-name'), email = getVal('signup-email'), phone = getVal('signup-phone'),
       pass = getVal('signup-password'), pass2 = getVal('signup-password2');
   signupRole = role;
   renderSignupForm();
-  setVal('signup-name', name); setVal('signup-email', email);
+  setVal('signup-name', name); setVal('signup-email', email); setVal('signup-phone', phone);
   setVal('signup-password', pass); setVal('signup-password2', pass2);
 }
 
@@ -4453,7 +4386,7 @@ function renderSignupForm() {
 
   var roleCards = '<div style="display:flex;gap:10px;margin-bottom:18px;">' +
     roleCardHtml('customer', 'fa-user', 'Customer') +
-    roleCardHtml('merchant', 'fa-store', 'Merchant') +
+    roleCardHtml('merchant', 'fa-store', 'Vendor') +
     roleCardHtml('rider', 'fa-motorcycle', 'Rider') +
     '</div>';
 
@@ -4467,22 +4400,15 @@ function renderSignupForm() {
       '<select id="signup-business-type">' +
       BUSINESS_TYPES.map(function(b) { return '<option value="' + b.value + '">' + b.label + '</option>'; }).join('') +
       '</select></div>' +
-      '<div class="co-field"><label>Merchant Type <span class="co-required">*</span></label>' +
+      '<div class="co-field"><label>Vendor Type <span class="co-required">*</span></label>' +
       '<div style="display:flex;gap:10px;">' +
       merchantTypeCardHtml('permanent', 'fa-shop', 'Permanent', 'Open 7 days a week') +
-      merchantTypeCardHtml('bolanteros', 'fa-calendar-days', 'Bolanteros', 'Open on selected days') +
+      merchantTypeCardHtml('bolanteros', 'fa-calendar-days', 'Bolanteros', 'Tuesdays & Fridays only') +
       '</div></div>' +
       (signupMerchantType === 'bolanteros'
-        ? '<div class="co-field"><label>Open Days <span class="co-required">*</span></label>' +
-          '<div id="signup-open-days" style="display:flex;gap:6px;flex-wrap:wrap;">' +
-          DAY_SHORT.map(function(d, i) {
-            var on = signupOpenDays.indexOf(i) !== -1;
-            return '<span onclick="toggleSignupDay(' + i + ')" style="cursor:pointer;user-select:none;padding:7px 11px;border-radius:8px;font-size:12px;font-weight:600;' +
-              'border:2px solid ' + (on ? 'var(--primary,#22C55E)' : '#e5e5e5') + ';' +
-              'background:' + (on ? '#F0FFF4' : '#fff') + ';color:' + (on ? '#15803D' : '#888') + ';">' + d + '</span>';
-          }).join('') +
-          '</div>' +
-          '<span class="co-field-error">Pick at least one open day</span></div>'
+        ? '<div style="background:#FFFBEB;border-radius:10px;padding:12px;font-size:12.5px;color:#92400E;margin-bottom:4px;">' +
+          '<i class="fas fa-circle-info"></i> <b>Bolanteros</b> are non-permanent market vendors who trade only on the public market\'s designated bolanteros days \u2014 <b>Tuesdays and Fridays</b>. Your store will automatically show as open only on those days.' +
+          '</div>'
         : '');
   } else if (signupRole === 'rider') {
     roleFields =
@@ -4503,8 +4429,12 @@ function renderSignupForm() {
     '<div class="co-field"><label>Full Name <span class="co-required">*</span></label>' +
     '<input type="text" id="signup-name" placeholder="Juan Dela Cruz"/>' +
     '<span class="co-field-error">Full name is required</span></div>' +
-    '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
-    '<input type="email" id="signup-email" placeholder="you@example.com"/>' +
+    '<p style="font-size:11.5px;color:#999;margin:0 0 6px;">Provide at least one \u2014 phone number or email.</p>' +
+    '<div class="co-field"><label>Phone Number <span style="color:#999;font-weight:400;">(optional if you provide an email)</span></label>' +
+    '<input type="tel" id="signup-phone" name="signup_phone" placeholder="09171234567" autocomplete="off" data-lpignore="true" data-1p-ignore/>' +
+    '<span class="co-field-error">Enter a valid phone number (e.g. 09171234567)</span></div>' +
+    '<div class="co-field"><label>Email <span style="color:#999;font-weight:400;">(optional if you provide a phone number)</span></label>' +
+    '<input type="text" id="signup-email" name="signup_email_field" placeholder="you@example.com \u2014 leave blank if you don\'t have one" autocomplete="off" data-lpignore="true" data-1p-ignore/>' +
     '<span class="co-field-error">Enter a valid email address</span></div>' +
     '<div class="co-field"><label>Password <span class="co-required">*</span></label>' +
     '<input type="password" id="signup-password" placeholder="At least 6 characters"/>' +
@@ -4516,7 +4446,7 @@ function renderSignupForm() {
     '<button class="co-btn co-btn--next login-submit" id="signup-submit-btn" onclick="submitSignup()">Sign Up <i class="fas fa-arrow-right"></i></button>' +
     '<p class="login-signup">Already have an account? <a href="#" onclick="closeSignupModal(); openLoginModal(event); return false;">Log In</a></p>';
 
-  ['signup-name', 'signup-email', 'signup-password', 'signup-password2', 'signup-store-name', 'signup-plate-number'].forEach(function(id) {
+  ['signup-name', 'signup-email', 'signup-phone', 'signup-password', 'signup-password2', 'signup-store-name', 'signup-plate-number'].forEach(function(id) {
     var el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('input', function() {
@@ -4529,6 +4459,7 @@ function renderSignupForm() {
 function validateSignupForm() {
   const nameEl = document.getElementById('signup-name');
   const emailEl = document.getElementById('signup-email');
+  const phoneEl = document.getElementById('signup-phone');
   const passEl = document.getElementById('signup-password');
   const pass2El = document.getElementById('signup-password2');
   let isValid = true;
@@ -4546,19 +4477,26 @@ function validateSignupForm() {
   }
 
   markError(nameEl, nameEl.value.trim().length > 0);
-  markError(emailEl, /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailEl.value.trim()));
+  var emailVal = emailEl.value.trim();
+  var phoneVal = phoneEl.value.trim();
+  var emailFormatOk = emailVal === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal);
+  var phoneFormatOk = phoneVal === '' || /^09\d{9}$/.test(phoneVal);
+  var atLeastOneProvided = emailVal !== '' || phoneVal !== '';
+
+  markError(emailEl, emailFormatOk);
+  markError(phoneEl, phoneFormatOk);
+  if (!atLeastOneProvided) {
+    isValid = false;
+    emailEl.closest('.co-field').classList.add('co-field--error');
+    phoneEl.closest('.co-field').classList.add('co-field--error');
+    firstInvalidEl = firstInvalidEl || phoneEl;
+  }
   markError(passEl, passEl.value.length >= 6);
   markError(pass2El, pass2El.value === passEl.value && pass2El.value.length >= 6);
 
   if (signupRole === 'merchant') {
     var storeNameEl = document.getElementById('signup-store-name');
     markError(storeNameEl, storeNameEl.value.trim().length > 0);
-    if (signupMerchantType === 'bolanteros' && !signupOpenDays.length) {
-      isValid = false;
-      var daysField = document.getElementById('signup-open-days');
-      if (daysField) daysField.closest('.co-field').classList.add('co-field--error');
-      showToast('Bolanteros stores need at least one open day', 'info');
-    }
   } else if (signupRole === 'rider') {
     var plateEl = document.getElementById('signup-plate-number');
     markError(plateEl, plateEl.value.trim().length > 0);
@@ -4569,22 +4507,34 @@ function validateSignupForm() {
 }
 
 async function submitSignup() {
+  var emailValCheck = document.getElementById('signup-email').value.trim();
+  var phoneValCheck = document.getElementById('signup-phone').value.trim();
+  if (emailValCheck === '' && phoneValCheck === '') {
+    showToast('Please provide at least an email or phone number', 'info');
+    document.getElementById('signup-phone').closest('.co-field').classList.add('co-field--error');
+    document.getElementById('signup-email').closest('.co-field').classList.add('co-field--error');
+    return;
+  }
   if (!validateSignupForm()) {
     showToast('Please fix the errors below', 'info');
     return;
   }
 
   const name = document.getElementById('signup-name').value.trim();
-  const email = document.getElementById('signup-email').value.trim();
+  const enteredEmail = document.getElementById('signup-email').value.trim();
+  const phone = document.getElementById('signup-phone').value.trim();
   const password = document.getElementById('signup-password').value;
 
-  var metadata = { full_name: name, role: signupRole };
+  var usingSyntheticEmail = enteredEmail === '';
+  var authEmail = usingSyntheticEmail ? phoneToSyntheticEmail(phone) : enteredEmail;
+
+  var metadata = { full_name: name, phone: phone, role: signupRole };
   if (signupRole === 'merchant') {
     metadata.store_name = document.getElementById('signup-store-name').value.trim();
     metadata.business_type = document.getElementById('signup-business-type').value;
     metadata.merchant_type = signupMerchantType;
     metadata.open_days = signupMerchantType === 'bolanteros'
-      ? signupOpenDays.slice().sort(function(a, b) { return a - b; })
+      ? [2, 5] // Tuesdays and Fridays only — fixed, not user-selectable
       : [0, 1, 2, 3, 4, 5, 6];
   } else if (signupRole === 'rider') {
     metadata.vehicle_type = document.getElementById('signup-vehicle-type').value;
@@ -4595,7 +4545,7 @@ async function submitSignup() {
   if (btn) { btn.disabled = true; btn.textContent = 'Creating account...'; }
 
   const { data, error } = await supabase.auth.signUp({
-    email: email,
+    email: authEmail,
     password: password,
     options: { data: metadata }
   });
@@ -4603,26 +4553,59 @@ async function submitSignup() {
   if (btn) { btn.disabled = false; btn.innerHTML = 'Sign Up <i class="fas fa-arrow-right"></i>'; }
 
   if (error) {
-    showToast(error.message, 'error');
+    // The raw Supabase error talks about "email" even when the real cause
+    // is a duplicate phone number — reword it so it makes sense to
+    // someone who never typed an email at all. //
+    if (usingSyntheticEmail && /already registered|already exists/i.test(error.message)) {
+      showToast('An account with this phone number already exists. Try logging in instead.', 'error');
+    } else {
+      showToast(error.message, 'error');
+    }
     return;
+  }
+
+  // The signup trigger copies the auth email straight into profiles.email
+  // — fine for a real email, but a synthetic one would show up looking
+  // like a broken address anywhere an admin views this account. Null it
+  // back out so "No email on file" displays instead, which is accurate. //
+  async function finalizeProfile(userId) {
+    var updates = { phone: phone };
+    if (usingSyntheticEmail) updates.email = null;
+    await supabase.from('profiles').update(updates).eq('id', userId);
   }
 
   if (data.session) {
     currentUser = data.user;
+    await finalizeProfile(data.user.id);
     closeSignupModal();
     await fetchUserRoles();
     updateAuthUI();
     showToast('Account created! Welcome, ' + name.split(' ')[0] + '!');
   } else {
+    if (data.user) await finalizeProfile(data.user.id);
     closeSignupModal();
-    showToast('Account created! Please check your email to confirm.', 'info');
+    showToast(usingSyntheticEmail
+      ? 'Account created! You can log in with your phone number.'
+      : 'Account created! Please check your email to confirm.', 'info');
   }
 }
 
 // Restore session on page load (so refreshing doesn't log the user out) //
+// Catches up profiles.email once a phone-only account's pending "Add
+// Email" confirmation actually completes — currentUser.email will have
+// switched from the synthetic @homeweb.local address to the real one
+// the person confirmed. Shared by restoreSession() (full page load) and
+// openProfileModal() (so this shows up without needing to log out). //
+async function syncConfirmedEmailToProfile() {
+  if (!currentUser || !currentUser.email || currentUser.email.endsWith('@homeweb.local')) return;
+  const { data: prof } = await supabase.from('profiles').select('email').eq('id', currentUser.id).single();
+  if (prof && !prof.email) {
+    await supabase.from('profiles').update({ email: currentUser.email }).eq('id', currentUser.id);
+  }
+}
+
 async function restoreSession() {
-  // Check for an existing session on load — this can safely happen
-  // after the listener above is already subscribed. //
+  // Safe to check after the listener above is already subscribed //
   const { data } = await supabase.auth.getSession();
   if (data.session && !pendingPasswordRecovery) {
     currentUser = data.session.user;
@@ -4631,6 +4614,7 @@ async function restoreSession() {
     updateNotifBadge();
     updateChatBadge();
     startRiderAlertPolling();
+    await syncConfirmedEmailToProfile();
   }
 }
 
@@ -4638,17 +4622,15 @@ async function restoreSession() {
 // ACCOUNT ROLES (customer / merchant / rider) & switching
 // ============================================================
 
-var ROLE_LABELS = { customer: 'Customer', merchant: 'Merchant', rider: 'Rider' };
+var ROLE_LABELS = { customer: 'Customer', merchant: 'Vendor', rider: 'Rider' };
 var ROLE_ICONS = { customer: 'fa-user', merchant: 'fa-store', rider: 'fa-motorcycle' };
 
 function activeRoleKey() {
   return currentUser ? ('homeweb_active_role_' + currentUser.id) : null;
 }
 
-// Writes to the audit trail admin can review — used for the highest-
-// value actions (permit changes, verification/suspension, dispute
-// resolutions), not every action in the system. Fire-and-forget on
-// purpose: a logging failure should never block the actual action. //
+// Logs high-value actions only, not everything. Fire-and-forget so a
+// logging failure never blocks the actual action. //
 function logActivity(action, targetType, targetId, targetLabel, details) {
   if (!currentUser) return;
   supabase.from('activity_log').insert({
@@ -4702,12 +4684,12 @@ async function addAccountRole(role) {
   if (role === 'merchant') {
     var storeName = prompt('Store name:');
     if (!storeName) return;
-    var businessType = prompt('Business classification (vegetable, meat, seafood, sarisari, drinks, other):', 'other') || 'other';
+    var businessType = prompt('Business classification (vegetable, meat, seafood, sarisari, beverages, other):', 'other') || 'other';
 
     const { error: merchErr } = await supabase.from('merchants').insert({
       user_id: currentUser.id, store_name: storeName, business_type: businessType
     });
-    if (merchErr) { showToast('Could not create merchant account: ' + merchErr.message, 'error'); return; }
+    if (merchErr) { showToast('Could not create vendor account: ' + merchErr.message, 'error'); return; }
 
   } else if (role === 'rider') {
     var vehicle = prompt('Vehicle type (motorcycle, tricycle, bicycle):', 'motorcycle') || 'motorcycle';
@@ -4733,7 +4715,10 @@ async function addAccountRole(role) {
 function updateAuthUI() {
   document.querySelectorAll('.sn-login-link').forEach(function(link) {
     if (currentUser) {
-      link.innerHTML = '<i class="fas fa-user-check"></i> ' + currentUser.email.split('@')[0];
+      var navName = (currentUser.user_metadata && currentUser.user_metadata.full_name)
+        ? currentUser.user_metadata.full_name.split(' ')[0]
+        : currentUser.email.split('@')[0];
+      link.innerHTML = '<i class="fas fa-user-check"></i> ' + navName;
       link.onclick = function(e) { e.preventDefault(); openProfileModal(e); };
     } else {
       link.innerHTML = '<i class="fas fa-sign-in-alt"></i> Log In';
@@ -4760,7 +4745,7 @@ function initLoginModal() {
     });
   });
 
-  ['signup-name', 'signup-email', 'signup-password', 'signup-password2'].forEach(function(id) {
+  ['signup-name', 'signup-email', 'signup-phone', 'signup-password', 'signup-password2'].forEach(function(id) {
     var el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('input', function() {
@@ -4850,9 +4835,9 @@ function injectModals() {
     '<div class="login-icon"><i class="fas fa-user-circle"></i></div>' +
     '<h2>Welcome Back</h2>' +
     '<p class="login-sub">Log in to your HomeWeb account</p>' +
-    '<div class="co-field"><label>Email <span class="co-required">*</span></label>' +
-    '<input type="email" id="login-email" placeholder="you@example.com"/>' +
-    '<span class="co-field-error">Enter a valid email address</span></div>' +
+    '<div class="co-field"><label>Email or Phone Number <span class="co-required">*</span></label>' +
+    '<input type="text" id="login-email" placeholder="you@example.com or 09171234567"/>' +
+    '<span class="co-field-error">Enter your email or phone number</span></div>' +
     '<div class="co-field"><label>Password <span class="co-required">*</span></label>' +
     '<input type="password" id="login-password" placeholder="Enter your password"/>' +
     '<span class="co-field-error">Password is required</span></div>' +
@@ -4885,7 +4870,7 @@ function injectModals() {
     '<div id="sn-profile-body" style="padding:8px 4px;"></div>' +
     '</div>' +
 
-    // Merchant dashboard overlay + modal
+    // Vendor dashboard overlay + modal
     '<div id="sn-merchantOverlay" class="sn-overlay" onclick="closeMerchantDashboard()"></div>' +
     '<div id="sn-merchantModal" class="sn-dashboard-modal">' +
     '<button class="pm-close" onclick="closeMerchantDashboard()"><i class="fas fa-times"></i></button>' +
@@ -4956,7 +4941,7 @@ function injectModals() {
     '<div class="login-body" id="sn-contact-profile-body"></div>' +
     '</div>' +
 
-    // Merchant storefront overlay + modal
+    // Vendor storefront overlay + modal
     '<div id="sn-storeOverlay" class="sn-overlay" onclick="closeMerchantStorefront()"></div>' +
     '<div id="sn-storeModal" class="sn-tracking-modal">' +
     '<button class="pm-close" onclick="closeMerchantStorefront()"><i class="fas fa-times"></i></button>' +
@@ -5025,9 +5010,7 @@ function timeAgo(isoString) {
   return days + 'd ago';
 }
 
-// Notifications are scoped to whichever role is currently active — a
-// customer/merchant/rider account only ever sees notifications relevant
-// to that role, never a mixed feed. //
+// Scoped to the active role only, never a mixed feed //
 async function fetchNotifications() {
   if (activeRole === 'merchant') return await fetchMerchantNotifications();
   if (activeRole === 'rider') return await fetchRiderNotifications();
@@ -5045,8 +5028,7 @@ async function fetchCustomerNotifications() {
   if (error) { console.error('fetchCustomerNotifications error:', error); return []; }
   var notifs = data || [];
 
-  // Reminder: nudge the customer if any of their orders have been sitting
-  // in "awaiting confirmation" past the grace period without action. //
+  // Nudge if an order's been sitting unconfirmed past the grace period //
   const { data: pendingOrders } = await supabase
     .from('orders')
     .select('id, order_code, updated_at')
@@ -5114,8 +5096,7 @@ async function fetchMerchantNotifications() {
   return notifs;
 }
 
-// Rider-side: status updates on deliveries they're assigned to, worded
-// from the rider's point of view, plus non-delivery disputes. //
+// Rider-side status updates, worded from their point of view //
 async function fetchRiderNotifications() {
   const { data: statusRows, error } = await supabase
     .from('order_status_history')
@@ -5138,8 +5119,7 @@ async function fetchRiderNotifications() {
     };
   });
 
-  // Also flag disputes explicitly, since those need a rider's attention
-  // even though they don't add a new status_history row. //
+  // Disputes need attention too even without a new status_history row //
   const { data: disputedOrders } = await supabase
     .from('orders')
     .select('id, order_code, not_arrived_reported_at')
@@ -5234,18 +5214,12 @@ async function openNotificationsModal(e) {
   updateNotifBadge();
 }
 
-// Hides the notification list going forward — purely a per-device display
-// filter. The underlying order_status_history / order records are never
-// touched, so nothing is lost from the seller's sales report, the rider's
-// delivery history, or the order timeline itself. //
+// Just a display filter — underlying order records are never touched //
 function clearAllNotifications() {
   localStorage.setItem(notifClearedKey(), new Date().toISOString());
   localStorage.setItem(notifSeenKey(), new Date().toISOString());
-  // Deliberately NOT touching currentNotifList here — the Logs view reads
-  // from this same cached list, and clearing the main view should never
-  // affect what Logs can show. The main view's own render logic already
-  // filters against the cleared timestamp; the underlying data (and this
-  // cache) stays untouched. //
+  // Don't touch currentNotifList — Logs view reads the same cache and
+  // shouldn't be affected by clearing the main view //
   renderNotifications(currentNotifList);
   updateNotifBadge();
   showToast('Notifications cleared', 'info');
@@ -5260,6 +5234,7 @@ function closeNotificationsModal() {
 var NOTIF_MAIN_WINDOW_MS = 3 * 60 * 60 * 1000; // 3 hours - keeps the main list clean
 var notifShowingLogs = false;
 
+// #CUSTOMER_NOTIFICATIONS
 function renderNotifications(notifs) {
   var list = document.getElementById('sn-notif-list');
 
@@ -5362,6 +5337,7 @@ function viewOrderNow(orderId) {
 
 
 
+// #CUSTOMER_PROFILE_MODAL
 async function openProfileModal(e) {
   if (e) e.preventDefault();
 
@@ -5370,6 +5346,14 @@ async function openProfileModal(e) {
     openLoginModal();
     return;
   }
+
+  // Re-check the actual current session rather than trusting whatever
+  // currentUser was cached from the original login — this is what lets
+  // a confirmed "Add Email" change show up here without needing to log
+  // out and back in first. //
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (sessionData.session) currentUser = sessionData.session.user;
+  await syncConfirmedEmailToProfile();
 
   document.getElementById('sn-profileOverlay').classList.add('active');
   document.getElementById('sn-profileModal').classList.add('active');
@@ -5426,9 +5410,10 @@ function closeProfileModal() {
   document.body.style.overflow = '';
 }
 
+// #CUSTOMER_PROFILE_EDIT
 function renderProfileForm(profile, roleStats) {
   var body = document.getElementById('sn-profile-body');
-  var initial = (profile.full_name || currentUser.email || '?').trim().charAt(0).toUpperCase();
+  var initial = (profile.full_name || profile.email || '?').trim().charAt(0).toUpperCase();
   roleStats = roleStats || {};
 
   var roleChips = '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:10px 0 4px;">' +
@@ -5456,7 +5441,7 @@ function renderProfileForm(profile, roleStats) {
   var addRoleButtons = '';
   if (userRoles.indexOf('merchant') === -1) {
     addRoleButtons += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-bottom:8px;" onclick="addAccountRole(\'merchant\')">' +
-      '<i class="fas fa-store"></i> Register as Merchant</button>';
+      '<i class="fas fa-store"></i> Register as Vendor</button>';
   }
   if (userRoles.indexOf('rider') === -1) {
     addRoleButtons += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-bottom:8px;" onclick="addAccountRole(\'rider\')">' +
@@ -5503,7 +5488,13 @@ function renderProfileForm(profile, roleStats) {
     '<input type="file" id="avatar-file-input" accept="image/*" style="display:none;" onchange="uploadAvatar(this.files[0])"/>' +
     '</div>' +
     '<h2 style="margin:0;">' + (profile.full_name || 'HomeWeb Shopper') + '</h2>' +
-    '<p style="color:#888;margin:4px 0 0;">' + currentUser.email + '</p>' +
+    '<p style="color:#888;margin:4px 0 0;">' + (profile.email || (profile.phone ? profile.phone : 'No email or phone on file')) + '</p>' +
+    (!profile.email
+      ? '<div style="background:#FFFBEB;border-radius:10px;padding:10px 12px;margin:10px 0 0;text-align:left;">' +
+        '<p style="margin:0;font-size:12px;color:#92400E;"><i class="fas fa-circle-info"></i> No verified email connected to this account. Your account works normally, but password reset requires an email \u2014 if you ever forget your password, you\'ll need to contact HomeWeb support instead.</p>' +
+        '<button class="co-btn" style="background:#fff;border:1px solid #FDE68A;color:#92400E;font-size:11.5px;padding:6px 12px;margin-top:8px;" onclick="addEmailToAccount()"><i class="fas fa-plus"></i> Add Email</button>' +
+        '</div>'
+      : '') +
     roleChips +
     '</div>' +
 
@@ -5526,6 +5517,31 @@ function renderProfileForm(profile, roleStats) {
 
     '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;" onclick="closeProfileModal(); logout();">' +
     '<i class="fas fa-sign-out-alt"></i> Log Out</button>';
+}
+
+// Lets someone who signed up phone-only add a real email later. Uses
+// Supabase's normal email-change flow, which requires clicking a
+// confirmation link before it actually takes effect — so this
+// deliberately does NOT update profiles.email yet, or the notice would
+// disappear before the change is actually confirmed. See the sync check
+// in restoreSession() for where that catch-up happens once confirmed. //
+async function addEmailToAccount() {
+  var newEmail = prompt('Enter the email address you\'d like to add to your account:');
+  if (!newEmail) return;
+  newEmail = newEmail.trim();
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+    showToast('Enter a valid email address', 'error');
+    return;
+  }
+
+  const { error } = await supabase.auth.updateUser({ email: newEmail });
+  if (error) {
+    showToast('Could not add email: ' + error.message, 'error');
+    return;
+  }
+
+  showToast('Confirmation email sent to ' + newEmail + ' \u2014 click the link to finish adding it. Your account keeps working normally in the meantime.', 'info');
 }
 
 async function saveProfileChanges() {
@@ -5615,7 +5631,7 @@ async function openMerchantDashboard(e) {
     return;
   }
   if (userRoles.indexOf('merchant') === -1) {
-    showToast('You need a Merchant account first — register one from your profile', 'info');
+    showToast('You need a Vendor account first — register one from your profile', 'info');
     openProfileModal();
     return;
   }
@@ -5667,8 +5683,7 @@ async function loadMyMerchantProducts() {
   myMerchantProducts = error ? [] : (data || []);
 }
 
-// Pull every order_item that belongs to one of this merchant's products,
-// along with the parent order's status/date/payment — then aggregate client-side.
+// pulls order_items for this merchant's products, aggregates client-side
 async function fetchMerchantSales(dateFilter, specificDate) {
   dateFilter = dateFilter || 'all';
   specificDate = specificDate || '';
@@ -5708,8 +5723,7 @@ async function fetchMerchantSales(dateFilter, specificDate) {
     if (!byCategory[cat]) byCategory[cat] = 0;
     byCategory[cat] += lineTotal;
 
-    // Only counts toward profit if this merchant actually entered a cost
-    // price for this product — otherwise we honestly don't know it. //
+    // only counts toward profit if a cost price was actually entered //
     var costPrice = r.cost_price;
     if (costPrice !== null && costPrice !== undefined) {
       var lineProfit = (r.price - costPrice) * r.qty;
@@ -5744,8 +5758,7 @@ async function fetchMerchantSales(dateFilter, specificDate) {
 
   var recentOrders = Object.values(byOrder).sort(function(a, b) { return new Date(b.createdAt) - new Date(a.createdAt); }).slice(0, 15);
 
-  // Attach customer names — profiles isn't directly joinable from orders via
-  // PostgREST (sibling FKs to auth.users), so fetch them separately. //
+  // fetched separately since profiles isn't directly joinable here //
   var customerIds = Array.from(new Set(recentOrders.map(function(o) { return o.customerId; }).filter(Boolean)));
   if (customerIds.length) {
     const { data: custProfiles } = await supabase.from('profiles').select('id, full_name').in('id', customerIds);
@@ -5760,16 +5773,13 @@ async function fetchMerchantSales(dateFilter, specificDate) {
   var deliveredCount = Object.values(byOrder).filter(function(o) { return o.status === 'delivered'; }).length;
   var completionRate = orderIds.length > 0 ? Math.round((deliveredCount / orderIds.length) * 100) : null;
 
-  // Sell-through rate: units sold vs units ever stocked (sold + current stock) —
-  // a genuine operational metric, not fabricated. //
+  // units sold vs units ever stocked //
   const { data: myProducts } = await supabase.from('products').select('stock_qty, sold_count').eq('merchant_id', myMerchantId);
   var totalSold = 0, totalEverStocked = 0;
   (myProducts || []).forEach(function(p) { totalSold += p.sold_count || 0; totalEverStocked += (p.sold_count || 0) + (p.stock_qty || 0); });
   var sellThroughRate = totalEverStocked > 0 ? Math.round((totalSold / totalEverStocked) * 100) : null;
 
-  // Week-over-week comparison — real, using actual order timestamps.
-  // (Not year-over-year: the store hasn't been live a full year, so that
-  // comparison would be meaningless or fabricated.) //
+  // week-over-week, not year-over-year — store hasn't been live a full year //
   var now = Date.now();
   var weekMs = 7 * 24 * 60 * 60 * 1000;
   var thisWeekRevenue = 0, lastWeekRevenue = 0;
@@ -5803,8 +5813,7 @@ async function fetchMerchantSales(dateFilter, specificDate) {
   return myMerchantSales;
 }
 
-// Build a merged, chronological log of everything that happened across this
-// merchant's store: order status changes, stock in/out, and new reviews. //
+// merged chronological log: order changes, stock in/out, new reviews //
 async function fetchMerchantActivity(orderIds, orderCodeMap) {
   var events = [];
 
@@ -5886,6 +5895,7 @@ function dateGroupLabel(iso) {
   return formatDate(iso);
 }
 
+// #VENDOR_ORDERS_TAB
 function renderMerchantOrdersView(data) {
   var body = document.getElementById('sn-merchant-body');
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
@@ -5907,8 +5917,7 @@ function renderMerchantOrdersView(data) {
     '</div>';
   window.__lastMerchantOrders = data.orders;
 
-  // Context-dependent secondary filter: a date-range dropdown when
-  // grouping by date, a product picker when grouping by product. //
+  // second filter changes depending on the grouping mode //
   var subFilter;
   if (merchantOrdersGroupBy === 'date') {
     subFilter = '<select onchange="changeMerchantOrdersDateFilter(this.value)" style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:14px;">' +
@@ -6017,6 +6026,7 @@ async function fetchMerchantInventory() {
   return { products: myProducts || [], movements: movements || [] };
 }
 
+// #VENDOR_INVENTORY_TAB
 function renderMerchantInventoryView(data) {
   var body = document.getElementById('sn-merchant-body');
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
@@ -6027,13 +6037,13 @@ function renderMerchantInventoryView(data) {
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
-  var totalUnits = data.products.reduce(function(a, p) { return a + (p.stock_qty || 0); }, 0);
+  var totalProducts = data.products.length;
   var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= 5; }).length;
   var outOfStockCount = data.products.filter(function(p) { return p.stock_qty <= 0; }).length;
 
   var summaryCards = '<div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">' +
     '<div style="flex:1;min-width:90px;background:#F0F8FF;border-radius:10px;padding:12px;text-align:center;">' +
-    '<p style="margin:0;font-size:11px;color:#666;">Total Units</p><p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#3B82F6;">' + totalUnits + '</p></div>' +
+    '<p style="margin:0;font-size:11px;color:#666;">Total Product</p><p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#3B82F6;">' + totalProducts + '</p></div>' +
     '<div style="flex:1;min-width:90px;background:#FFFBEB;border-radius:10px;padding:12px;text-align:center;">' +
     '<p style="margin:0;font-size:11px;color:#666;">Low Stock</p><p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#B45309;">' + lowStockCount + '</p></div>' +
     '<div style="flex:1;min-width:90px;background:#FEE2E2;border-radius:10px;padding:12px;text-align:center;">' +
@@ -6058,8 +6068,7 @@ function renderMerchantInventoryView(data) {
       '</tbody></table></div>'
     : '<p style="color:#999;font-size:13px;">No products yet.</p>';
 
-  // Group by product so the dropdown can filter to just one at a time —
-  // same interaction pattern as the Sales Report's date filter. //
+  // same dropdown pattern as the Sales Report date filter //
   var byProduct = {};
   var productOrder = [];
   data.movements.forEach(function(m) {
@@ -6135,9 +6144,7 @@ function renderMerchantInventoryView(data) {
     '<h3 style="margin:18px 0 8px;font-size:14px;">Stock In / Out Ledger</h3>' + inventoryFilters + ledgerHtml;
 }
 
-// Renders a circular percentage gauge as inline SVG — used only for
-// metrics that are genuinely computable percentages (sell-through rate,
-// order completion rate), never as decoration standing in for a real number. //
+// circular gauge for real computable percentages only, not decoration //
 function gaugeSvg(pct, color, size) {
   size = size || 84;
   var r = size / 2 - 8;
@@ -6153,6 +6160,7 @@ function gaugeSvg(pct, color, size) {
     '</svg>';
 }
 
+// #VENDOR_SALES_REPORT
 function renderMerchantSalesView() {
   var body = document.getElementById('sn-merchant-body');
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
@@ -6183,8 +6191,7 @@ function renderMerchantSalesView() {
     '<p style="margin:4px 0 0;font-weight:700;font-size:16px;color:#F59E0B;">' + s.orderCount + '</p></div>' +
     '</div>';
 
-  // Gauges — only rendered when there's actually enough data to compute
-  // a meaningful percentage; otherwise shown as "not enough data yet". //
+  // only rendered when there's enough data for a meaningful percentage //
   var gaugesHtml = '<div style="display:flex;gap:10px;margin-bottom:16px;">' +
     '<div style="flex:1;background:#fff;border:1px solid #eee;border-radius:10px;padding:14px;text-align:center;">' +
     (s.sellThroughRate === null
@@ -6215,8 +6222,7 @@ function renderMerchantSalesView() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No sales yet.</p>';
 
-  // Net profit — only shown for products where the merchant actually
-  // entered a cost price. Never estimated or guessed. //
+  // only shown where a cost price was actually entered, never guessed //
   var profitHtml;
   if (s.itemsWithCost === 0) {
     profitHtml = '<div style="background:#F9FAFB;border-radius:10px;padding:14px;">' +
@@ -6231,8 +6237,7 @@ function renderMerchantSalesView() {
       profitNote + '</div>';
   }
 
-  // Per-product profit breakdown, grouped exactly like the ledger — each
-  // product's own margin, not just a platform-wide total. //
+  // per-product margin, not just a platform-wide total //
   var productsWithCost = (s.productProfits || []).filter(function(p) { return p.itemsWithCost > 0; });
   var productProfitHtml = productsWithCost.length
     ? '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12.5px;">' +
@@ -6259,8 +6264,7 @@ function renderMerchantSalesView() {
     (s.specificDate ? '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="clearMerchantSalesSpecificDate()"><i class="fas fa-times"></i> Clear date</button>' : '') +
     '</div>';
 
-  // Week-over-week — real comparison using actual timestamps, not a
-  // fabricated year-over-year figure the store has no history for. //
+  // real week-over-week, no fabricated year comparison //
   var wowHtml;
   if (s.wowChange === null) {
     wowHtml = '<p style="color:#999;font-size:12px;">Not enough order history yet for a week-over-week comparison.</p>';
@@ -6339,14 +6343,9 @@ function renderMerchantSalesView() {
     activityHtml;
 }
 
-// Builds a clean, print-formatted PDF from the sales data directly,
-// rather than screenshotting the on-screen dashboard. The old approach
-// used html2canvas to capture the live styled UI and sliced that tall
-// image across pages — which cut rows in half at page boundaries and
-// carried the dark fullscreen styling into what should be a clean
-// document. This lays out a proper report: a titled header, formatted
-// summary lines, and real tables that paginate cleanly via autoTable
-// (page breaks fall between rows, never through them). //
+// Builds the PDF from real data instead of screenshotting the dashboard —
+// the old screenshot approach cut rows in half at page breaks. //
+// #VENDOR_SALES_PDF_EXPORT
 function downloadSalesReportPDF() {
   var need = [];
   if (!window.jspdf) need.push('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
@@ -6365,8 +6364,7 @@ function downloadSalesReportPDF() {
 }
 
 function ensureAutoTableThenBuild() {
-  // autoTable is a jsPDF plugin loaded separately; it attaches itself to
-  // the jsPDF prototype once its script runs. //
+  // autoTable attaches to jsPDF's prototype once its script loads //
   var doc = new window.jspdf.jsPDF('p', 'pt', 'a4');
   if (typeof doc.autoTable === 'function') { buildSalesReportPDF(); return; }
 
@@ -6465,15 +6463,12 @@ function buildSalesReportPDF() {
   showToast('PDF downloaded \u2705');
 }
 
-// Peso formatting without the currency glyph, since some PDF core fonts
-// don't include the peso sign and would render it as a blank box. //
+// no peso glyph — some PDF fonts render it as a blank box //
 function fmtPlain(n) {
   return 'PHP ' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// Captures the report as a PNG using html2canvas, loaded on demand from
-// a CDN so it doesn't add weight to every page load — only merchants who
-// actually click this ever download it. //
+// loaded on demand from CDN so it's not dead weight on every page load //
 function downloadSalesReportImage() {
   if (window.html2canvas) {
     captureSalesReportImage();
@@ -6509,6 +6504,7 @@ function captureSalesReportImage() {
 }
 
 
+// #VENDOR_DASHBOARD_TABS
 function renderMerchantDashboard() {
   var body = document.getElementById('sn-merchant-body');
 
@@ -6617,6 +6613,7 @@ async function renderMerchantVerificationView(tabs) {
     '<p style="margin:10px 0 0;font-size:11.5px;color:#999;">Accepted: photo or scan of your DTI/BIR/Barangay business permit. Visible to customers and reviewed by HomeWeb admins.</p>';
 }
 
+// #VENDOR_BUSINESS_PERMIT
 async function uploadBusinessPermit(file) {
   if (!file) return;
   if (file.size > 8 * 1024 * 1024) { showToast('File must be under 8MB', 'error'); return; }
@@ -6657,6 +6654,7 @@ async function removeBusinessPermit() {
   renderMerchantDashboard();
 }
 
+// #VENDOR_STORE_PHOTO
 async function uploadStoreLogo(file) {
   if (!file) return;
   if (!file.type.startsWith('image/')) { showToast('Please choose an image', 'error'); return; }
@@ -6743,6 +6741,7 @@ function renderMerchantProductsView(tabs) {
 }
 
 // Add/Edit product form (shown inline in the same dashboard body) //
+// #VENDOR_ADD_EDIT_PRODUCT
 function openProductForm(productId) {
   editingProductId = productId;
   pendingProductImageFile = null;
@@ -6801,6 +6800,7 @@ function previewProductImage(file) {
   preview.innerHTML = '<img src="' + URL.createObjectURL(file) + '" style="width:100%;height:100%;object-fit:cover;"/>';
 }
 
+// #VENDOR_SAVE_PRODUCT
 async function saveProduct() {
   var name = document.getElementById('pf-name').value.trim();
   var price = parseFloat(document.getElementById('pf-price').value);
@@ -6874,6 +6874,7 @@ async function saveProduct() {
 
 var currentStockInProductId = null;
 
+// #VENDOR_STOCK_IN
 function openStockInModal(productId) {
   var product = myMerchantProducts.find(function(x) { return x.id === productId; });
   if (!product) return;
@@ -7009,6 +7010,7 @@ function stopRiderAlertPolling() {
   if (overlay) { overlay.classList.remove('active'); document.getElementById('sn-riderAlertModal').classList.remove('active'); }
 }
 
+// #RIDER_ORDER_ALERT_POPUP
 async function checkForRiderOrderAlert() {
   if (!currentUser || userRoles.indexOf('rider') === -1) {
     console.log('[rider-alert] skipped: not logged in as a rider on this device', { hasUser: !!currentUser, roles: userRoles });
@@ -7016,10 +7018,7 @@ async function checkForRiderOrderAlert() {
   }
 
   if (riderAlertCurrentOrderId) {
-    // An alert is already showing — use this poll to verify it's still
-    // valid rather than just sitting idle. If another rider claimed it,
-    // or the customer cancelled it, close the popup automatically so
-    // riders aren't left staring at a dead order. //
+    // reuse this poll to check the shown order is still valid, not idle //
     const { data: stillValid } = await supabase
       .from('orders')
       .select('status, rider_user_id')
@@ -7035,10 +7034,14 @@ async function checkForRiderOrderAlert() {
     return;
   }
 
-  const { data: riderRow, error: riderErr } = await supabase.from('riders').select('is_available').eq('user_id', currentUser.id).single();
+  const { data: riderRow, error: riderErr } = await supabase.from('riders').select('is_available, is_suspended').eq('user_id', currentUser.id).single();
   if (riderErr) console.error('[rider-alert] could not load rider row:', riderErr);
   if (!riderRow || !riderRow.is_available) {
     console.log('[rider-alert] skipped: this account is offline (is_available=false in the riders table). Toggle online in My Deliveries.', { riderRow: riderRow });
+    return;
+  }
+  if (riderRow.is_suspended) {
+    console.log('[rider-alert] skipped: this account is suspended.');
     return;
   }
 
@@ -7066,9 +7069,7 @@ async function checkForRiderOrderAlert() {
 
   console.log('[rider-alert] showing alert for order', order.order_code);
 
-  // Bundle in any other unclaimed orders in the same barangay so the
-  // rider can accept a whole route at once — this naturally covers same-
-  // checkout siblings too, since one checkout always shares one address. //
+  // bundle nearby unclaimed orders so a rider can accept a whole route //
   var orderBarangay = (order.shipping_barangay || '').trim().toLowerCase();
   var siblings = orderBarangay
     ? candidates.filter(function(o) { return (o.shipping_barangay || '').trim().toLowerCase() === orderBarangay; })
@@ -7127,10 +7128,8 @@ function dismissRiderAlert(orderIdsStr) {
   document.getElementById('sn-riderAlertModal').classList.remove('active');
 }
 
-// Auto-closes the alert popup when the order it's showing stops being
-// valid (cancelled by the customer, or claimed by another rider) while
-// this rider was still looking at it, rather than leaving them staring
-// at a dead order until they try to accept it themselves. //
+// closes the popup automatically if the order stops being valid
+// mid-view (cancelled or claimed by someone else) //
 function closeRiderAlertPopup(reasonMessage) {
   if (riderAlertCurrentOrderId) riderAlertShownOrderIds[riderAlertCurrentOrderId] = true;
   riderAlertCurrentOrderId = null;
@@ -7148,11 +7147,9 @@ async function acceptOrderFromAlert(orderIdsStr) {
     for (var i = 0; i < ids.length; i++) {
       await acceptOrder(ids[i]);
     }
-    // acceptOrder() already shows the correct toast for success / too-late / error,
-    // and already refreshes the dashboard lists regardless of whether it's open.
+    // acceptOrder() already handles the toast + dashboard refresh
   } finally {
-    // Guaranteed to run even if acceptOrder somehow throws — the popup can
-    // never get stuck on "Accepting..." forever. //
+    // runs even if acceptOrder throws, so the button never gets stuck //
     dismissRiderAlert(orderIdsStr);
   }
 }
@@ -7175,8 +7172,7 @@ async function rejectOrderAlert(orderIdsStr) {
     return;
   }
 
-  // One rejection logged against the batch's primary order — a batch is
-  // one decision, not N separate strikes against the daily limit. //
+  // one rejection per batch, not one per order in it //
   const { error } = await supabase.from('rider_rejections').insert({
     rider_user_id: currentUser.id, order_id: primaryId, reason: reason.trim()
   });
@@ -7245,9 +7241,7 @@ async function loadMyAssignedOrders() {
   myAssignedOrders = error ? [] : (data || []);
 }
 
-// Orders that have been placed but no rider has claimed yet //
-// Orders older than this stop showing up as "available" — prevents old
-// abandoned test/demo orders from lingering and popping up unrealistically. //
+// unclaimed orders older than this stop showing as "available" //
 var RIDER_ALERT_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 async function loadAvailableOrders() {
@@ -7262,12 +7256,7 @@ async function loadAvailableOrders() {
   availableOrders = error ? [] : (data || []);
 }
 
-// Groups available orders by barangay so a rider can accept several
-// nearby deliveries together — genuinely useful proximity batching (not
-// just same-checkout siblings, though those are always included too,
-// since one checkout always shares one delivery address). Sta. Barbara
-// is a single municipality, so barangay is the right granularity —
-// city/municipality alone would group the entire town together. //
+// grouped by barangay, not city — city would lump the whole town together //
 function groupAvailableOrdersByBarangay() {
   var seen = {};
   var groups = [];
@@ -7280,10 +7269,7 @@ function groupAvailableOrdersByBarangay() {
   return groups;
 }
 
-// Claim an unassigned order for this rider (handles the race where
-// someone else — or the auto-assign fallback — grabbed it first) //
-// Accepts one or more orders — used by the dashboard's "Accept All" button
-// for batched sibling orders from the same checkout. //
+// claims an order, handles the race if someone else grabbed it first //
 async function acceptOrderBatch(orderIdsStr) {
   var ids = orderIdsStr.split(',');
   for (var i = 0; i < ids.length; i++) {
@@ -7291,10 +7277,10 @@ async function acceptOrderBatch(orderIdsStr) {
   }
 }
 
+// #RIDER_ACCEPT_ORDER
 async function acceptOrder(orderId) {
   try {
-    // If the rider accepted straight from the alert popup without ever opening
-    // "My Deliveries" this session, myRiderProfile won't be cached yet — fetch it. //
+    // fetch it if not cached yet (can happen accepting straight from the popup) //
     if (!myRiderProfile) {
       const { data: riderRow, error: riderErr } = await supabase.from('riders').select('*').eq('user_id', currentUser.id).single();
       if (riderErr) console.error('acceptOrder: could not load own rider profile:', riderErr);
@@ -7329,9 +7315,7 @@ async function acceptOrder(orderId) {
       return false;
     }
     if (!data || !data.length) {
-      // The update matched zero rows — could mean someone else claimed it,
-      // OR the customer cancelled it. Check which actually happened
-      // instead of showing the same generic "too late" message either way. //
+      // zero rows = claimed OR cancelled, check which so the message is accurate //
       const { data: currentState } = await supabase.from('orders').select('status, rider_user_id').eq('id', orderId).single();
 
       if (currentState && currentState.status === 'cancelled') {
@@ -7354,12 +7338,8 @@ async function acceptOrder(orderId) {
       description: 'Your order has been accepted by a rider and is being prepared for pickup.'
     });
 
-    // Deliberately NOT touching is_available here. A rider's online/offline
-    // status is their own manual choice (the toggle switch), not something
-    // that should flip automatically just because they accepted a
-    // delivery — riders can legitimately handle several orders at once,
-    // and this was exactly what was silently blocking them from getting
-    // any further alerts until their current delivery finished. //
+    // don't touch is_available here — that's a manual toggle, and
+    // auto-flipping it was blocking riders from multi-order alerts //
 
     showToast('Order accepted \uD83D\uDEF5');
     await loadMyAssignedOrders();
@@ -7368,8 +7348,7 @@ async function acceptOrder(orderId) {
     return true;
 
   } catch (ex) {
-    // Guarantees the caller's UI (e.g. the alert popup's "Accepting..." button)
-    // can never get stuck forever, no matter what goes wrong here. //
+    // ensures the caller's button never gets stuck no matter what fails //
     console.error('acceptOrder threw an unexpected error:', ex);
     showToast('Could not accept order: ' + (ex && ex.message ? ex.message : 'unknown error') + '. Please try again.', 'error');
     return false;
@@ -7383,8 +7362,7 @@ async function uploadRiderLicense(file) {
 
   showToast('Uploading license...', 'info');
   var ext = file.name.split('.').pop();
-  // Path must start with the rider's own auth uid — this is what the
-  // storage RLS policies check to control who can access it later. //
+  // path must start with the rider's uid — that's what RLS checks //
   var path = currentUser.id + '/license-' + Date.now() + '.' + ext;
 
   const { error: uploadErr } = await supabase.storage.from('rider-docs').upload(path, file, { upsert: true });
@@ -7412,7 +7390,12 @@ function changeRiderHistoryDateFilter(value) {
   renderRiderDashboard();
 }
 
+// #RIDER_AVAILABILITY_TOGGLE
 async function toggleMyAvailability(newState) {
+  if (newState && myRiderProfile && myRiderProfile.is_suspended) {
+    showToast('Your account is suspended \u2014 contact HomeWeb support', 'error');
+    return;
+  }
   const { error } = await supabase.from('riders').update({ is_available: newState }).eq('user_id', currentUser.id);
   if (error) { showToast('Could not update availability: ' + error.message, 'error'); return; }
   myRiderProfile.is_available = newState;
@@ -7421,9 +7404,18 @@ async function toggleMyAvailability(newState) {
   renderRiderDashboard();
 }
 
+// #RIDER_DASHBOARD
 function renderRiderDashboard() {
   var body = document.getElementById('sn-rider-dash-body');
   var available = myRiderProfile ? myRiderProfile.is_available : false;
+
+  var suspensionBanner = (myRiderProfile && myRiderProfile.is_suspended)
+    ? '<div style="background:#FEE2E2;border-radius:10px;padding:14px;margin-bottom:12px;">' +
+      '<p style="margin:0;font-weight:700;color:#DC2626;"><i class="fas fa-ban"></i> Your account is suspended</p>' +
+      '<p style="margin:6px 0 0;font-size:13px;color:#7F1D1D;">' + (myRiderProfile.suspended_reason || 'No reason was given.') + '</p>' +
+      '<p style="margin:8px 0 0;font-size:12.5px;color:#7F1D1D;">You can\'t go online or accept new deliveries while suspended. Any delivery already in progress can still be completed. Contact HomeWeb support if you believe this is a mistake.</p>' +
+      '</div>'
+    : '';
 
   var licenseHtml = myRiderProfile && myRiderProfile.license_path
     ? '<div style="display:flex;align-items:center;justify-content:space-between;background:#F0FFF4;border-radius:10px;padding:12px 16px;margin-bottom:12px;">' +
@@ -7509,6 +7501,7 @@ function renderRiderDashboard() {
 
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
+    suspensionBanner +
     '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed' +
     (myRiderProfile && myRiderProfile.rating_count > 0
       ? ' \u2022 <span style="color:#F59E0B;">' + stars(myEffectiveRating) + '</span> ' + myEffectiveRating.toFixed(1) + ' (' + myRiderProfile.rating_count + ')'
@@ -7536,9 +7529,9 @@ async function riderAdvanceOrder(orderId, newStatus) {
   renderRiderDashboard();
 }
 
-// Requires a photo before an order can move to "awaiting confirmation" —
-// protects the rider from false non-delivery claims, and gives the
-// customer/merchant/admin real evidence if a dispute happens later. //
+// photo required before marking delivered — protects against false
+// non-delivery claims later //
+// #RIDER_PROOF_OF_DELIVERY
 async function submitProofOfDelivery(orderId, file) {
   if (!file) return;
   if (!file.type.startsWith('image/')) { showToast('Please choose a photo', 'error'); return; }
@@ -7578,10 +7571,8 @@ document.addEventListener('DOMContentLoaded', async function() {
   updateCartBadge();
   initSearch();
 
-  // Await this before touching the recovery flag below, so restoreSession()
-  // can see it's still true and correctly skip treating this as a normal
-  // login — otherwise the header would flash "logged in" for a moment
-  // alongside the "set new password" prompt. //
+  // await before clearing the recovery flag, or the header briefly
+  // flashes "logged in" alongside the reset-password prompt //
   await restoreSession();
 
   if (pendingPasswordRecovery) {
@@ -7596,12 +7587,9 @@ document.addEventListener('DOMContentLoaded', async function() {
   renderHomeProducts();
   renderCategoryPage();
 
-  // Keep product cards (ratings, stock, sold counts) live without needing
-  // a manual refresh — useful when reviews/orders happen on another
-  // device during a demo or in normal multi-user use. //
+  // keeps product cards live without a manual refresh //
   setInterval(async function() {
-    // Don't refresh while someone's actively browsing a product/cart/checkout —
-    // re-rendering underneath them would be jarring mid-interaction. //
+    // skip refresh while a modal's open, don't re-render under the user //
     var busyModals = ['sn-productModal', 'sn-checkoutModal', 'sn-storeModal'];
     var isBusy = busyModals.some(function(id) {
       var el = document.getElementById(id);
@@ -7615,10 +7603,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     renderCategoryPage();
     if (currentUser) updateChatBadge();
 
-    // The DB function existed but was never actually called anywhere —
-    // this is what makes the 30-minute auto-cancel genuinely run. Safe
-    // to call from any logged-in client; the function's own logic only
-    // ever acts on orders that truly meet the stale condition. //
+    // this is what actually makes the 30-min auto-cancel run — the
+    // DB function existed already but nothing was calling it //
     if (currentUser) {
       supabase.rpc('check_and_cancel_stale_orders').then(function(res) {
         if (res.error) console.error('check_and_cancel_stale_orders error:', res.error);
