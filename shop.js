@@ -4140,8 +4140,8 @@ async function renderAdminCustomers() {
     .sort(function(a, b) { return ((statsById[b.id] && statsById[b.id].total) || 0) - ((statsById[a.id] && statsById[a.id].total) || 0); })
     .map(function(p) {
       var s = statsById[p.id] || { count: 0, total: 0 };
-      return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;font-family:var(--font, system-ui, sans-serif);' + (p.is_suspended ? 'opacity:0.65;' : '') + '">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+      return '<div style="width:100%;box-sizing:border-box;padding:12px 4px;border-bottom:1px solid #f0f0f0;font-family:var(--font, system-ui, sans-serif);align-self:stretch;' + (p.is_suspended ? 'opacity:0.65;' : '') + '">' +
+        '<div style="width:100%;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;">' +
         '<div>' +
         '<p style="margin:0;font-weight:700;font-size:13px;">' + (p.full_name || 'Unnamed Customer') + (p.is_suspended ? ' <span style="color:#DC2626;font-size:10.5px;font-weight:700;">SUSPENDED</span>' : '') + '</p>' +
         '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.email || 'No email on file') + '</p>' +
@@ -4151,7 +4151,7 @@ async function renderAdminCustomers() {
         '<div style="text-align:right;">' +
         '<p style="margin:0;font-weight:700;font-size:13px;">' + fmt(s.total) + '</p>' +
         '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + s.count + ' order' + (s.count === 1 ? '' : 's') + '</p>' +
-        '</div></div>';
+        '</div></div></div>';
     }).join('') : '<p style="color:#999;font-size:13px;">No customers match your search.</p>';
 
   body.innerHTML = header +
@@ -6117,7 +6117,7 @@ function renderMerchantInventoryView(data) {
             (detailLine ? '<p style="margin:2px 0 0;color:#999;font-size:11px;">' + detailLine + '</p>' : '') +
             (m.reason && m.type === 'in' ? '<p style="margin:2px 0 0;color:#bbb;font-size:10.5px;">' + m.reason + '</p>' : '') + '</div>' +
             '<div style="text-align:right;"><span style="font-weight:700;">' + (m.type === 'in' ? '+' : '\u2212') + m.quantity + '</span>' +
-            '<p style="margin:2px 0 0;color:#aaa;font-size:11px;">' + timeAgo(m.created_at) + '</p></div></div>';
+            '<p style="margin:2px 0 0;color:#aaa;font-size:11px;">' + timeAgo(m.created_at) + '</p>' + '</div></div>';
         }).join('');
 
         return '<div style="margin-bottom:16px;">' +
