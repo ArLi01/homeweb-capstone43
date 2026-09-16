@@ -13,6 +13,18 @@ var CATEGORY_META = {
 };
 var DEFAULT_CATEGORY_META = { bg: '#F9F9F9', color: '#CBD5E1', icon: 'fa-box' };
 
+// Category determines the unit automatically — the merchant never types
+// this in. Vegetable/Meat/Sea Food are sold by weight (kg), Beverages by
+// volume (mL), Sari-sari and Other are sold per piece. //
+var CATEGORY_UNIT = {
+  vegetable: 'kg',
+  meat: 'kg',
+  seafood: 'kg',
+  sarisari: 'pc',
+  drinks: 'mL',
+  other: 'pc'
+};
+
 function getProductImage(id) {
   var p = products.find(function(x) { return x.id === id; });
   return (p && p.image_url) ? p.image_url : null;
@@ -94,15 +106,15 @@ function productStatsLabel(p) {
 // Many market vendors don't have an email address and only use a mobile
 // number — Supabase Auth still requires SOME email internally to create
 // an account, so when no real email is given, we generate one from the
-// phone number instead. This stays entirely behind the scenes: the
-// person never sees or needs to know this string exists, they just sign
-// up and log in with their phone number like normal. //
+// phone number instead. Uses the same .internal TLD already proven to
+// work in this project (the admin account uses admin@homeweb.internal),
+// under its own subdomain so it never collides with that fixed address. //
 function normalizePhoneDigits(phone) {
   return (phone || '').replace(/\D/g, '');
 }
 
 function phoneToSyntheticEmail(phone) {
-  return normalizePhoneDigits(phone) + '@homeweb.local';
+  return normalizePhoneDigits(phone) + '@phone.homeweb.internal';
 }
 
 function looksLikePhone(value) {
@@ -447,7 +459,7 @@ function loadCartForCurrentUser() {
 }
 
 function updateCartBadge() {
-  const total = cart.reduce((a, b) => a + b.qty, 0);
+  const total = cart.length;
   document.querySelectorAll('.cart-badge').forEach(el => {
     el.textContent = total;
     el.style.display = total ? 'inline' : 'none';
@@ -733,7 +745,12 @@ function openProductModal(id) {
   m.querySelector('.pm-location').innerHTML = '<i class="fas fa-store"></i> Sold by <span onclick="closeProductModal(); openMerchantStorefront(\'' + p.merchant_id + '\')" style="text-decoration:underline;cursor:pointer;color:var(--primary,#22C55E);font-weight:600;">' + p.location + '</span>' +
     (p.merchantVerified ? ' <i class="fas fa-badge-check" title="Verified Seller" style="color:var(--primary,#22C55E);"></i>' : '') +
     ' <i class="fas fa-chevron-right" style="font-size:10px;color:#999;"></i>';
-  m.querySelector('.pm-qty-val').value = 1;
+  var qtyInput = m.querySelector('.pm-qty-val');
+  var qtyStep = getQtyStep(p.unit);
+  qtyInput.min = qtyStep;
+  qtyInput.step = qtyStep;
+  qtyInput.value = 1;
+  updateProductModalTotal();
 
   var pmStock = m.querySelector('.pm-stock');
   if (pmStock) pmStock.innerHTML = stockLabelHtml(p.stock_qty);
@@ -1773,25 +1790,48 @@ function updateBuyButtonsState(stockQty) {
   if (buyBtn) buyBtn.innerHTML = outOfStock ? '<i class="fas fa-ban"></i> Sold Out' : '<i class="fas fa-bolt"></i> Buy Now';
 }
 
-function changeQty(delta) {
+// Kg-priced products (sold by weight) allow fractional quantities like
+// 0.5kg or 1.2kg — everything else (pieces, packs, boxes) stays whole
+// numbers, since you can't buy half a piece of something. //
+function getQtyStep(unit) {
+  return (unit === 'kg' || unit === 'mL') ? 0.1 : 1;
+}
+
+function changeQty(direction) {
+  var step = getQtyStep(currentProduct.unit);
   var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
-  var attempted = currentProduct.qty + delta;
-  currentProduct.qty = Math.max(1, Math.min(max, attempted));
+  var attempted = currentProduct.qty + (direction * step);
+  // Round to avoid floating point noise (0.1 + 0.2 = 0.30000000000000004) //
+  attempted = Math.round(attempted * 10) / 10;
+  currentProduct.qty = Math.max(step, Math.min(max, attempted));
   document.querySelector('.pm-qty-val').value = currentProduct.qty;
-  if (delta > 0 && attempted > max) showToast('Only ' + max + ' left in stock', 'info');
+  if (direction > 0 && attempted > max) showToast('Only ' + max + ' ' + currentProduct.unit + ' left in stock', 'info');
+  updateProductModalTotal();
 }
 
 // Lets the customer type a quantity directly instead of clicking +/- repeatedly //
 function setQtyDirect(value) {
+  var step = getQtyStep(currentProduct.unit);
   var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
-  var n = parseInt(value, 10);
-  if (isNaN(n) || n < 1) n = 1;
+  var n = parseFloat(value);
+  if (isNaN(n) || n < step) n = step;
+  n = Math.round(n * 10) / 10;
   if (n > max) {
     n = max;
-    showToast('Only ' + max + ' left in stock', 'info');
+    showToast('Only ' + max + ' ' + currentProduct.unit + ' left in stock', 'info');
   }
   currentProduct.qty = n;
   document.querySelector('.pm-qty-val').value = n;
+  updateProductModalTotal();
+}
+
+// Live total — makes the "automatic price" calculation actually visible
+// as the customer adjusts a kg quantity, not something they only
+// discover later in the cart. //
+function updateProductModalTotal() {
+  var totalEl = document.querySelector('.pm-live-total');
+  if (!totalEl || !currentProduct) return;
+  totalEl.textContent = 'Total: ' + fmt(currentProduct.price * currentProduct.qty);
 }
 
 // Add to cart //
@@ -1872,7 +1912,7 @@ function renderCheckout() {
         (item.merchantName ? '<p style="margin:2px 0 0;font-size:11px;color:#999;"><i class="fas fa-store"></i> ' + item.merchantName + '</p>' : '') +
         '<div class="co-cart-controls">' +
         '<button onclick="changeCartQty(\'' + item.id + '\',-1)">&#8722;</button>' +
-        '<input type="number" value="' + item.qty + '" min="1" step="1" ' +
+        '<input type="number" value="' + item.qty + '" min="' + getQtyStep(item.unit) + '" step="' + getQtyStep(item.unit) + '" ' +
         'style="width:48px;text-align:center;border:1px solid #ddd;border-radius:6px;padding:3px 2px;font-size:13px;" ' +
         'onchange="setCartQtyDirect(\'' + item.id + '\', this.value)" onclick="this.select()"/>' +
         '<button onclick="changeCartQty(\'' + item.id + '\',1)"' + (atMax ? ' disabled style="opacity:0.4;"' : '') + '>+</button>' +
@@ -2083,16 +2123,17 @@ function goStep(delta) {
 }
 
 // Change quantity inside checkout cart //
-function changeCartQty(id, delta) {
+function changeCartQty(id, direction) {
   var item = cart.find(function(x) { return x.id === id; });
   if (!item) return;
+  var step = getQtyStep(item.unit);
   var max = typeof item.stock_qty === 'number' ? item.stock_qty : 99;
-  var attempted = item.qty + delta;
-  if (delta > 0 && attempted > max) {
+  var attempted = Math.round((item.qty + (direction * step)) * 10) / 10;
+  if (direction > 0 && attempted > max) {
     showToast('Only ' + max + ' ' + (item.unit || 'pc') + ' left in stock', 'info');
     return;
   }
-  item.qty = Math.max(1, attempted);
+  item.qty = Math.max(step, attempted);
   saveCart();
   updateCartBadge();
   renderCheckout();
@@ -2102,9 +2143,11 @@ function changeCartQty(id, delta) {
 function setCartQtyDirect(id, value) {
   var item = cart.find(function(x) { return x.id === id; });
   if (!item) return;
+  var step = getQtyStep(item.unit);
   var max = typeof item.stock_qty === 'number' ? item.stock_qty : 99;
-  var n = parseInt(value, 10);
-  if (isNaN(n) || n < 1) n = 1;
+  var n = parseFloat(value);
+  if (isNaN(n) || n < step) n = step;
+  n = Math.round(n * 10) / 10;
   if (n > max) {
     n = max;
     showToast('Only ' + max + ' ' + (item.unit || 'pc') + ' left in stock', 'info');
@@ -4140,8 +4183,8 @@ async function renderAdminCustomers() {
     .sort(function(a, b) { return ((statsById[b.id] && statsById[b.id].total) || 0) - ((statsById[a.id] && statsById[a.id].total) || 0); })
     .map(function(p) {
       var s = statsById[p.id] || { count: 0, total: 0 };
-      return '<div style="width:100%;box-sizing:border-box;padding:12px 4px;border-bottom:1px solid #f0f0f0;font-family:var(--font, system-ui, sans-serif);align-self:stretch;' + (p.is_suspended ? 'opacity:0.65;' : '') + '">' +
-        '<div style="width:100%;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;">' +
+      return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;font-family:var(--font, system-ui, sans-serif);' + (p.is_suspended ? 'opacity:0.65;' : '') + '">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;">' +
         '<div>' +
         '<p style="margin:0;font-weight:700;font-size:13px;">' + (p.full_name || 'Unnamed Customer') + (p.is_suspended ? ' <span style="color:#DC2626;font-size:10.5px;font-weight:700;">SUSPENDED</span>' : '') + '</p>' +
         '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.email || 'No email on file') + '</p>' +
@@ -4151,7 +4194,7 @@ async function renderAdminCustomers() {
         '<div style="text-align:right;">' +
         '<p style="margin:0;font-weight:700;font-size:13px;">' + fmt(s.total) + '</p>' +
         '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + s.count + ' order' + (s.count === 1 ? '' : 's') + '</p>' +
-        '</div></div></div>';
+        '</div></div>';
     }).join('') : '<p style="color:#999;font-size:13px;">No customers match your search.</p>';
 
   body.innerHTML = header +
@@ -4507,14 +4550,6 @@ function validateSignupForm() {
 }
 
 async function submitSignup() {
-  var emailValCheck = document.getElementById('signup-email').value.trim();
-  var phoneValCheck = document.getElementById('signup-phone').value.trim();
-  if (emailValCheck === '' && phoneValCheck === '') {
-    showToast('Please provide at least an email or phone number', 'info');
-    document.getElementById('signup-phone').closest('.co-field').classList.add('co-field--error');
-    document.getElementById('signup-email').closest('.co-field').classList.add('co-field--error');
-    return;
-  }
   if (!validateSignupForm()) {
     showToast('Please fix the errors below', 'info');
     return;
@@ -4566,8 +4601,8 @@ async function submitSignup() {
 
   // The signup trigger copies the auth email straight into profiles.email
   // — fine for a real email, but a synthetic one would show up looking
-  // like a broken address anywhere an admin views this account. Null it
-  // back out so "No email on file" displays instead, which is accurate. //
+  // like a broken address anywhere it's viewed. Null it back out so
+  // "No email on file" displays instead, which is accurate. //
   async function finalizeProfile(userId) {
     var updates = { phone: phone };
     if (usingSyntheticEmail) updates.email = null;
@@ -4590,20 +4625,21 @@ async function submitSignup() {
   }
 }
 
-// Restore session on page load (so refreshing doesn't log the user out) //
 // Catches up profiles.email once a phone-only account's pending "Add
 // Email" confirmation actually completes — currentUser.email will have
-// switched from the synthetic @homeweb.local address to the real one
-// the person confirmed. Shared by restoreSession() (full page load) and
-// openProfileModal() (so this shows up without needing to log out). //
+// switched from the synthetic @phone.homeweb.internal address to the
+// real one the person confirmed. Shared by restoreSession() (full page
+// load) and openProfileModal() (so this shows up without needing to log
+// out first). //
 async function syncConfirmedEmailToProfile() {
-  if (!currentUser || !currentUser.email || currentUser.email.endsWith('@homeweb.local')) return;
+  if (!currentUser || !currentUser.email || currentUser.email.endsWith('@phone.homeweb.internal')) return;
   const { data: prof } = await supabase.from('profiles').select('email').eq('id', currentUser.id).single();
   if (prof && !prof.email) {
     await supabase.from('profiles').update({ email: currentUser.email }).eq('id', currentUser.id);
   }
 }
 
+// Restore session on page load (so refreshing doesn't log the user out) //
 async function restoreSession() {
   // Safe to check after the listener above is already subscribed //
   const { data } = await supabase.auth.getSession();
@@ -4790,6 +4826,7 @@ function injectModals() {
     'onchange="setQtyDirect(this.value)" onclick="this.select()"/>' +
     '<button onclick="changeQty(1)">+</button>' +
     '</div>' +
+    '<p class="pm-live-total" style="margin:6px 0 0;font-weight:700;font-size:14px;color:var(--primary,#22C55E);"></p>' +
     '<div class="pm-actions">' +
     '<button class="pm-btn pm-btn--cart" onclick="addToCart(false)"><i class="fas fa-cart-plus"></i> Add to Cart</button>' +
     '<button class="pm-btn pm-btn--buy" onclick="addToCart(true)"><i class="fas fa-bolt"></i> Buy Now</button>' +
@@ -5491,7 +5528,7 @@ function renderProfileForm(profile, roleStats) {
     '<p style="color:#888;margin:4px 0 0;">' + (profile.email || (profile.phone ? profile.phone : 'No email or phone on file')) + '</p>' +
     (!profile.email
       ? '<div style="background:#FFFBEB;border-radius:10px;padding:10px 12px;margin:10px 0 0;text-align:left;">' +
-        '<p style="margin:0;font-size:12px;color:#92400E;"><i class="fas fa-circle-info"></i> No verified email connected to this account. Your account works normally, but password reset requires an email \u2014 if you ever forget your password, you\'ll need to contact HomeWeb support instead.</p>' +
+        '<p style="margin:0;font-size:12px;color:#92400E;"><i class="fas fa-circle-info"></i> No email connected to this account yet. Add one anytime to be able to reset your password if you ever forget it.</p>' +
         '<button class="co-btn" style="background:#fff;border:1px solid #FDE68A;color:#92400E;font-size:11.5px;padding:6px 12px;margin-top:8px;" onclick="addEmailToAccount()"><i class="fas fa-plus"></i> Add Email</button>' +
         '</div>'
       : '') +
@@ -5523,8 +5560,9 @@ function renderProfileForm(profile, roleStats) {
 // Supabase's normal email-change flow, which requires clicking a
 // confirmation link before it actually takes effect — so this
 // deliberately does NOT update profiles.email yet, or the notice would
-// disappear before the change is actually confirmed. See the sync check
-// in restoreSession() for where that catch-up happens once confirmed. //
+// disappear before the change is actually confirmed. See
+// syncConfirmedEmailToProfile() for where that catch-up happens once
+// confirmed. //
 async function addEmailToAccount() {
   var newEmail = prompt('Enter the email address you\'d like to add to your account:');
   if (!newEmail) return;
@@ -6027,7 +6065,10 @@ async function fetchMerchantInventory() {
 }
 
 // #VENDOR_INVENTORY_TAB
+let myMerchantInventoryData = null;
+
 function renderMerchantInventoryView(data) {
+  myMerchantInventoryData = data;
   var body = document.getElementById('sn-merchant-body');
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
@@ -6117,7 +6158,7 @@ function renderMerchantInventoryView(data) {
             (detailLine ? '<p style="margin:2px 0 0;color:#999;font-size:11px;">' + detailLine + '</p>' : '') +
             (m.reason && m.type === 'in' ? '<p style="margin:2px 0 0;color:#bbb;font-size:10.5px;">' + m.reason + '</p>' : '') + '</div>' +
             '<div style="text-align:right;"><span style="font-weight:700;">' + (m.type === 'in' ? '+' : '\u2212') + m.quantity + '</span>' +
-            '<p style="margin:2px 0 0;color:#aaa;font-size:11px;">' + timeAgo(m.created_at) + '</p>' + '</div></div>';
+            '<p style="margin:2px 0 0;color:#aaa;font-size:11px;">' + timeAgo(m.created_at) + '</p></div></div>';
         }).join('');
 
         return '<div style="margin-bottom:16px;">' +
@@ -6136,7 +6177,7 @@ function renderMerchantInventoryView(data) {
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
     '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
-    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
+    '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadInventoryReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
     '</div>' +
     summaryCards +
@@ -6350,27 +6391,44 @@ function downloadSalesReportPDF() {
   var need = [];
   if (!window.jspdf) need.push('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
 
-  if (!need.length) { ensureAutoTableThenBuild(); return; }
+  if (!need.length) { ensureAutoTableThenBuild(buildSalesReportPDF); return; }
 
   showToast('Preparing PDF export...', 'info');
   var loaded = 0;
   need.forEach(function(src) {
     var script = document.createElement('script');
     script.src = src;
-    script.onload = function() { loaded++; if (loaded === need.length) ensureAutoTableThenBuild(); };
+    script.onload = function() { loaded++; if (loaded === need.length) ensureAutoTableThenBuild(buildSalesReportPDF); };
     script.onerror = function() { showToast('Could not load PDF export tool.', 'error'); };
     document.head.appendChild(script);
   });
 }
 
-function ensureAutoTableThenBuild() {
+function downloadInventoryReportPDF() {
+  var need = [];
+  if (!window.jspdf) need.push('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+
+  if (!need.length) { ensureAutoTableThenBuild(buildInventoryReportPDF); return; }
+
+  showToast('Preparing PDF export...', 'info');
+  var loaded = 0;
+  need.forEach(function(src) {
+    var script = document.createElement('script');
+    script.src = src;
+    script.onload = function() { loaded++; if (loaded === need.length) ensureAutoTableThenBuild(buildInventoryReportPDF); };
+    script.onerror = function() { showToast('Could not load PDF export tool.', 'error'); };
+    document.head.appendChild(script);
+  });
+}
+
+function ensureAutoTableThenBuild(buildFn) {
   // autoTable attaches to jsPDF's prototype once its script loads //
   var doc = new window.jspdf.jsPDF('p', 'pt', 'a4');
-  if (typeof doc.autoTable === 'function') { buildSalesReportPDF(); return; }
+  if (typeof doc.autoTable === 'function') { buildFn(); return; }
 
   var script = document.createElement('script');
   script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js';
-  script.onload = function() { buildSalesReportPDF(); };
+  script.onload = function() { buildFn(); };
   script.onerror = function() { showToast('Could not load PDF table tool.', 'error'); };
   document.head.appendChild(script);
 }
@@ -6460,6 +6518,95 @@ function buildSalesReportPDF() {
   }
 
   doc.save('HomeWeb_Sales_Report_' + new Date().toISOString().slice(0, 10) + '.pdf');
+  showToast('PDF downloaded \u2705');
+}
+
+function buildInventoryReportPDF() {
+  var data = myMerchantInventoryData;
+  if (!data || !data.products) { showToast('No inventory data to export yet.', 'info'); return; }
+
+  var doc = new window.jspdf.jsPDF('p', 'pt', 'a4');
+  var margin = 40;
+  var y = margin;
+
+  doc.setFontSize(18);
+  doc.setTextColor(30, 30, 30);
+  doc.text('Inventory Report', margin, y);
+  y += 22;
+  doc.setFontSize(10);
+  doc.setTextColor(120, 120, 120);
+  doc.text('Generated: ' + new Date().toLocaleString(), margin, y);
+  y += 24;
+
+  var totalProducts = data.products.length;
+  var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= 5; }).length;
+  var outOfStockCount = data.products.filter(function(p) { return p.stock_qty <= 0; }).length;
+
+  doc.setFontSize(12);
+  doc.setTextColor(30, 30, 30);
+  doc.text('Summary', margin, y);
+  y += 6;
+  doc.autoTable({
+    startY: y,
+    margin: { left: margin, right: margin },
+    theme: 'plain',
+    styles: { fontSize: 10, cellPadding: 4 },
+    body: [
+      ['Total Products', String(totalProducts)],
+      ['Low Stock', String(lowStockCount)],
+      ['Out of Stock', String(outOfStockCount)]
+    ],
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 160 } }
+  });
+  y = doc.lastAutoTable.finalY + 24;
+
+  // Current stock table
+  doc.setFontSize(12);
+  doc.text('Current Stock', margin, y);
+  y += 6;
+  doc.autoTable({
+    startY: y,
+    margin: { left: margin, right: margin },
+    theme: 'striped',
+    headStyles: { fillColor: [34, 197, 94] },
+    styles: { fontSize: 9, cellPadding: 4 },
+    head: [['Product', 'Unit', 'In Stock', 'Sold', 'Status']],
+    body: data.products.map(function(p) {
+      var status = p.stock_qty <= 0 ? 'Out of Stock' : (p.stock_qty <= 5 ? 'Low Stock' : 'OK');
+      return [p.name, p.unit || 'pc', String(p.stock_qty), String(p.sold_count || 0), status];
+    })
+  });
+  y = doc.lastAutoTable.finalY + 24;
+
+  // Stock In / Out ledger — most recent entries, matches what's shown on screen
+  if (data.movements && data.movements.length) {
+    if (y > doc.internal.pageSize.getHeight() - 150) { doc.addPage(); y = margin; }
+    doc.setFontSize(12);
+    doc.text('Stock In / Out Ledger', margin, y);
+    y += 6;
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      theme: 'striped',
+      headStyles: { fillColor: [34, 197, 94] },
+      styles: { fontSize: 8.5, cellPadding: 4 },
+      head: [['Date', 'Product', 'Type', 'Qty', 'Details']],
+      body: data.movements.slice(0, 100).map(function(m) {
+        var detail = m.type === 'in'
+          ? [m.supplier_name, m.receipt_number ? '#' + m.receipt_number : ''].filter(Boolean).join(' \u2014 ')
+          : (m.orders ? 'Order #' + m.orders.order_code : '');
+        return [
+          formatDate(m.created_at),
+          m.products ? m.products.name : '',
+          m.type === 'in' ? 'Stock In' : 'Stock Out',
+          (m.type === 'in' ? '+' : '\u2212') + m.quantity,
+          detail
+        ];
+      })
+    });
+  }
+
+  doc.save('HomeWeb_Inventory_Report_' + new Date().toISOString().slice(0, 10) + '.pdf');
   showToast('PDF downloaded \u2705');
 }
 
@@ -6724,10 +6871,10 @@ function renderMerchantProductsView(tabs) {
       '<p style="margin:2px 0 0;color:#F59E0B;font-size:12px;">' + (p.rating_avg > 0 ? stars(p.rating_avg) + Number(p.rating_avg).toFixed(1) + ' ' : '') + '<span style="color:#999;">(' + (p.rating_count || 0) + ')</span></p>' +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-shrink:0;">' +
-      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="viewProductReviews(\'' + p.id + '\', \'' + p.name.replace(/'/g, "\\'") + '\')" title="Reviews"><i class="fas fa-comment-dots"></i></button>' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="openStockInModal(\'' + p.id + '\')" title="Stock in"><i class="fas fa-plus"></i></button>' +
       '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="openProductForm(\'' + p.id + '\')" title="Edit"><i class="fas fa-edit"></i></button>' +
-      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="toggleProductActive(\'' + p.id + '\', ' + !p.is_active + ')" title="' + (p.is_active ? 'Deactivate' : 'Activate') + '"><i class="fas fa-' + (p.is_active ? 'eye-slash' : 'eye') + '"></i></button>' +
+      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="viewProductReviews(\'' + p.id + '\', \'' + p.name.replace(/'/g, "\\'") + '\')" title="Reviews"><i class="fas fa-comment-dots"></i></button>' +
+      '<button class="co-btn" style="padding:6px 10px;background:#F3F4F6;color:#333;" onclick="toggleProductActive(\'' + p.id + '\', ' + !p.is_active + ')" title="' + (p.is_active ? 'Hide' : 'Activate') + '"><i class="fas fa-' + (p.is_active ? 'eye-slash' : 'eye') + '"></i></button>' +
       '<button class="co-btn" style="padding:6px 10px;background:#FEE2E2;color:#DC2626;" onclick="deleteMyProduct(\'' + p.id + '\')" title="Delete"><i class="fas fa-trash"></i></button>' +
       '</div></div>';
   }).join('');
@@ -6761,15 +6908,15 @@ function openProductForm(productId) {
     '<div class="co-field"><label>Cost Price (\u20B1) <span style="color:#999;font-weight:400;">\u2014 optional</span></label>' +
     '<input type="number" id="pf-cost-price" min="0" step="0.01" placeholder="What you paid for this, if you want profit tracked" value="' + (p && p.cost_price !== null && p.cost_price !== undefined ? p.cost_price : '') + '"/>' +
     '<span style="font-size:11px;color:#999;">Leave blank if you\'d rather not track this \u2014 your Sales Report just won\'t show profit for this item.</span></div>' +
-    '<div class="co-field"><label>Unit of Measurement <span class="co-required">*</span></label>' +
-    '<input type="text" id="pf-unit" placeholder="Type your own, e.g. 1kg, 350g, pack of 3, sack" value="' + (p && p.unit ? p.unit : '') + '"/>' +
-    '<span class="co-field-error">Specify a unit (e.g. 1kg, pack)</span></div>' +
     '<div class="co-field"><label>Category</label>' +
-    '<select id="pf-category">' +
+    '<select id="pf-category" onchange="updateAutoUnit()">' +
     Object.keys(CATEGORY_META).filter(function(k) { return k !== 'other'; }).concat(['other']).map(function(k) {
       return '<option value="' + k + '"' + (p && p.category === k ? ' selected' : '') + '>' + CATEGORY_META[k].title + '</option>';
     }).join('') +
     '</select></div>' +
+    '<div class="co-field"><label>Unit of Measurement</label>' +
+    '<div id="pf-unit-display" style="padding:10px 14px;background:#F9FAFB;border-radius:8px;border:1px solid #e5e5e5;font-weight:600;color:#333;"></div>' +
+    '<span style="font-size:11px;color:#999;">Set automatically based on the category you choose</span></div>' +
     '<div class="co-field"><label>Product Photo</label>' +
     '<div style="display:flex;gap:12px;align-items:center;">' +
     '<div id="pf-image-preview" style="width:56px;height:56px;border-radius:8px;background:#F3F4F6;overflow:hidden;flex-shrink:0;">' +
@@ -6785,10 +6932,22 @@ function openProductForm(productId) {
     '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" id="pf-save-btn" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
     '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="renderMerchantDashboard()">Cancel</button>';
 
-  ['pf-name', 'pf-price', 'pf-cost-price', 'pf-stock', 'pf-unit'].forEach(function(id) {
+  ['pf-name', 'pf-price', 'pf-cost-price', 'pf-stock'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', function() { this.closest('.co-field').classList.remove('co-field--error'); });
   });
+  updateAutoUnit();
+}
+
+// Updates the read-only unit display whenever the category changes — the
+// merchant never types a unit, it's always derived from what they're
+// selling. //
+function updateAutoUnit() {
+  var categoryEl = document.getElementById('pf-category');
+  var unitDisplay = document.getElementById('pf-unit-display');
+  if (!categoryEl || !unitDisplay) return;
+  var unit = CATEGORY_UNIT[categoryEl.value] || 'pc';
+  unitDisplay.textContent = unit;
 }
 
 function previewProductImage(file) {
@@ -6806,14 +6965,13 @@ async function saveProduct() {
   var price = parseFloat(document.getElementById('pf-price').value);
   var category = document.getElementById('pf-category').value;
   var desc = document.getElementById('pf-desc').value.trim();
-  var unit = document.getElementById('pf-unit').value.trim();
+  var unit = CATEGORY_UNIT[category] || 'pc';
   var costPriceRaw = document.getElementById('pf-cost-price').value.trim();
   var costPrice = costPriceRaw === '' ? null : parseFloat(costPriceRaw);
 
   var ok = true;
   if (!name) { document.getElementById('pf-name').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!(price >= 0)) { document.getElementById('pf-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
-  if (!unit) { document.getElementById('pf-unit').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (costPriceRaw !== '' && !(costPrice >= 0)) { document.getElementById('pf-cost-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!ok) { showToast('Please fix the errors above', 'info'); return; }
 
@@ -6974,7 +7132,7 @@ async function deleteMyProduct(productId) {
 
   const { error } = await supabase.from('products').delete().eq('id', productId);
   if (error) {
-    showToast('Could not delete — it may already have orders. Try deactivating it instead.', 'error');
+    showToast('Could not delete — it may already have orders. Try hiding it instead.', 'error');
     return;
   }
   showToast('Product deleted', 'info');
