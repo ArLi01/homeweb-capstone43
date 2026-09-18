@@ -5,6 +5,7 @@ let products = [];
 
 var CATEGORY_META = {
   vegetable: { title: 'Vegetable',      bg: '#F0FFF4', color: '#22C55E', icon: 'fa-carrot' },
+  fruits:    { title: 'Fruits',         bg: '#FFF7ED', color: '#F97316', icon: 'fa-apple-whole' },
   meat:      { title: 'Meat',           bg: '#FFF0F0', color: '#EF4444', icon: 'fa-drumstick-bite' },
   seafood:   { title: 'Sea Food',       bg: '#F0F8FF', color: '#3B82F6', icon: 'fa-fish-fins' },
   sarisari:  { title: 'Sari-sari Store',bg: '#FFFBEB', color: '#F59E0B', icon: 'fa-store' },
@@ -20,6 +21,7 @@ var DEFAULT_CATEGORY_META = { bg: '#F9F9F9', color: '#CBD5E1', icon: 'fa-box' };
 // just like Sari-sari and Other, which are sold per piece. //
 var CATEGORY_UNIT = {
   vegetable: 'kg',
+  fruits: 'kg',
   meat: 'kg',
   seafood: 'kg',
   sarisari: 'pc',
@@ -44,6 +46,7 @@ var BEVERAGE_UNIT_OPTIONS = [
 // override this per product from the product form. //
 var CATEGORY_LOW_STOCK_DEFAULT = {
   vegetable: 10,
+  fruits: 10,
   meat: 10,
   seafood: 10,
   sarisari: 5,
@@ -72,6 +75,7 @@ var SEARCH_KEYWORD_MAP = {
   meat: ['meat', 'karne'],
   seafood: ['seafood', 'fish', 'isda'],
   vegetable: ['vegetable', 'vegetables', 'gulay'],
+  fruits: ['fruit', 'fruits', 'prutas'],
   drinks: ['drink', 'drinks', 'beverage', 'beverages', 'inumin', 'alak'],
   sarisari: ['sari-sari', 'sarisari', 'grocery', 'goods']
 };
@@ -4935,6 +4939,7 @@ function selectMerchantType(type) {
 
 var BUSINESS_TYPES = [
   { value: 'vegetable', label: 'Vegetable' },
+  { value: 'fruits', label: 'Fruits' },
   { value: 'meat', label: 'Meat' },
   { value: 'seafood', label: 'Sea Food' },
   { value: 'sarisari', label: 'Sari-sari Store' },
