@@ -25,6 +25,31 @@ var CATEGORY_UNIT = {
   other: 'pc'
 };
 
+// Starting point for the "low stock" alert level, used only when a merchant
+// hasn't set their own number for a product yet. A single number doesn't
+// make sense across every category — perishables like veggies/meat move
+// fast and sell in bulk per order, so they get flagged earlier (higher
+// number), while sari-sari items are sold one at a time and can run
+// closer to zero before it's worth restocking. The merchant can always
+// override this per product from the product form. //
+var CATEGORY_LOW_STOCK_DEFAULT = {
+  vegetable: 10,
+  meat: 10,
+  seafood: 10,
+  sarisari: 5,
+  drinks: 8,
+  other: 5
+};
+
+// The threshold actually used to flag a product as low — the merchant's
+// own number if they set one, otherwise the category default above. //
+function effectiveLowStockThreshold(p) {
+  if (p && p.low_stock_threshold !== null && p.low_stock_threshold !== undefined && p.low_stock_threshold !== '') {
+    return Number(p.low_stock_threshold);
+  }
+  return CATEGORY_LOW_STOCK_DEFAULT[p && p.category] || 5;
+}
+
 function getProductImage(id) {
   var p = products.find(function(x) { return x.id === id; });
   return (p && p.image_url) ? p.image_url : null;
@@ -5048,7 +5073,8 @@ var NOTIF_ICON_MAP = {
   'preparing':              'fa-box-open',
   'out_for_delivery':        'fa-truck',
   'awaiting_confirmation':   'fa-clock',
-  'delivered':              'fa-check-circle'
+  'delivered':              'fa-check-circle',
+  'low_stock':              'fa-triangle-exclamation'
 };
 
 var CONFIRMATION_GRACE_PERIOD_MS = 60000; // 1 minute grace period before nudging the customer
@@ -5116,19 +5142,49 @@ async function fetchMerchantNotifications() {
   const { data: merchant } = await supabase.from('merchants').select('id').eq('user_id', currentUser.id).single();
   if (!merchant) return [];
 
+  var notifs = [];
+
+  // Low stock alerts — checked every time the bell is opened, independent
+  // of whether this store has any orders yet, so a brand new store still
+  // gets warned once its starting stock runs down. //
+  const { data: lowStockProducts } = await supabase
+    .from('products')
+    .select('id, name, unit, category, stock_qty, low_stock_threshold')
+    .eq('merchant_id', merchant.id)
+    .eq('is_active', true);
+
+  (lowStockProducts || []).forEach(function(p) {
+    var threshold = effectiveLowStockThreshold(p);
+    if (p.stock_qty > threshold) return;
+    var isOut = p.stock_qty <= 0;
+    notifs.push({
+      product_id: p.id,
+      status: 'low_stock',
+      label: isOut ? 'Out of Stock' : 'Low Stock Alert',
+      description: isOut
+        ? p.name + ' is now out of stock. Restock it so customers can order it again.'
+        : p.name + ' is running low — only ' + p.stock_qty + ' ' + (p.unit || 'pc') + ' left (alert set at ' + threshold + ').',
+      // Not a stored event — this is "still true right now", so it should
+      // keep surfacing near the top every time the merchant checks, not
+      // fade into the log after 3 hours like a one-off order update //
+      created_at: new Date().toISOString(),
+      isLowStockNotif: true
+    });
+  });
+
   const { data: lineItems, error: liErr } = await supabase
     .from('order_items')
     .select('order_id, products!inner(merchant_id), orders(order_code)')
     .eq('products.merchant_id', merchant.id);
 
-  if (liErr) { console.error('fetchMerchantNotifications items error:', liErr); return []; }
+  if (liErr) { console.error('fetchMerchantNotifications items error:', liErr); return notifs; }
 
   var codeByOrder = {};
   (lineItems || []).forEach(function(li) {
     if (li.orders) codeByOrder[li.order_id] = li.orders.order_code;
   });
   var orderIds = Object.keys(codeByOrder);
-  if (!orderIds.length) return [];
+  if (!orderIds.length) return notifs;
 
   const { data: statusRows, error: shErr } = await supabase
     .from('order_status_history')
@@ -5137,10 +5193,10 @@ async function fetchMerchantNotifications() {
     .order('created_at', { ascending: false })
     .limit(150);
 
-  if (shErr) { console.error('fetchMerchantNotifications status error:', shErr); return []; }
+  if (shErr) { console.error('fetchMerchantNotifications status error:', shErr); return notifs; }
 
-  var notifs = (statusRows || []).map(function(s) {
-    return {
+  (statusRows || []).forEach(function(s) {
+    notifs.push({
       order_id: s.order_id,
       status: s.status,
       label: s.label,
@@ -5148,7 +5204,7 @@ async function fetchMerchantNotifications() {
       created_at: s.created_at,
       orders: { order_code: codeByOrder[s.order_id] },
       isMerchantNotif: true
-    };
+    });
   });
 
   notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
@@ -5336,6 +5392,18 @@ function renderNotifications(notifs) {
 
 function notifItemHtml(n) {
   var icon = NOTIF_ICON_MAP[n.status] || 'fa-bell';
+
+  if (n.isLowStockNotif) {
+    return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;cursor:pointer;" ' +
+      'onclick="closeNotificationsModal(); merchantDashboardView=\'inventory\'; openMerchantDashboard();">' +
+      '<div style="flex-shrink:0;width:36px;height:36px;border-radius:50%;background:#FFFBEB;color:#B45309;display:flex;align-items:center;justify-content:center;"><i class="fas ' + icon + '"></i></div>' +
+      '<div style="flex:1;">' +
+      '<p style="margin:0;font-weight:600;font-size:13.5px;">' + n.label + '</p>' +
+      '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + n.description + '</p>' +
+      '<p style="margin:4px 0 0;color:#aaa;font-size:11.5px;">' + timeAgo(n.created_at) + '</p>' +
+      '</div></div>';
+  }
+
   return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;cursor:pointer;" ' +
     'onclick="closeNotificationsModal(); viewOrderNow(\'' + n.order_id + '\');">' +
     '<div style="flex-shrink:0;width:36px;height:36px;border-radius:50%;background:#F0FFF4;color:var(--primary,#22C55E);display:flex;align-items:center;justify-content:center;"><i class="fas ' + icon + '"></i></div>' +
@@ -6101,7 +6169,7 @@ function renderMerchantInventoryView(data) {
     '</div>';
 
   var totalProducts = data.products.length;
-  var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= 5; }).length;
+  var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= effectiveLowStockThreshold(p); }).length;
   var outOfStockCount = data.products.filter(function(p) { return p.stock_qty <= 0; }).length;
 
   var summaryCards = '<div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">' +
@@ -6120,7 +6188,7 @@ function renderMerchantInventoryView(data) {
       data.products.map(function(p) {
         var statusHtml = p.stock_qty <= 0
           ? '<span style="color:#DC2626;font-weight:600;">Out of Stock</span>'
-          : (p.stock_qty <= 5 ? '<span style="color:#B45309;font-weight:600;">Low</span>' : '<span style="color:#15803D;">OK</span>');
+          : (p.stock_qty <= effectiveLowStockThreshold(p) ? '<span style="color:#B45309;font-weight:600;">Low</span>' : '<span style="color:#15803D;">OK</span>');
         return '<tr style="border-bottom:1px solid #f5f5f5;' + (p.is_active ? '' : 'opacity:0.5;') + '">' +
           '<td style="padding:8px 4px;">' + p.name + (p.is_active ? '' : ' <span style="color:#999;">(inactive)</span>') + '</td>' +
           '<td style="padding:8px 4px;color:#777;">' + (p.unit || 'pc') + '</td>' +
@@ -6561,7 +6629,7 @@ function buildInventoryReportPDF() {
   y += 24;
 
   var totalProducts = data.products.length;
-  var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= 5; }).length;
+  var lowStockCount = data.products.filter(function(p) { return p.stock_qty > 0 && p.stock_qty <= effectiveLowStockThreshold(p); }).length;
   var outOfStockCount = data.products.filter(function(p) { return p.stock_qty <= 0; }).length;
 
   doc.setFontSize(12);
@@ -6594,7 +6662,7 @@ function buildInventoryReportPDF() {
     styles: { fontSize: 9, cellPadding: 4 },
     head: [['Product', 'Unit', 'In Stock', 'Sold', 'Status']],
     body: data.products.map(function(p) {
-      var status = p.stock_qty <= 0 ? 'Out of Stock' : (p.stock_qty <= 5 ? 'Low Stock' : 'OK');
+      var status = p.stock_qty <= 0 ? 'Out of Stock' : (p.stock_qty <= effectiveLowStockThreshold(p) ? 'Low Stock' : 'OK');
       return [p.name, p.unit || 'pc', String(p.stock_qty), String(p.sold_count || 0), status];
     })
   });
@@ -6621,7 +6689,7 @@ function buildInventoryReportPDF() {
           formatDate(m.created_at),
           m.products ? m.products.name : '',
           m.type === 'in' ? 'Stock In' : 'Stock Out',
-          (m.type === 'in' ? '+' : '\u2212') + m.quantity,
+          (m.type === 'in' ? '+' : '-') + m.quantity,
           detail
         ];
       })
@@ -6939,6 +7007,9 @@ function openProductForm(productId) {
     '<div class="co-field"><label>Unit of Measurement</label>' +
     '<div id="pf-unit-display" style="padding:10px 14px;background:#F9FAFB;border-radius:8px;border:1px solid #e5e5e5;font-weight:600;color:#333;"></div>' +
     '<span style="font-size:11px;color:#999;">Set automatically based on the category you choose</span></div>' +
+    '<div class="co-field"><label>Low Stock Alert <span style="color:#999;font-weight:400;">— optional</span></label>' +
+    '<input type="number" id="pf-low-stock" min="0" step="1" placeholder="Suggested: ' + (CATEGORY_LOW_STOCK_DEFAULT[(p && p.category) || 'vegetable'] || 5) + '" value="' + (p && p.low_stock_threshold !== null && p.low_stock_threshold !== undefined ? p.low_stock_threshold : '') + '"/>' +
+    '<span style="font-size:11px;color:#999;">Get notified when this product\'s stock falls to or below this number. Leave blank to use a suggested amount based on the category.</span></div>' +
     '<div class="co-field"><label>Product Photo</label>' +
     '<div style="display:flex;gap:12px;align-items:center;">' +
     '<div id="pf-image-preview" style="width:56px;height:56px;border-radius:8px;background:#F3F4F6;overflow:hidden;flex-shrink:0;">' +
@@ -6954,7 +7025,7 @@ function openProductForm(productId) {
     '<button class="co-btn co-btn--next" style="width:100%;margin-top:6px;" id="pf-save-btn" onclick="saveProduct()">' + (p ? 'Save Changes' : 'Add Product') + '</button>' +
     '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="renderMerchantDashboard()">Cancel</button>';
 
-  ['pf-name', 'pf-price', 'pf-cost-price', 'pf-stock'].forEach(function(id) {
+  ['pf-name', 'pf-price', 'pf-cost-price', 'pf-stock', 'pf-low-stock'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', function() { this.closest('.co-field').classList.remove('co-field--error'); });
   });
@@ -6970,6 +7041,11 @@ function updateAutoUnit() {
   if (!categoryEl || !unitDisplay) return;
   var unit = CATEGORY_UNIT[categoryEl.value] || 'pc';
   unitDisplay.textContent = unit;
+
+  var lowStockEl = document.getElementById('pf-low-stock');
+  if (lowStockEl) {
+    lowStockEl.placeholder = 'Suggested: ' + (CATEGORY_LOW_STOCK_DEFAULT[categoryEl.value] || 5);
+  }
 }
 
 function previewProductImage(file) {
@@ -6990,11 +7066,14 @@ async function saveProduct() {
   var unit = CATEGORY_UNIT[category] || 'pc';
   var costPriceRaw = document.getElementById('pf-cost-price').value.trim();
   var costPrice = costPriceRaw === '' ? null : parseFloat(costPriceRaw);
+  var lowStockRaw = document.getElementById('pf-low-stock').value.trim();
+  var lowStockThreshold = lowStockRaw === '' ? null : parseInt(lowStockRaw, 10);
 
   var ok = true;
   if (!name) { document.getElementById('pf-name').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!(price >= 0)) { document.getElementById('pf-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (costPriceRaw !== '' && !(costPrice >= 0)) { document.getElementById('pf-cost-price').closest('.co-field').classList.add('co-field--error'); ok = false; }
+  if (lowStockRaw !== '' && !(lowStockThreshold >= 0)) { document.getElementById('pf-low-stock').closest('.co-field').classList.add('co-field--error'); ok = false; }
   if (!ok) { showToast('Please fix the errors above', 'info'); return; }
 
   var saveBtn = document.getElementById('pf-save-btn');
@@ -7020,7 +7099,7 @@ async function saveProduct() {
 
   if (editingProductId) {
     const { error } = await supabase.from('products').update({
-      name: name, description: desc, price: price, cost_price: costPrice, category: category, unit: unit, image_url: imageUrl, updated_at: new Date().toISOString()
+      name: name, description: desc, price: price, cost_price: costPrice, category: category, unit: unit, image_url: imageUrl, low_stock_threshold: lowStockThreshold, updated_at: new Date().toISOString()
     }).eq('id', editingProductId);
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; }
     if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
@@ -7031,7 +7110,7 @@ async function saveProduct() {
 
     const { data: newProduct, error } = await supabase.from('products').insert({
       merchant_id: myMerchantId, name: name, description: desc, price: price, cost_price: costPrice,
-      category: category, unit: unit, image_url: imageUrl, stock_qty: stock
+      category: category, unit: unit, image_url: imageUrl, stock_qty: stock, low_stock_threshold: lowStockThreshold
     }).select().single();
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Add Product'; }
     if (error) { showToast('Could not add product: ' + error.message, 'error'); return; }
