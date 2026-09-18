@@ -2996,59 +2996,83 @@ function setStarRating(productId, n) {
 }
 
 // #CUSTOMER_SUBMIT_REVIEW
-async function submitReview(orderId, productId) {
-  var ratingInput = document.getElementById('review-rating-' + productId);
-  var rating = ratingInput ? parseInt(ratingInput.value, 10) : 0;
-  if (!rating) { showToast('Please select a star rating first', 'info'); return; }
+// One combined submit for the whole "delivered order" review screen \u2014
+// product review(s) and the rider rating are each independently optional,
+// so this posts whichever of them actually got a star rating and quietly
+// skips the rest, rather than requiring a separate button (and a separate
+// trip) per thing being rated. //
+async function submitAllReviews(orderId) {
+  var order = (typeof orders !== 'undefined' ? orders.find(function(o) { return o.id === orderId; }) : null) || currentTrackingOrder;
+  if (!order) return;
 
-  var comment = document.getElementById('review-comment-' + productId).value.trim();
-  var isAnonymous = document.getElementById('review-anon-' + productId).checked;
-
-  var reviewerName = null, reviewerAvatar = null;
-  if (!isAnonymous) {
-    const { data: myProfile } = await supabase.from('profiles').select('full_name, avatar_url').eq('id', currentUser.id).single();
-    reviewerName = (myProfile && myProfile.full_name) || 'HomeWeb Customer';
-    reviewerAvatar = myProfile ? myProfile.avatar_url : null;
-  }
-
-  const { error } = await supabase.from('reviews').insert({
-    order_id: orderId, product_id: productId, customer_id: currentUser.id,
-    rating: rating, comment: comment || null,
-    is_anonymous: isAnonymous, reviewer_name: reviewerName, reviewer_avatar_url: reviewerAvatar
+  var pendingItems = (order.order_items || []).filter(function(item) {
+    return !(order._myReviews && order._myReviews[item.product_id]);
   });
 
-  if (error) {
-    showToast('Could not submit review: ' + error.message, 'error');
+  var reviewRows = [];
+  pendingItems.forEach(function(item) {
+    var ratingInput = document.getElementById('review-rating-' + item.product_id);
+    var rating = ratingInput ? parseInt(ratingInput.value, 10) : 0;
+    if (!rating) return; // this product's review is optional \u2014 leaving it unrated just skips it
+    reviewRows.push({
+      product_id: item.product_id,
+      rating: rating,
+      comment: document.getElementById('review-comment-' + item.product_id).value.trim(),
+      isAnonymous: document.getElementById('review-anon-' + item.product_id).checked
+    });
+  });
+
+  var riderRow = null;
+  if (order.rider_user_id && !order._myRiderRating) {
+    var riderKey = 'rider-' + orderId;
+    var rRatingInput = document.getElementById('review-rating-' + riderKey);
+    var rRating = rRatingInput ? parseInt(rRatingInput.value, 10) : 0;
+    if (rRating) {
+      riderRow = { rating: rRating, comment: document.getElementById('review-comment-' + riderKey).value.trim() };
+    }
+  }
+
+  if (!reviewRows.length && !riderRow) {
+    showToast('Pick at least one star rating to submit \u2014 both are optional, but at least one is needed', 'info');
     return;
   }
 
-  showToast('Thanks for your review! \u2b50');
-  await loadProducts();
-  renderHomeProducts();
-  renderCategoryPage();
-  openTrackingDetail(orderId);
-}
+  var anySuccess = false, anyError = false;
 
-async function submitRiderRating(orderId, riderUserId) {
-  var riderKey = 'rider-' + orderId;
-  var ratingInput = document.getElementById('review-rating-' + riderKey);
-  var rating = ratingInput ? parseInt(ratingInput.value, 10) : 0;
-  if (!rating) { showToast('Please select a star rating first', 'info'); return; }
-
-  var comment = document.getElementById('review-comment-' + riderKey).value.trim();
-
-  const { error } = await supabase.from('rider_ratings').insert({
-    order_id: orderId, rider_user_id: riderUserId, customer_id: currentUser.id,
-    rating: rating, comment: comment || null
-  });
-
-  if (error) {
-    showToast('Could not submit rider rating: ' + error.message, 'error');
-    return;
+  if (reviewRows.length) {
+    var reviewerName = null, reviewerAvatar = null;
+    if (reviewRows.some(function(r) { return !r.isAnonymous; })) {
+      const { data: myProfile } = await supabase.from('profiles').select('full_name, avatar_url').eq('id', currentUser.id).single();
+      reviewerName = (myProfile && myProfile.full_name) || 'HomeWeb Customer';
+      reviewerAvatar = myProfile ? myProfile.avatar_url : null;
+    }
+    const { error: reviewErr } = await supabase.from('reviews').insert(reviewRows.map(function(r) {
+      return {
+        order_id: orderId, product_id: r.product_id, customer_id: currentUser.id,
+        rating: r.rating, comment: r.comment || null,
+        is_anonymous: r.isAnonymous, reviewer_name: r.isAnonymous ? null : reviewerName, reviewer_avatar_url: r.isAnonymous ? null : reviewerAvatar
+      };
+    }));
+    if (reviewErr) { showToast('Could not submit product review(s): ' + reviewErr.message, 'error'); anyError = true; }
+    else anySuccess = true;
   }
 
-  showToast('Thanks for rating your rider! \u2b50');
-  openTrackingDetail(orderId);
+  if (riderRow) {
+    const { error: riderErr } = await supabase.from('rider_ratings').insert({
+      order_id: orderId, rider_user_id: order.rider_user_id, customer_id: currentUser.id,
+      rating: riderRow.rating, comment: riderRow.comment || null
+    });
+    if (riderErr) { showToast('Could not submit rider rating: ' + riderErr.message, 'error'); anyError = true; }
+    else anySuccess = true;
+  }
+
+  if (anySuccess && !anyError) showToast('Thanks for your feedback! \u2b50');
+  if (anySuccess) {
+    await loadProducts();
+    renderHomeProducts();
+    renderCategoryPage();
+  }
+  openTrackingDetail(orderId); // refresh either way, so whichever part did succeed shows immediately
 }
 
 // Show order success modal with generated order code //
@@ -3467,7 +3491,6 @@ function renderTrackingDetail(order) {
         '<textarea id="review-comment-' + item.product_id + '" placeholder="Optional comment..." style="width:100%;border:1px solid #e5e5e5;border-radius:8px;padding:8px;font-size:12.5px;resize:vertical;min-height:44px;"></textarea>' +
         '<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:#666;cursor:pointer;">' +
         '<input type="checkbox" id="review-anon-' + item.product_id + '"/> Post anonymously</label>' +
-        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:8px;" onclick="submitReview(\'' + order.id + '\', \'' + item.product_id + '\')">Submit Review</button>' +
         '</div>';
     }).join('');
   }
@@ -3489,10 +3512,22 @@ function renderTrackingDetail(order) {
         }).join('') +
         '<input type="hidden" id="review-rating-' + riderKey + '" value="0"/></div>' +
         '<textarea id="review-comment-' + riderKey + '" placeholder="Optional comment about your delivery..." style="width:100%;border:1px solid #e5e5e5;border-radius:8px;padding:8px;font-size:12.5px;resize:vertical;min-height:44px;"></textarea>' +
-        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:8px;" onclick="submitRiderRating(\'' + order.id + '\', \'' + order.rider_user_id + '\')">Submit Rider Rating</button>' +
         '</div>';
     }
   }
+
+  // One submit button for whichever of these are still pending — both the
+  // product review(s) and the rider rating are optional per item, so this
+  // only blocks a submit that would post nothing at all. //
+  var hasPendingProductReview = (order.order_items || []).some(function(item) {
+    return !(order._myReviews && order._myReviews[item.product_id]);
+  });
+  var hasPendingRiderRating = !!(order.rider_user_id && !order._myRiderRating);
+  var combinedSubmitHtml = (hasPendingProductReview || hasPendingRiderRating)
+    ? '<div class="track-detail-section">' +
+      '<button class="co-btn co-btn--next" style="width:100%;padding:10px;" onclick="submitAllReviews(\'' + order.id + '\')">Submit Review' + (hasPendingProductReview && hasPendingRiderRating ? 's' : '') + '</button>' +
+      '</div>'
+    : '';
 
   // Delivery address (or pickup location, if this was a Pick-up order)
   var isPickupOrder = order.delivery_option === 'pickup';
@@ -3546,6 +3581,8 @@ function renderTrackingDetail(order) {
       riderRatingHtml +
       '</div>'
     ) : '') +
+
+    combinedSubmitHtml +
 
     (order.rider_name ? (
       '<div class="track-detail-section">' +
