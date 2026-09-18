@@ -3032,8 +3032,10 @@ async function submitAllReviews(orderId) {
     }
   }
 
+  // Both are genuinely optional \u2014 no minimum. If nothing was rated, this
+  // is just a no-op, not something to push back on. //
   if (!reviewRows.length && !riderRow) {
-    showToast('Pick at least one star rating to submit \u2014 both are optional, but at least one is needed', 'info');
+    showToast('No rating selected \u2014 nothing was submitted', 'info');
     return;
   }
 
