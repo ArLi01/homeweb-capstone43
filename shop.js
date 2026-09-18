@@ -50,6 +50,66 @@ function effectiveLowStockThreshold(p) {
   return CATEGORY_LOW_STOCK_DEFAULT[p && p.category] || 5;
 }
 
+// Panel feedback, refined after testing: searching "meat" should surface
+// every meat product, but searching "pork" should NOT also pull in
+// chicken and beef — pork is a specific product, not the whole category.
+// So only true category-level words go in this map (the category's own
+// name, in English and the local term for it). A specific protein/item
+// like "pork", "chicken", "bangus", "tomato" etc. is deliberately left
+// OUT of this map — those are matched against the product's actual
+// name/description instead, further down. //
+var SEARCH_KEYWORD_MAP = {
+  meat: ['meat', 'karne'],
+  seafood: ['seafood', 'fish', 'isda'],
+  vegetable: ['vegetable', 'vegetables', 'gulay'],
+  drinks: ['drink', 'drinks', 'beverage', 'inumin'],
+  sarisari: ['sari-sari', 'sarisari', 'grocery', 'goods']
+};
+
+// Returns the category a single search word belongs to, or null if the
+// word isn't a recognized category-level word. //
+function categoryForSearchWord(word) {
+  for (var cat in SEARCH_KEYWORD_MAP) {
+    if (SEARCH_KEYWORD_MAP[cat].indexOf(word) !== -1) return cat;
+  }
+  return null;
+}
+
+// True if any word in the typed query is a category-level word (like
+// "meat") matching this product's category — NOT true for a specific
+// item like "pork", which only matches products actually named that. //
+function queryMatchesProductCategory(query, category) {
+  if (!query || !category) return false;
+  if (categoryForSearchWord(query) === category) return true;
+  var words = query.split(/\s+/).filter(Boolean);
+  return words.some(function(w) { return categoryForSearchWord(w) === category; });
+}
+
+// True if every word typed appears somewhere in the text — order and
+// adjacency don't matter, so "pork ribs" matches "Pork Spare Ribs"
+// (both words are in there, just with "Spare" in between) without also
+// matching "Beef" (missing both words entirely). //
+function allWordsFoundIn(text, query) {
+  if (!query) return true;
+  if (!text) return false;
+  var lower = text.toLowerCase();
+  var words = query.split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.every(function(w) { return lower.indexOf(w) !== -1; });
+}
+
+// Wraps every occurrence of any query word in <mark>, instead of only
+// the exact full phrase — so searching "pork ribs" highlights both
+// "Pork" and "Ribs" inside "Pork Spare Ribs", not nothing at all. //
+function highlightWords(text, query) {
+  var words = (query || '').split(/\s+/).filter(Boolean);
+  if (!words.length) return text;
+  var pattern = words.map(escapeRegex).join('|');
+  return text.replace(
+    new RegExp('(' + pattern + ')', 'gi'),
+    '<mark style="background:#ffe680;color:#5a4000;border-radius:2px;padding:0 1px">$1</mark>'
+  );
+}
+
 function getProductImage(id) {
   var p = products.find(function(x) { return x.id === id; });
   return (p && p.image_url) ? p.image_url : null;
@@ -548,7 +608,14 @@ function filterProducts(query) {
     const product = products.find(function(p) { return String(p.id) === String(id); });
     if (!product) return;
 
-    const matches = !q || product.name.toLowerCase().includes(q);
+    // Every typed word has to show up somewhere in the name (or
+    // description) — this is what lets "pork ribs" match "Pork Spare
+    // Ribs" even with "Spare" in between. Category words (like "meat")
+    // are handled separately, so "pork" alone stays specific to pork. //
+    const nameMatch = allWordsFoundIn(product.name, q);
+    const descMatch = allWordsFoundIn(product.description, q);
+    const categoryMatch = queryMatchesProductCategory(q, product.category);
+    const matches = !q || nameMatch || descMatch || categoryMatch;
     card.style.display = matches ? '' : 'none';
     if (matches) shown++;
 
@@ -557,8 +624,11 @@ function filterProducts(query) {
       if (nameEl.dataset.originalText === undefined) {
         nameEl.dataset.originalText = nameEl.textContent;
       }
-      nameEl.innerHTML = (matches && q)
-        ? highlightText(nameEl.dataset.originalText, query.trim())
+      // Only highlight when the match actually came from the name itself —
+      // a category-word match (e.g. "meat" matching a chicken product)
+      // has nothing specific to underline in the product's own name. //
+      nameEl.innerHTML = (matches && q && nameMatch)
+        ? highlightWords(nameEl.dataset.originalText, query.trim())
         : nameEl.dataset.originalText;
     }
   });
@@ -2955,13 +3025,22 @@ async function openOrderTracking(e) {
   }
 
   if (trackingDetailPollIntervalId) { clearInterval(trackingDetailPollIntervalId); trackingDetailPollIntervalId = null; }
+  currentTrackingOrder = null;
 
   document.getElementById('sn-trackingOverlay').classList.add('active');
   document.getElementById('sn-trackingModal').classList.add('active');
   document.body.style.overflow = 'hidden';
 
+  // Switch back to the list view — this also covers the "Back to orders"
+  // link inside a single order's detail screen, which calls this same
+  // function. Without this the list gets re-fetched and re-rendered
+  // underneath, but the detail view stays on top and it looks like the
+  // button does nothing. //
+  var detailEl = document.getElementById('sn-tracking-detail');
+  if (detailEl) detailEl.style.display = 'none';
+
   var listEl = document.getElementById('sn-tracking-list');
-  if (listEl) listEl.innerHTML = '<div class="track-empty"><p>Loading your orders...</p></div>';
+  if (listEl) { listEl.style.display = ''; listEl.innerHTML = '<div class="track-empty"><p>Loading your orders...</p></div>'; }
 
   await fetchOrders();
   renderOrderList();
