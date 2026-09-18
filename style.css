@@ -718,6 +718,11 @@ img { display: block; max-width: 100%; }
   background: #fff;
 }
 
+.wishlist-btn.active {
+  color: #EE4D2D;
+  background: #fff;
+}
+
 .product-img {
   height: 160px;
   background: #F9F9F9;

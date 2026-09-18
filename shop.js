@@ -293,10 +293,11 @@ function renderProductCardHtml(p) {
     : '<div class="product-img" style="background:' + meta.bg + ';"><i class="fas ' + p.icon + '" style="color:' + meta.color + ';font-size:32px;"></i></div>';
 
   var stockNote = stockLabelHtml(p.stock_qty);
+  var isFav = isFavorited(p.id);
 
   return '<div class="product-card" data-product-id="' + p.id + '">' +
     badge +
-    '<div class="wishlist-btn"><i class="far fa-heart"></i></div>' +
+    '<div class="wishlist-btn' + (isFav ? ' active' : '') + '"><i class="' + (isFav ? 'fas' : 'far') + ' fa-heart"></i></div>' +
     imgHtml +
     '<div class="product-info">' +
     '<p class="product-name">' + p.name + '</p>' +
@@ -508,6 +509,7 @@ let cart = [];
 let currentProduct = null;
 let checkoutStep = 1;
 let currentUser = null;
+let myFavoriteProductIds = [];
 var pendingPasswordRecovery = false;
 
 // Tracks whose merchant data is currently cached, so it only gets wiped
@@ -528,6 +530,7 @@ supabase.auth.onAuthStateChange(async function(event, session) {
   // session's, which is how an admin role could leak to the next login. //
   await fetchUserRoles();
   loadCartForCurrentUser();
+  await loadMyFavorites();
 
   // Same class of bug as the cart leaking between accounts — myMerchantId
   // was only ever set once and reused for the rest of the page's life.
@@ -884,22 +887,166 @@ function attachCardClicks() {
     });
   });
 
-  // Wishlist toggle //
+  // Favorites toggle //
   document.querySelectorAll('.wishlist-btn').forEach(function(btn) {
     btn.addEventListener('click', function(e) {
       e.stopPropagation();
-      const icon = this.querySelector('i');
-      if (icon.classList.contains('far')) {
-        icon.classList.replace('far', 'fas');
-        icon.style.color = '#EE4D2D';
-        showToast('Added to wishlist \u2665');
-      } else {
-        icon.classList.replace('fas', 'far');
-        icon.style.color = '';
-        showToast('Removed from wishlist', 'info');
-      }
+      var card = this.closest('.product-card');
+      var productId = card ? card.dataset.productId : null;
+      if (!productId) return;
+      toggleFavorite(productId, this);
     });
   });
+}
+
+// ============================================================
+// FAVORITES
+// ============================================================
+
+function isFavorited(productId) {
+  return myFavoriteProductIds.indexOf(productId) !== -1;
+}
+
+async function loadMyFavorites() {
+  if (!currentUser) { myFavoriteProductIds = []; return; }
+  const { data, error } = await supabase
+    .from('favorites')
+    .select('product_id')
+    .eq('user_id', currentUser.id);
+  if (error) { console.error('loadMyFavorites error', error); return; }
+  myFavoriteProductIds = (data || []).map(function(r) { return r.product_id; });
+  refreshAllFavoriteIcons();
+}
+
+// Re-applies favorite state to whatever product cards are already
+// rendered on screen — needed because products/cards can render before
+// the favorites list finishes loading (or before login completes). //
+function refreshAllFavoriteIcons() {
+  document.querySelectorAll('.product-card[data-product-id]').forEach(function(card) {
+    var btn = card.querySelector('.wishlist-btn');
+    if (!btn) return;
+    var fav = isFavorited(card.dataset.productId);
+    var icon = btn.querySelector('i');
+    if (fav) {
+      btn.classList.add('active');
+      if (icon) icon.classList.replace('far', 'fas');
+    } else {
+      btn.classList.remove('active');
+      if (icon) icon.classList.replace('fas', 'far');
+    }
+  });
+}
+
+// Toggles a product's favorite state. btnEl, if given, is the specific
+// heart/star element clicked \u2014 updated immediately (optimistic) so the
+// UI feels instant instead of waiting on the round trip. //
+async function toggleFavorite(productId, btnEl) {
+  if (!currentUser) {
+    showToast('Log in to save favorites', 'info');
+    openLoginModal();
+    return;
+  }
+
+  var wasFav = isFavorited(productId);
+
+  // Optimistic UI update //
+  if (wasFav) {
+    myFavoriteProductIds = myFavoriteProductIds.filter(function(id) { return id !== productId; });
+  } else {
+    myFavoriteProductIds.push(productId);
+  }
+  updateFavoriteIconsFor(productId);
+
+  if (wasFav) {
+    const { error } = await supabase.from('favorites').delete().eq('user_id', currentUser.id).eq('product_id', productId);
+    if (error) {
+      myFavoriteProductIds.push(productId);
+      updateFavoriteIconsFor(productId);
+      showToast('Could not remove favorite', 'error');
+      return;
+    }
+    showToast('Removed from Favorites', 'info');
+  } else {
+    const { error } = await supabase.from('favorites').insert({ user_id: currentUser.id, product_id: productId });
+    if (error) {
+      myFavoriteProductIds = myFavoriteProductIds.filter(function(id) { return id !== productId; });
+      updateFavoriteIconsFor(productId);
+      showToast('Could not save favorite', 'error');
+      return;
+    }
+    showToast('Added to Favorites \u2605');
+  }
+
+  // Keep the favorites list modal in sync if it's currently open //
+  var favModal = document.getElementById('sn-favoritesModal');
+  if (favModal && favModal.classList.contains('active')) renderFavoritesList();
+}
+
+// Updates every card's heart icon for a given product (a product can
+// appear more than once on screen) plus the product modal's star button
+// if that same product is the one currently open. //
+function updateFavoriteIconsFor(productId) {
+  var fav = isFavorited(productId);
+  document.querySelectorAll('.product-card[data-product-id="' + productId + '"] .wishlist-btn').forEach(function(btn) {
+    var icon = btn.querySelector('i');
+    if (fav) {
+      btn.classList.add('active');
+      if (icon) icon.classList.replace('far', 'fas');
+    } else {
+      btn.classList.remove('active');
+      if (icon) icon.classList.replace('fas', 'far');
+    }
+  });
+  if (currentProduct && currentProduct.id === productId) updateFavoriteButtonUI(fav);
+}
+
+// Updates the star button in the product detail modal //
+function updateFavoriteButtonUI(fav) {
+  var btn = document.querySelector('#sn-productModal .pm-btn--fav');
+  if (!btn) return;
+  btn.classList.toggle('active', !!fav);
+  var icon = btn.querySelector('i');
+  if (icon) icon.className = (fav ? 'fas' : 'far') + ' fa-star';
+}
+
+function toggleFavoriteFromModal() {
+  if (!currentProduct) return;
+  toggleFavorite(currentProduct.id);
+}
+
+// FAVORITES MODAL //
+function openFavoritesModal(e) {
+  if (e) e.preventDefault();
+  if (!currentUser) {
+    showToast('Log in to view your favorites', 'info');
+    openLoginModal();
+    return;
+  }
+  renderFavoritesList();
+  document.getElementById('sn-favoritesOverlay').classList.add('active');
+  document.getElementById('sn-favoritesModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeFavoritesModal() {
+  document.getElementById('sn-favoritesOverlay').classList.remove('active');
+  document.getElementById('sn-favoritesModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderFavoritesList() {
+  var body = document.getElementById('sn-favorites-body');
+  if (!body) return;
+  var favProducts = products.filter(function(p) { return isFavorited(p.id); });
+  if (!favProducts.length) {
+    body.innerHTML = '<div style="text-align:center;padding:40px 16px;color:#999;">' +
+      '<i class="far fa-star" style="font-size:36px;margin-bottom:10px;display:block;"></i>' +
+      'No favorites yet. Tap the heart on any product to save it here.' +
+      '</div>';
+    return;
+  }
+  body.innerHTML = '<div class="product-grid">' + favProducts.map(renderProductCardHtml).join('') + '</div>';
+  attachCardClicks();
 }
 
 // PRODUCT MODAL //
@@ -945,6 +1092,7 @@ function openProductModal(id) {
   var pmStock = m.querySelector('.pm-stock');
   if (pmStock) pmStock.innerHTML = stockLabelHtml(p.stock_qty);
   updateBuyButtonsState(p.stock_qty);
+  updateFavoriteButtonUI(isFavorited(p.id));
 
   document.getElementById('sn-overlay').classList.add('active');
   m.classList.add('active');
@@ -4900,6 +5048,7 @@ async function logout() {
   currentUser = null;
   userRoles = [];
   activeRole = 'customer';
+  myFavoriteProductIds = [];
   stopRiderAlertPolling();
   updateAuthUI();
   showToast('Logged out', 'info');
@@ -5225,6 +5374,7 @@ async function restoreSession() {
   if (data.session && !pendingPasswordRecovery) {
     currentUser = data.session.user;
     await fetchUserRoles();
+    await loadMyFavorites();
     updateAuthUI();
     updateNotifBadge();
     updateChatBadge();
@@ -5436,6 +5586,7 @@ function injectModals() {
     '</div>' +
     '<p class="pm-live-total" style="margin:6px 0 0;font-weight:700;font-size:14px;color:var(--primary,#22C55E);"></p>' +
     '<div class="pm-actions">' +
+    '<button class="pm-btn pm-btn--fav" onclick="toggleFavoriteFromModal()" title="Favorite"><i class="far fa-star"></i></button>' +
     '<button class="pm-btn pm-btn--cart" onclick="addToCart(false)"><i class="fas fa-cart-plus"></i> Add to Cart</button>' +
     '<button class="pm-btn pm-btn--buy" onclick="addToCart(true)"><i class="fas fa-bolt"></i> Buy Now</button>' +
     '</div>' +
@@ -5506,6 +5657,18 @@ function injectModals() {
     '<div id="sn-gcashModal" class="sn-login-modal">' +
     '<button class="pm-close" onclick="cancelGcashPayment()"><i class="fas fa-times"></i></button>' +
     '<div class="login-body" id="gcash-body"></div>' +
+    '</div>' +
+
+    // Favorites overlay + modal
+    '<div id="sn-favoritesOverlay" class="sn-overlay" onclick="closeFavoritesModal()"></div>' +
+    '<div id="sn-favoritesModal" class="sn-tracking-modal">' +
+    '<div class="track-header">' +
+    '<h2><i class="fas fa-star" style="color:#F59E0B;"></i> My Favorites</h2>' +
+    '<button class="co-close" onclick="closeFavoritesModal()"><i class="fas fa-times"></i></button>' +
+    '</div>' +
+    '<div class="track-body">' +
+    '<div id="sn-favorites-body"></div>' +
+    '</div>' +
     '</div>' +
 
     // Profile overlay + modal

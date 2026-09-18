@@ -194,6 +194,17 @@
   background: #EE4D2D;
   color: #fff;
 }
+.pm-btn--fav {
+  flex: 0 0 48px;
+  background: #fff;
+  color: #F59E0B;
+  border: 2px solid #F59E0B;
+  padding: 12px 0;
+}
+.pm-btn--fav.active {
+  background: #F59E0B;
+  color: #fff;
+}
 
 /* ── CHECKOUT MODAL ── */
 .sn-checkout-modal {
