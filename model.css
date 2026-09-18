@@ -588,6 +588,20 @@
 #sn-reportOverlay { z-index: 500; }
 #sn-reportModal { z-index: 501; }
 
+/* Same reason — the Help Center / Suspension Policy modal is opened from
+   inside the admin dashboard (Vendors tab) and other already-open modals,
+   so without this it was rendering BEHIND them: classes toggled fine, but
+   nothing visibly happened when clicked. */
+#sn-helpOverlay { z-index: 500; }
+#sn-helpModal { z-index: 501; }
+
+/* Chat is opened from inside more modals than anything else in the app —
+   tracking detail, merchant dashboard, rider dashboard, storefront, and
+   the admin dashboard's "View Conversation" on a report. Give it the
+   highest tier so it's never the one stuck behind another modal. */
+#sn-chatOverlay { z-index: 600; }
+#sn-chatModal { z-index: 601; }
+
 .login-body { text-align: center; }
 .login-icon { font-size: 48px; color: #EE4D2D; margin-bottom: 10px; }
 .login-body h2 { font-size: 22px; font-weight: 800; color: #1A1A1A; margin-bottom: 4px; }
@@ -1087,14 +1101,6 @@
 @media (min-width: 900px) {
   .dashboard-body-inner {
     padding: 64px 56px 40px;
-    /* Most dashboard text is hardcoded inline pixel font-sizes (built
-       directly in JS-generated HTML), which don't inherit a parent's
-       font-size at all — a font-size change here would only affect the
-       handful of elements without their own inline size. `zoom` scales
-       the whole rendered box — text, padding, buttons, everything —
-       proportionally, which is what actually makes it look and feel
-       bigger on a large screen instead of just technically wider. */
-    zoom: 1.15;
   }
 }
 
