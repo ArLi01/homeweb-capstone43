@@ -14,16 +14,26 @@ var CATEGORY_META = {
 var DEFAULT_CATEGORY_META = { bg: '#F9F9F9', color: '#CBD5E1', icon: 'fa-box' };
 
 // Category determines the unit automatically — the merchant never types
-// this in. Vegetable/Meat/Sea Food are sold by weight (kg), Beverages by
-// volume (mL), Sari-sari and Other are sold per piece. //
+// this in. Vegetable/Meat/Sea Food are sold by weight (kg). Beverages are
+// sold per bottle/can, not by volume — a shopper buys "2 bottles," never
+// "1.4 mL" of something already bottled — so they're whole-number units
+// just like Sari-sari and Other, which are sold per piece. //
 var CATEGORY_UNIT = {
   vegetable: 'kg',
   meat: 'kg',
   seafood: 'kg',
   sarisari: 'pc',
-  drinks: 'mL',
+  drinks: 'bottle', // default/fallback only — Beverages lets the vendor pick the actual packaging, see BEVERAGE_UNIT_OPTIONS
   other: 'pc'
 };
+
+// Beverages cover bottles, cans, packs and sachets — a single fixed label
+// would be wrong for half of them (a can labeled "bottle"), so this is the
+// one category where the vendor picks which one fits. All of them are
+// still whole-number units either way, same as CATEGORY_UNIT.drinks above. //
+var BEVERAGE_UNIT_OPTIONS = [
+  ['bottle', 'Bottle'], ['can', 'Can'], ['pack', 'Pack'], ['sachet', 'Sachet'], ['pc', 'Pc']
+];
 
 // Starting point for the "low stock" alert level, used only when a merchant
 // hasn't set their own number for a product yet. A single number doesn't
@@ -1936,10 +1946,20 @@ function updateBuyButtonsState(stockQty) {
 }
 
 // Kg-priced products (sold by weight) allow fractional quantities like
-// 0.5kg or 1.2kg — everything else (pieces, packs, boxes) stays whole
-// numbers, since you can't buy half a piece of something. //
+// 0.5kg or 1.2kg — everything else (pieces, bottles, packs, boxes) stays
+// whole numbers, since you can't buy half a piece — or half a bottle — of
+// something. //
 function getQtyStep(unit) {
-  return (unit === 'kg' || unit === 'mL') ? 0.1 : 1;
+  return unit === 'kg' ? 0.1 : 1;
+}
+
+// Snaps a typed quantity to the nearest valid step for its unit (0.1 for
+// kg, whole numbers for everything else) instead of always rounding to
+// one decimal place regardless of unit — that older behavior is exactly
+// how a whole-number product like a bottled drink could end up with a
+// typed quantity like "1.4". //
+function roundToStep(n, step) {
+  return Math.round(Math.round(n / step) * step * 10) / 10;
 }
 
 function changeQty(direction) {
@@ -1947,7 +1967,7 @@ function changeQty(direction) {
   var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
   var attempted = currentProduct.qty + (direction * step);
   // Round to avoid floating point noise (0.1 + 0.2 = 0.30000000000000004) //
-  attempted = Math.round(attempted * 10) / 10;
+  attempted = roundToStep(attempted, step);
   currentProduct.qty = Math.max(step, Math.min(max, attempted));
   document.querySelector('.pm-qty-val').value = currentProduct.qty;
   if (direction > 0 && attempted > max) showToast('Only ' + max + ' ' + currentProduct.unit + ' left in stock', 'info');
@@ -1960,7 +1980,7 @@ function setQtyDirect(value) {
   var max = typeof currentProduct.stock_qty === 'number' ? Math.min(99, currentProduct.stock_qty) : 99;
   var n = parseFloat(value);
   if (isNaN(n) || n < step) n = step;
-  n = Math.round(n * 10) / 10;
+  n = roundToStep(n, step);
   if (n > max) {
     n = max;
     showToast('Only ' + max + ' ' + currentProduct.unit + ' left in stock', 'info');
@@ -2331,7 +2351,7 @@ function changeCartQty(id, direction) {
   if (!item) return;
   var step = getQtyStep(item.unit);
   var max = typeof item.stock_qty === 'number' ? item.stock_qty : 99;
-  var attempted = Math.round((item.qty + (direction * step)) * 10) / 10;
+  var attempted = roundToStep(item.qty + (direction * step), step);
   if (direction > 0 && attempted > max) {
     showToast('Only ' + max + ' ' + (item.unit || 'pc') + ' left in stock', 'info');
     return;
@@ -2350,7 +2370,7 @@ function setCartQtyDirect(id, value) {
   var max = typeof item.stock_qty === 'number' ? item.stock_qty : 99;
   var n = parseFloat(value);
   if (isNaN(n) || n < step) n = step;
-  n = Math.round(n * 10) / 10;
+  n = roundToStep(n, step);
   if (n > max) {
     n = max;
     showToast('Only ' + max + ' ' + (item.unit || 'pc') + ' left in stock', 'info');
@@ -3139,6 +3159,7 @@ function closeSuccess() {
 
 // ORDER TRACKING //
 let trackingDetailPollIntervalId = null;
+let trackingListPollIntervalId = null;
 
 async function openOrderTracking(e) {
   if (e) e.preventDefault();
@@ -3169,6 +3190,21 @@ async function openOrderTracking(e) {
 
   await fetchOrders();
   renderOrderList();
+
+  // Live-update the list itself too — e.g. a merchant marking an order
+  // "shipped" while the customer happens to be sitting on the list view
+  // (rather than a single order's detail, which already polls). //
+  if (trackingListPollIntervalId) clearInterval(trackingListPollIntervalId);
+  trackingListPollIntervalId = setInterval(async function() {
+    var detailVisible = detailEl && detailEl.style.display !== 'none';
+    if (detailVisible || !document.getElementById('sn-trackingModal').classList.contains('active')) {
+      clearInterval(trackingListPollIntervalId);
+      trackingListPollIntervalId = null;
+      return;
+    }
+    await fetchOrders();
+    renderOrderList();
+  }, 5000);
 }
 
 // Fetch this user's orders (with their items) from Supabase //
@@ -3200,6 +3236,7 @@ function closeOrderTracking() {
   currentTrackingOrder = null;
   document.body.style.overflow = '';
   if (trackingDetailPollIntervalId) { clearInterval(trackingDetailPollIntervalId); trackingDetailPollIntervalId = null; }
+  if (trackingListPollIntervalId) { clearInterval(trackingListPollIntervalId); trackingListPollIntervalId = null; }
 }
 
 var trackingActiveTab = 'to_ship';
@@ -3358,6 +3395,16 @@ async function openTrackingDetail(orderId) {
     const { data: latest } = await supabase.from('orders').select('status, updated_at').eq('id', orderId).single();
     if (latest && (latest.status !== currentTrackingOrder.status || latest.updated_at !== currentTrackingOrder.updated_at)) {
       openTrackingDetail(orderId);
+      return;
+    }
+    // Nothing changed server-side, but the "Didn't receive it? You can
+    // report this in about N minutes" countdown is computed purely from
+    // the clock (Date.now() vs. updated_at), not from any field that
+    // changes in the database — so without this, it would sit frozen at
+    // whatever it said when the screen first opened, and the "Did Not
+    // Arrive Yet" button would never appear until a manual reload. //
+    if (currentTrackingOrder.status === 'awaiting_confirmation' && !currentTrackingOrder.not_arrived_reported_at) {
+      renderTrackingDetail(currentTrackingOrder);
     }
   }, 5000);
 }
@@ -3839,10 +3886,23 @@ async function submitLogin() {
   }
 
   currentUser = data.user;
+
+  // A suspended customer account can still sign in successfully at the
+  // auth layer (Supabase auth has no idea about our own suspension flag),
+  // so we check profiles.is_suspended ourselves right after and, if set,
+  // undo the sign-in before any UI updates or dashboards get a chance to load.
+  const { data: profileRow } = await supabase.from('profiles').select('full_name, is_suspended, suspended_reason').eq('id', currentUser.id).single();
+
+  if (profileRow && profileRow.is_suspended) {
+    await supabase.auth.signOut();
+    currentUser = null;
+    showToast('Your account has been suspended' + (profileRow.suspended_reason ? (': ' + profileRow.suspended_reason) : '.') + ' Contact support if you believe this is a mistake.', 'error');
+    return;
+  }
+
   closeLoginModal();
   await fetchUserRoles();
   updateAuthUI();
-  const { data: profileRow } = await supabase.from('profiles').select('full_name').eq('id', currentUser.id).single();
   var displayName = (profileRow && profileRow.full_name) ? profileRow.full_name.split(' ')[0] : (currentUser.email || '').split('@')[0];
   showToast('Welcome back, ' + displayName + '!');
 }
@@ -3916,6 +3976,7 @@ async function submitAdminLogin() {
 }
 
 let adminView = 'overview'; // 'overview' | 'merchants' | 'riders'
+let adminPollIntervalId = null;
 
 async function openAdminDashboard() {
   document.getElementById('sn-adminOverlay').classList.add('active');
@@ -3923,12 +3984,27 @@ async function openAdminDashboard() {
   document.body.style.overflow = 'hidden';
   adminView = 'overview';
   renderAdminDashboard();
+
+  // Keep whichever tab is open live — approvals, suspensions and new
+  // reports show up on their own instead of needing a tab switch or a
+  // full page reload to notice. Same polling pattern already used for
+  // chat and order tracking elsewhere in the app. //
+  if (adminPollIntervalId) clearInterval(adminPollIntervalId);
+  adminPollIntervalId = setInterval(function() {
+    // Don't yank focus away from a search box the admin is mid-typing
+    // into — just skip this tick and catch it on the next one. //
+    var active = document.activeElement;
+    var body = document.getElementById('sn-admin-body');
+    if (active && body && body.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+    renderAdminDashboard();
+  }, 5000);
 }
 
 function closeAdminDashboard() {
   document.getElementById('sn-adminOverlay').classList.remove('active');
   document.getElementById('sn-adminModal').classList.remove('active');
   document.body.style.overflow = '';
+  if (adminPollIntervalId) { clearInterval(adminPollIntervalId); adminPollIntervalId = null; }
 }
 
 function adminTabsHtml() {
@@ -4136,18 +4212,19 @@ function openSuspensionPolicyModal() {
 
 // Hides products/listings but keeps order history intact //
 // #ADMIN_SUSPEND_MERCHANT
-async function adminSuspendMerchant(merchantId, storeName) {
+async function adminSuspendMerchant(merchantId, storeName, skipRender) {
   var reason = prompt('Reason for suspending "' + storeName + '"? (shown in admin logs, required)');
-  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a store', 'info'); return; }
+  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a store', 'info'); return false; }
 
   const { error } = await supabase.from('merchants').update({
     is_suspended: true, suspended_reason: reason.trim(), suspended_at: new Date().toISOString()
   }).eq('id', merchantId);
-  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return; }
+  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return false; }
 
   logActivity('merchant_suspended', 'merchant', merchantId, storeName, reason.trim());
   showToast('Store suspended \u2705');
-  renderAdminMerchants();
+  if (!skipRender) renderAdminMerchants();
+  return true;
 }
 
 async function adminReinstateMerchant(merchantId, storeName) {
@@ -4169,18 +4246,19 @@ let adminRiderSearch = '';
 // accepting orders (checked in checkForRiderOrderAlert/acceptOrder), and
 // forces them offline so they don't sit "available" while suspended. //
 // #ADMIN_SUSPEND_RIDER
-async function adminSuspendRider(riderId, riderName) {
+async function adminSuspendRider(riderId, riderName, skipRender) {
   var reason = prompt('Reason for suspending "' + riderName + '"? (shown in admin logs, required)');
-  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a rider', 'info'); return; }
+  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a rider', 'info'); return false; }
 
   const { error } = await supabase.from('riders').update({
     is_suspended: true, suspended_reason: reason.trim(), suspended_at: new Date().toISOString(), is_available: false
   }).eq('id', riderId);
-  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return; }
+  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return false; }
 
   logActivity('rider_suspended', 'rider', riderId, riderName, reason.trim());
   showToast('Rider suspended \u2705');
-  renderAdminRiders();
+  if (!skipRender) renderAdminRiders();
+  return true;
 }
 
 async function adminReinstateRider(riderId, riderName) {
@@ -4194,6 +4272,38 @@ async function adminReinstateRider(riderId, riderName) {
   logActivity('rider_reinstated', 'rider', riderId, riderName, null);
   showToast('Rider reinstated \u2705');
   renderAdminRiders();
+}
+
+// Customers don't have their own table like merchants/riders do \u2014 the
+// suspension flag lives right on their profile row (profiles.id IS the
+// auth user id, no lookup needed). Enforced at login \u2014 see submitLogin(). //
+// #ADMIN_SUSPEND_CUSTOMER
+async function adminSuspendCustomer(userId, customerName, skipRender) {
+  var reason = prompt('Reason for suspending "' + customerName + '"? (shown in admin logs, required)');
+  if (!reason || !reason.trim()) { showToast('A reason is required to suspend a customer', 'info'); return false; }
+
+  const { error } = await supabase.from('profiles').update({
+    is_suspended: true, suspended_reason: reason.trim(), suspended_at: new Date().toISOString()
+  }).eq('id', userId);
+  if (error) { showToast('Could not suspend: ' + error.message, 'error'); return false; }
+
+  logActivity('customer_suspended', 'customer', userId, customerName, reason.trim());
+  showToast('Customer suspended \u2705');
+  if (!skipRender) renderAdminCustomers();
+  return true;
+}
+
+async function adminReinstateCustomer(userId, customerName) {
+  if (!confirm('Reinstate "' + customerName + '"? They\'ll be able to log in and order again.')) return;
+
+  const { error } = await supabase.from('profiles').update({
+    is_suspended: false, suspended_reason: null, suspended_at: null
+  }).eq('id', userId);
+  if (error) { showToast('Could not reinstate: ' + error.message, 'error'); return; }
+
+  logActivity('customer_reinstated', 'customer', userId, customerName, null);
+  showToast('Customer reinstated \u2705');
+  renderAdminCustomers();
 }
 
 // #ADMIN_RIDERS_TAB
@@ -4285,6 +4395,8 @@ var ACTIVITY_ACTION_LABELS = {
   merchant_reinstated: 'Reinstated merchant',
   rider_suspended: 'Suspended rider',
   rider_reinstated: 'Reinstated rider',
+  customer_suspended: 'Suspended customer',
+  customer_reinstated: 'Reinstated customer',
   dispute_resolved: 'Resolved delivery dispute'
 };
 
@@ -4354,9 +4466,12 @@ async function renderAdminReports() {
           (r.details ? '<p style="margin:4px 0 0;font-size:12.5px;color:#666;">"' + r.details + '"</p>' : '') +
           '<p style="margin:6px 0 0;font-size:11.5px;color:#999;">Reported by ' + (nameById[r.reporter_id] || 'Unknown') + ' \u2022 ' + formatDate(r.created_at) + (r.order_id ? ' \u2022 Order-linked' : '') + '</p>' +
           (r.status === 'pending'
-            ? '<div style="display:flex;gap:6px;margin-top:8px;">' +
+            ? '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">' +
               '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'reviewed\')">Mark Reviewed</button>' +
               '<button class="co-btn" style="padding:6px 12px;background:#F3F4F6;color:#333;font-size:12px;" onclick="adminUpdateReportStatus(\'' + r.id + '\', \'dismissed\')">Disregard</button>' +
+              (r.reported_id
+                ? '<button class="co-btn" style="padding:6px 12px;background:#1F2937;color:#fff;font-size:12px;" onclick="adminSuspendFromReport(\'' + r.id + '\', \'' + r.reported_type + '\', \'' + r.reported_id + '\', \'' + (r.reported_name || 'this account').replace(/'/g, "\\'") + '\')"><i class="fas fa-ban"></i> Suspend</button>'
+                : '') +
               '</div>'
             : '') +
           (r.order_id
@@ -4404,15 +4519,49 @@ async function adminViewReportedConversation(orderId, reportedName) {
   var nameById = {};
   (profiles || []).forEach(function(p) { nameById[p.id] = p.full_name || 'HomeWeb User'; });
 
-  scrollEl.innerHTML = '<div style="background:#FFFBEB;color:#92400E;font-size:11.5px;padding:8px 10px;border-radius:8px;margin-bottom:10px;"><i class="fas fa-shield-halved"></i> Admin view \u2014 visible only because a report references this order.</div>' +
-    msgs.map(function(m) {
-      return '<div class="chat-bubble-row" style="justify-content:flex-start;">' +
-        '<div class="chat-bubble" style="background:#F3F4F6;color:#333;max-width:85%;">' +
-        '<p style="margin:0 0 3px;font-size:10.5px;font-weight:700;color:#666;">' + (nameById[m.sender_id] || 'Unknown') + '</p>' +
-        m.body.replace(/</g, '&lt;') +
-        '<p style="margin:3px 0 0;font-size:10px;opacity:0.6;">' + formatDate(m.created_at) + '</p>' +
-        '</div></div>';
-    }).join('');
+  // This is an admin looking in on someone else's conversation, so there's
+  // no "me" to anchor left/right on like the normal chat view does. Instead,
+  // whoever sent the first message in the thread anchors the left side (gray,
+  // like an incoming message), and every other participant gets pushed right
+  // with their own color \u2014 so a 2-person thread reads like a real back-and-forth,
+  // and a 3-person one (buyer/seller/rider all tied to the same order) still
+  // keeps each speaker visually distinct instead of one undifferentiated column. //
+  var rightPalette = ['#22C55E', '#3B82F6', '#F59E0B'];
+  var sideBySender = {};
+  var colorBySender = {};
+  var rightCount = 0;
+  var firstSenderId = msgs[0].sender_id;
+  msgs.forEach(function(m) {
+    if (sideBySender[m.sender_id] !== undefined) return;
+    if (m.sender_id === firstSenderId) {
+      sideBySender[m.sender_id] = 'left';
+      colorBySender[m.sender_id] = '#F3F4F6';
+    } else {
+      sideBySender[m.sender_id] = 'right';
+      colorBySender[m.sender_id] = rightPalette[rightCount % rightPalette.length];
+      rightCount++;
+    }
+  });
+
+  var lastDividerTime = null;
+  var html = msgs.map(function(m) {
+    var side = sideBySender[m.sender_id];
+    var bg = colorBySender[m.sender_id];
+    var textColor = side === 'left' ? '#333' : '#fff';
+    var divider = '';
+    if (!lastDividerTime || (new Date(m.created_at) - lastDividerTime) > 20 * 60 * 1000) {
+      divider = '<div class="chat-bubble-time">' + formatDate(m.created_at) + '</div>';
+      lastDividerTime = new Date(m.created_at);
+    }
+    return divider +
+      '<div class="chat-bubble-row" style="justify-content:' + (side === 'left' ? 'flex-start' : 'flex-end') + ';">' +
+      '<div class="chat-bubble" style="background:' + bg + ';color:' + textColor + ';max-width:80%;' + (side === 'left' ? 'border-bottom-left-radius:4px;' : 'border-bottom-right-radius:4px;') + '">' +
+      '<p style="margin:0 0 3px;font-size:10.5px;font-weight:700;color:' + (side === 'left' ? '#666' : 'rgba(255,255,255,0.85)') + ';">' + (nameById[m.sender_id] || 'Unknown') + '</p>' +
+      m.body.replace(/</g, '&lt;') +
+      '</div></div>';
+  }).join('');
+
+  scrollEl.innerHTML = '<div style="background:#FFFBEB;color:#92400E;font-size:11.5px;padding:8px 10px;border-radius:8px;margin-bottom:10px;"><i class="fas fa-shield-halved"></i> Admin view \u2014 visible only because a report references this order.</div>' + html;
 }
 
 async function adminUpdateReportStatus(reportId, status) {
@@ -4420,6 +4569,40 @@ async function adminUpdateReportStatus(reportId, status) {
   if (error) { showToast('Could not update report: ' + error.message, 'error'); return; }
   showToast('Report marked as ' + status, 'info');
   renderAdminReports();
+}
+
+// One "Suspend" action on a report, dispatched to whichever table actually
+// holds that account's suspension flag. reports.reported_id is always the
+// auth user id (see openReportModal's callers), but merchants/riders are
+// suspended on their OWN row, keyed by that row's id — not the user id —
+// so those two need a lookup first. Customers are suspended straight on
+// their profile, which the user id already IS the primary key of. //
+// #ADMIN_SUSPEND_FROM_REPORT
+async function adminSuspendFromReport(reportId, reportedType, reportedUserId, reportedName) {
+  var suspended = false;
+
+  if (reportedType === 'merchant') {
+    const { data: merchant, error } = await supabase.from('merchants').select('id').eq('user_id', reportedUserId).single();
+    if (error || !merchant) { showToast('Could not find this store’s account', 'error'); return; }
+    suspended = await adminSuspendMerchant(merchant.id, reportedName, true);
+  } else if (reportedType === 'rider') {
+    const { data: rider, error } = await supabase.from('riders').select('id').eq('user_id', reportedUserId).single();
+    if (error || !rider) { showToast('Could not find this rider’s account', 'error'); return; }
+    suspended = await adminSuspendRider(rider.id, reportedName, true);
+  } else {
+    suspended = await adminSuspendCustomer(reportedUserId, reportedName, true);
+  }
+
+  // Suspending IS the resolution here, so the report is marked Reviewed
+  // automatically — but only once the suspension actually went through.
+  // A cancelled reason prompt or a failed update already showed its own
+  // toast above, so the report is left Pending rather than being silently
+  // closed out. //
+  if (suspended) {
+    await adminUpdateReportStatus(reportId, 'reviewed');
+  } else {
+    renderAdminReports();
+  }
 }
 
 async function adminViewRiderLicense(riderUserId) {
@@ -4472,6 +4655,7 @@ async function renderAdminCustomers() {
     .sort(function(a, b) { return ((statsById[b.id] && statsById[b.id].total) || 0) - ((statsById[a.id] && statsById[a.id].total) || 0); })
     .map(function(p) {
       var s = statsById[p.id] || { count: 0, total: 0 };
+      var escapedName = (p.full_name || 'this customer').replace(/'/g, "\\'");
       return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;font-family:var(--font, system-ui, sans-serif);' + (p.is_suspended ? 'opacity:0.65;' : '') + '">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;">' +
         '<div>' +
@@ -4483,7 +4667,11 @@ async function renderAdminCustomers() {
         '<div style="text-align:right;">' +
         '<p style="margin:0;font-weight:700;font-size:13px;">' + fmt(s.total) + '</p>' +
         '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + s.count + ' order' + (s.count === 1 ? '' : 's') + '</p>' +
-        '</div></div>';
+        '</div>' + // closes the flex header row
+        (p.is_suspended
+          ? '<button class="co-btn" style="padding:6px 12px;background:#F0FFF4;color:#15803D;font-size:12px;margin-top:8px;" onclick="adminReinstateCustomer(\'' + p.id + '\', \'' + escapedName + '\')">Reinstate</button>'
+          : '<button class="co-btn" style="padding:6px 12px;background:#1F2937;color:#fff;font-size:12px;margin-top:8px;" onclick="adminSuspendCustomer(\'' + p.id + '\', \'' + escapedName + '\')"><i class="fas fa-ban"></i> Suspend Customer</button>') +
+        '</div>'; // closes the outer per-customer wrapper
     }).join('') : '<p style="color:#999;font-size:13px;">No customers match your search.</p>';
 
   body.innerHTML = header +
@@ -4986,14 +5174,43 @@ async function fetchUserRoles() {
 
   var savedRole = localStorage.getItem(activeRoleKey());
   activeRole = (savedRole && userRoles.indexOf(savedRole) !== -1) ? savedRole : userRoles[0];
+
+  // Close the same leak on login as switchActiveRole closes on a live
+  // switch: if this account has a rider profile but is coming back in on
+  // a different role, make sure it isn't still marked available from a
+  // previous session (e.g. they closed the tab mid-shift as a rider,
+  // then next time logged back in on their seller account). //
+  if (activeRole !== 'rider' && userRoles.indexOf('rider') !== -1) {
+    supabase.from('riders').update({ is_available: false }).eq('user_id', currentUser.id).eq('is_available', true);
+  }
 }
 
 function switchActiveRole(role) {
   if (userRoles.indexOf(role) === -1) return;
+  var previousRole = activeRole;
   activeRole = role;
   localStorage.setItem(activeRoleKey(), role);
   showToast('Switched to ' + ROLE_LABELS[role] + ' account \uD83D\uDD04');
   updateNotifBadge();
+
+  // A dual seller+rider account shouldn't keep getting delivery alerts (or
+  // stay matchable for new orders) while they're off working their seller
+  // dashboard \u2014 "is_available" was a purely manual toggle before this,
+  // so it just stayed stuck on in the background across role switches.
+  // Tie it to the active role instead: leaving rider goes offline, coming
+  // back to rider goes back online, same as flipping the toggle by hand. //
+  if (previousRole === 'rider' && role !== 'rider' && userRoles.indexOf('rider') !== -1) {
+    supabase.from('riders').update({ is_available: false }).eq('user_id', currentUser.id).then(function() {
+      if (myRiderProfile) myRiderProfile.is_available = false;
+    });
+    closeRiderAlertPopup(); // don't leave a delivery alert on screen for a role they just left
+  } else if (role === 'rider' && previousRole !== 'rider') {
+    supabase.from('riders').update({ is_available: true }).eq('user_id', currentUser.id).then(function() {
+      if (myRiderProfile) myRiderProfile.is_available = true;
+      checkForRiderOrderAlert(); // don't make them wait up to 8s for the next poll tick
+    });
+  }
+
   if (document.getElementById('sn-profileModal').classList.contains('active')) {
     openProfileModal();
   }
@@ -6501,7 +6718,10 @@ function changeInventoryTypeFilter(value) {
 async function fetchMerchantInventory() {
   const { data: myProducts, error: prodErr } = await supabase
     .from('products')
-    .select('id, name, unit, stock_qty, sold_count, is_active')
+    // low_stock_threshold + category are required by effectiveLowStockThreshold()
+    // below — without them every product silently fell back to the generic
+    // default (5) regardless of what the merchant actually set per product. //
+    .select('id, name, unit, category, stock_qty, sold_count, is_active, low_stock_threshold')
     .eq('merchant_id', myMerchantId)
     .order('name', { ascending: true });
   if (prodErr) console.error('inventory: products error', prodErr);
@@ -7383,9 +7603,7 @@ function openProductForm(productId) {
     '<input type="number" id="pf-cost-price" min="0" step="0.01" placeholder="What you paid for this, if you want profit tracked" value="' + (p && p.cost_price !== null && p.cost_price !== undefined ? p.cost_price : '') + '"/>' +
     '<span style="font-size:11px;color:#999;">Leave blank if you\'d rather not track this \u2014 your Sales Report just won\'t show profit for this item.</span></div>' +
     categoryFieldHtml +
-    '<div class="co-field"><label>Unit of Measurement</label>' +
-    '<div id="pf-unit-display" style="padding:10px 14px;background:#F9FAFB;border-radius:8px;border:1px solid #e5e5e5;font-weight:600;color:#333;"></div>' +
-    '<span style="font-size:11px;color:#999;">Set automatically based on the category you choose</span></div>' +
+    '<div class="co-field" id="pf-unit-field"><label>Unit of Measurement</label></div>' +
     '<div class="co-field"><label>Low Stock Alert <span style="color:#999;font-weight:400;">— optional</span></label>' +
     '<input type="number" id="pf-low-stock" min="0" step="1" placeholder="Suggested: ' + (CATEGORY_LOW_STOCK_DEFAULT[(p && p.category) || 'vegetable'] || 5) + '" value="' + (p && p.low_stock_threshold !== null && p.low_stock_threshold !== undefined ? p.low_stock_threshold : '') + '"/>' +
     '<span style="font-size:11px;color:#999;">Get notified when this product\'s stock falls to or below this number. Leave blank to use a suggested amount based on the category.</span></div>' +
@@ -7416,14 +7634,39 @@ function openProductForm(productId) {
 // selling. //
 function updateAutoUnit() {
   var categoryEl = document.getElementById('pf-category');
-  var unitDisplay = document.getElementById('pf-unit-display');
-  if (!categoryEl || !unitDisplay) return;
-  var unit = CATEGORY_UNIT[categoryEl.value] || 'pc';
-  unitDisplay.textContent = unit;
+  var unitField = document.getElementById('pf-unit-field');
+  if (!categoryEl || !unitField) return;
+  var category = categoryEl.value;
 
   var lowStockEl = document.getElementById('pf-low-stock');
   if (lowStockEl) {
-    lowStockEl.placeholder = 'Suggested: ' + (CATEGORY_LOW_STOCK_DEFAULT[categoryEl.value] || 5);
+    lowStockEl.placeholder = 'Suggested: ' + (CATEGORY_LOW_STOCK_DEFAULT[category] || 5);
+  }
+
+  if (category === 'drinks') {
+    // The only category where the unit isn't auto-derived — see
+    // BEVERAGE_UNIT_OPTIONS above for why. Default to the product's own
+    // saved unit when editing (falling back to "bottle" for a new product,
+    // or if it was saved with something outside this list). //
+    var existing = editingProductId ? myMerchantProducts.find(function(x) { return x.id === editingProductId; }) : null;
+    var savedUnit = existing ? existing.unit : null;
+    var isKnownUnit = BEVERAGE_UNIT_OPTIONS.some(function(o) { return o[0] === savedUnit; });
+    var selectedUnit = isKnownUnit ? savedUnit : 'bottle';
+
+    unitField.innerHTML =
+      '<label>Unit of Measurement</label>' +
+      '<select id="pf-unit">' +
+      BEVERAGE_UNIT_OPTIONS.map(function(o) {
+        return '<option value="' + o[0] + '"' + (o[0] === selectedUnit ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') +
+      '</select>' +
+      '<span style="font-size:11px;color:#999;">How this item is actually packaged — quantities are always whole numbers either way.</span>';
+  } else {
+    var unit = CATEGORY_UNIT[category] || 'pc';
+    unitField.innerHTML =
+      '<label>Unit of Measurement</label>' +
+      '<div id="pf-unit-display" style="padding:10px 14px;background:#F9FAFB;border-radius:8px;border:1px solid #e5e5e5;font-weight:600;color:#333;">' + unit + '</div>' +
+      '<span style="font-size:11px;color:#999;">Set automatically based on the category you choose</span>';
   }
 }
 
@@ -7442,7 +7685,8 @@ async function saveProduct() {
   var price = parseFloat(document.getElementById('pf-price').value);
   var category = document.getElementById('pf-category').value;
   var desc = document.getElementById('pf-desc').value.trim();
-  var unit = CATEGORY_UNIT[category] || 'pc';
+  var unitEl = document.getElementById('pf-unit'); // only present for Beverages — see updateAutoUnit()
+  var unit = category === 'drinks' && unitEl ? unitEl.value : (CATEGORY_UNIT[category] || 'pc');
   var costPriceRaw = document.getElementById('pf-cost-price').value.trim();
   var costPrice = costPriceRaw === '' ? null : parseFloat(costPriceRaw);
   var lowStockRaw = document.getElementById('pf-low-stock').value.trim();
@@ -7835,6 +8079,7 @@ async function rejectOrderAlert(orderIdsStr) {
 let myRiderProfile = null;
 let myAssignedOrders = [];
 let availableOrders = [];
+let riderDashPollIntervalId = null;
 
 async function openRiderDashboard(e) {
   if (e) e.preventDefault();
@@ -7865,12 +8110,38 @@ async function openRiderDashboard(e) {
   await loadMyAssignedOrders();
   await loadAvailableOrders();
   renderRiderDashboard();
+
+  // Keep this live while it's open — this is what a customer confirming
+  // receipt, or another rider grabbing an available order, actually needs
+  // to show up on its own instead of sitting stale until a manual reload. //
+  if (riderDashPollIntervalId) clearInterval(riderDashPollIntervalId);
+  riderDashPollIntervalId = setInterval(async function() {
+    if (!document.getElementById('sn-riderDashModal').classList.contains('active')) {
+      clearInterval(riderDashPollIntervalId);
+      riderDashPollIntervalId = null;
+      return;
+    }
+    await refreshRiderDashboard(true);
+  }, 5000);
 }
 
 function closeRiderDashboard() {
   document.getElementById('sn-riderDashOverlay').classList.remove('active');
   document.getElementById('sn-riderDashModal').classList.remove('active');
   document.body.style.overflow = '';
+  if (riderDashPollIntervalId) { clearInterval(riderDashPollIntervalId); riderDashPollIntervalId = null; }
+}
+
+// The visible "Refresh" button used to only reload Available Orders —
+// Active/Completed deliveries (e.g. an order the customer just confirmed)
+// never budged until a full page reload. Refresh everything instead. //
+async function refreshRiderDashboard(silent) {
+  const { data: riderRow } = await supabase.from('riders').select('*').eq('user_id', currentUser.id).single();
+  if (riderRow) myRiderProfile = riderRow;
+  await loadMyAssignedOrders();
+  await loadAvailableOrders();
+  renderRiderDashboard();
+  if (!silent) showToast('Refreshed', 'info');
 }
 
 async function loadMyAssignedOrders() {
@@ -8152,7 +8423,7 @@ function renderRiderDashboard() {
     '</p>' +
     licenseHtml +
     toggleHtml +
-    (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="loadAvailableOrders().then(renderRiderDashboard)"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
+    (available ? ('<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">Available Orders <button class="co-btn" style="padding:4px 10px;background:#F3F4F6;color:#333;font-size:12px;" onclick="refreshRiderDashboard()"><i class="fas fa-sync"></i> Refresh</button></h3>' + availableHtml) : '') +
     '<h3 style="margin:16px 0 8px;font-size:14px;">Active Deliveries</h3>' +
     (activeOrders.length ? activeOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No active deliveries right now.</p>') +
     '<h3 style="margin:16px 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
