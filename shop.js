@@ -615,6 +615,30 @@ function filterProducts(query) {
   const q = query.trim().toLowerCase();
   let shown = 0;
 
+  // The homepage grid only ever holds a curated "Recommended" slice of the
+  // catalog (top 8 by score — see renderHomeProducts), not everything.
+  // Searching within just those 8 quietly missed anything not currently
+  // recommended — e.g. "pork" finding nothing just because no pork item
+  // happened to be a top scorer today, even though pork products exist and
+  // are in stock. The full catalog is already loaded in memory (`products`),
+  // so when there's a query, render every actual match from the whole
+  // catalog into the grid instead of only filtering what's already on
+  // screen; clearing the search restores the normal recommended view.
+  // (The category page grid already renders its full category up front, so
+  // it's unaffected — this only applies where a "home-product-grid" exists.) //
+  var homeGrid = document.getElementById('home-product-grid');
+  if (homeGrid) {
+    if (q) {
+      var fullMatches = products.filter(function(p) {
+        return allWordsFoundIn(p.name, q) || queryMatchesProductCategory(q, p.category);
+      });
+      homeGrid.innerHTML = fullMatches.length ? fullMatches.map(renderProductCardHtml).join('') : '';
+      attachCardClicks();
+    } else {
+      renderHomeProducts();
+    }
+  }
+
   // Check each product card //
   document.querySelectorAll('.product-card').forEach(function(card) {
     const id = card.dataset.productId;
