@@ -498,6 +498,7 @@ supabase.auth.onAuthStateChange(async function(event, session) {
   if (newUserId !== lastAuthUserId) {
     myMerchantId = null;
     myMerchantProducts = [];
+    myMerchantBusinessType = null;
   }
   lastAuthUserId = newUserId;
 
@@ -5965,6 +5966,11 @@ async function uploadAvatar(file) {
 
 let myMerchantId = null;
 let myMerchantProducts = [];
+// Cached alongside myMerchantId — the category a store registered with at
+// signup, which now locks what category new products can be added under
+// (see openProductForm). 'sarisari' stores are the one exception, since a
+// sari-sari store genuinely sells a mix of everything. //
+let myMerchantBusinessType = null;
 let myMerchantSales = null;
 let myMerchantReviews = null;
 let merchantDashboardView = 'products'; // 'products' | 'sales'
@@ -6020,7 +6026,7 @@ async function openMerchantDashboard(e) {
 
   if (!myMerchantId) {
     const { data: merchant, error } = await supabase
-      .from('merchants').select('id, is_suspended, suspended_reason').eq('user_id', currentUser.id).single();
+      .from('merchants').select('id, is_suspended, suspended_reason, business_type').eq('user_id', currentUser.id).single();
     if (error || !merchant) {
       body.innerHTML = '<div class="track-empty"><p>Could not load your merchant profile.</p></div>';
       return;
@@ -6035,6 +6041,7 @@ async function openMerchantDashboard(e) {
       return;
     }
     myMerchantId = merchant.id;
+    myMerchantBusinessType = merchant.business_type;
   }
 
   await loadMyMerchantProducts();
@@ -7327,6 +7334,41 @@ function openProductForm(productId) {
   var body = document.getElementById('sn-merchant-body');
   var p = productId ? myMerchantProducts.find(function(x) { return x.id === productId; }) : null;
 
+  // A store's category is set once at signup (Products Sold) and every
+  // product it lists is locked to that category from then on — a Meat
+  // store can only add meat, etc. Sari-sari is the one exception, since
+  // those genuinely stock a mix of everything.
+  //
+  // Products added before this rule existed may already sit in a
+  // different category than the store's registered type (a Sales Report
+  // that used to allow any category on any store). Those are grandfathered
+  // in rather than silently reassigned — editing one of those still shows
+  // a normal, unlocked category picker (with a note explaining why), so
+  // nothing gets rewritten without the vendor choosing to. //
+  var lockedCategory = myMerchantBusinessType && CATEGORY_META[myMerchantBusinessType] && myMerchantBusinessType !== 'sarisari';
+  var legacyMismatch = lockedCategory && p && p.category !== myMerchantBusinessType;
+
+  var categoryFieldHtml;
+  if (lockedCategory && !legacyMismatch) {
+    categoryFieldHtml =
+      '<div class="co-field"><label>Category</label>' +
+      '<div style="padding:10px 14px;background:#F9FAFB;border-radius:8px;border:1px solid #e5e5e5;font-weight:600;color:#333;"><i class="fas ' + CATEGORY_META[myMerchantBusinessType].icon + '"></i> ' + CATEGORY_META[myMerchantBusinessType].title + '</div>' +
+      '<input type="hidden" id="pf-category" value="' + myMerchantBusinessType + '"/>' +
+      '<span style="font-size:11px;color:#999;">Set from your store’s registered business type — every product you sell falls under this category.</span></div>';
+  } else {
+    categoryFieldHtml =
+      '<div class="co-field"><label>Category</label>' +
+      '<select id="pf-category" onchange="updateAutoUnit()">' +
+      Object.keys(CATEGORY_META).filter(function(k) { return k !== 'other'; }).concat(['other']).map(function(k) {
+        return '<option value="' + k + '"' + (p && p.category === k ? ' selected' : '') + '>' + CATEGORY_META[k].title + '</option>';
+      }).join('') +
+      '</select>' +
+      (legacyMismatch
+        ? '<span style="font-size:11px;color:#B45309;"><i class="fas fa-triangle-exclamation"></i> This product was added before store categories were locked, so it doesn’t match your registered business type. Leave it as-is, or change it here if it should be reclassified.</span>'
+        : '') +
+      '</div>';
+  }
+
   body.innerHTML =
     '<h2 style="margin:0 0 16px;">' + (p ? 'Edit Product' : 'Add Product') + '</h2>' +
     '<div class="co-field"><label>Product Name <span class="co-required">*</span></label>' +
@@ -7340,12 +7382,7 @@ function openProductForm(productId) {
     '<div class="co-field"><label>Cost Price (\u20B1) <span style="color:#999;font-weight:400;">\u2014 optional</span></label>' +
     '<input type="number" id="pf-cost-price" min="0" step="0.01" placeholder="What you paid for this, if you want profit tracked" value="' + (p && p.cost_price !== null && p.cost_price !== undefined ? p.cost_price : '') + '"/>' +
     '<span style="font-size:11px;color:#999;">Leave blank if you\'d rather not track this \u2014 your Sales Report just won\'t show profit for this item.</span></div>' +
-    '<div class="co-field"><label>Category</label>' +
-    '<select id="pf-category" onchange="updateAutoUnit()">' +
-    Object.keys(CATEGORY_META).filter(function(k) { return k !== 'other'; }).concat(['other']).map(function(k) {
-      return '<option value="' + k + '"' + (p && p.category === k ? ' selected' : '') + '>' + CATEGORY_META[k].title + '</option>';
-    }).join('') +
-    '</select></div>' +
+    categoryFieldHtml +
     '<div class="co-field"><label>Unit of Measurement</label>' +
     '<div id="pf-unit-display" style="padding:10px 14px;background:#F9FAFB;border-radius:8px;border:1px solid #e5e5e5;font-weight:600;color:#333;"></div>' +
     '<span style="font-size:11px;color:#999;">Set automatically based on the category you choose</span></div>' +
