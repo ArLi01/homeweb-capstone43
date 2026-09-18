@@ -608,14 +608,17 @@ function filterProducts(query) {
     const product = products.find(function(p) { return String(p.id) === String(id); });
     if (!product) return;
 
-    // Every typed word has to show up somewhere in the name (or
-    // description) — this is what lets "pork ribs" match "Pork Spare
-    // Ribs" even with "Spare" in between. Category words (like "meat")
+    // Every typed word has to show up somewhere in the PRODUCT NAME —
+    // this is what lets "pork ribs" match "Pork Spare Ribs" even with
+    // "Spare" in between. Deliberately NOT checking the description here
+    // anymore: a product's description is free-text marketing copy and
+    // can innocently mention an unrelated word (e.g. a Pork Chop's
+    // description mentioning it's "cut near the ribs") which isn't what
+    // the shopper is actually looking for. Category words (like "meat")
     // are handled separately, so "pork" alone stays specific to pork. //
     const nameMatch = allWordsFoundIn(product.name, q);
-    const descMatch = allWordsFoundIn(product.description, q);
     const categoryMatch = queryMatchesProductCategory(q, product.category);
-    const matches = !q || nameMatch || descMatch || categoryMatch;
+    const matches = !q || nameMatch || categoryMatch;
     card.style.display = matches ? '' : 'none';
     if (matches) shown++;
 
