@@ -962,6 +962,7 @@ var currentChatOrderId = null;
 var currentChatOtherUserId = null;
 var currentChatOtherName = null;
 var chatThreadPollId = null;
+var chatInboxPollId = null;
 
 // token check prevents a slow render from landing after the user
 // already navigated away (this was the old "Back" button bug) //
@@ -979,6 +980,7 @@ function openChatThread(orderId, otherUserId, otherName) {
   currentChatOrderId = orderId;
   currentChatOtherUserId = otherUserId;
   currentChatOtherName = otherName;
+  if (chatInboxPollId) { clearInterval(chatInboxPollId); chatInboxPollId = null; }
 
   document.getElementById('sn-chatOverlay').classList.add('active');
   document.getElementById('sn-chatModal').classList.add('active');
@@ -1011,6 +1013,7 @@ function closeChatModal() {
   document.getElementById('sn-chatModal').classList.remove('active');
   document.body.style.overflow = '';
   if (chatThreadPollId) { clearInterval(chatThreadPollId); chatThreadPollId = null; }
+  if (chatInboxPollId) { clearInterval(chatInboxPollId); chatInboxPollId = null; }
   currentChatOrderId = null;
   currentChatOtherUserId = null;
 }
@@ -1139,8 +1142,26 @@ async function openChatInbox(e) {
     chatCloseBtnHtml();
   document.getElementById('sn-chat-composer').style.display = 'none';
 
+  document.getElementById('sn-chat-scroll').innerHTML = '<div class="chat-empty"><i class="fas fa-circle-notch fa-spin"></i><p>Loading conversations...</p></div>';
+
+  await renderChatInboxList(myToken);
+
+  // Keep the conversation list itself live, not just an open thread \u2014
+  // panel caught a case where a rider's message never showed up in the
+  // customer's inbox until the page was manually refreshed. //
+  if (chatInboxPollId) clearInterval(chatInboxPollId);
+  chatInboxPollId = setInterval(function() { renderChatInboxList(chatViewToken); }, 5000);
+}
+
+// Does the actual fetch + redraw of the conversation list. Split out of
+// openChatInbox so the poll above can call just this part on a timer
+// without replaying the loading spinner / header setup every 5s. //
+async function renderChatInboxList(myToken) {
+  if (myToken === undefined) myToken = chatViewToken;
+  if (myToken !== chatViewToken) return;
+
   var scrollEl = document.getElementById('sn-chat-scroll');
-  scrollEl.innerHTML = '<div class="chat-empty"><i class="fas fa-circle-notch fa-spin"></i><p>Loading conversations...</p></div>';
+  if (!scrollEl) { if (chatInboxPollId) { clearInterval(chatInboxPollId); chatInboxPollId = null; } return; }
 
   const { data: msgs, error } = await supabase
     .from('messages')
@@ -1222,6 +1243,7 @@ function deleteConversation(convoKey) {
 // conversation can be started even if none exists yet. //
 async function openNewMessagePicker() {
   var myToken = ++chatViewToken;
+  if (chatInboxPollId) { clearInterval(chatInboxPollId); chatInboxPollId = null; }
 
   document.getElementById('sn-chat-header').innerHTML =
     '<button class="chat-back-btn" onclick="openChatInbox()"><i class="fas fa-arrow-left"></i></button>' +
