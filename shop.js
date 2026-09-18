@@ -3518,11 +3518,16 @@ function renderTrackingDetail(order) {
 
   // One submit button for whichever of these are still pending — both the
   // product review(s) and the rider rating are optional per item, so this
-  // only blocks a submit that would post nothing at all. //
-  var hasPendingProductReview = (order.order_items || []).some(function(item) {
+  // only blocks a submit that would post nothing at all. Gated on the same
+  // "delivered + you're the customer" condition as reviewsHtml/riderRatingHtml
+  // above — without it, this could show up (with nothing to submit) on an
+  // order that isn't even confirmed delivered yet, since order._myReviews
+  // being empty doesn't by itself mean the review forms are on screen. //
+  var canReviewThisOrder = order.status === 'delivered' && isCustomerViewer;
+  var hasPendingProductReview = canReviewThisOrder && (order.order_items || []).some(function(item) {
     return !(order._myReviews && order._myReviews[item.product_id]);
   });
-  var hasPendingRiderRating = !!(order.rider_user_id && !order._myRiderRating);
+  var hasPendingRiderRating = canReviewThisOrder && !!(order.rider_user_id && !order._myRiderRating);
   var combinedSubmitHtml = (hasPendingProductReview || hasPendingRiderRating)
     ? '<div class="track-detail-section">' +
       '<button class="co-btn co-btn--next" style="width:100%;padding:10px;" onclick="submitAllReviews(\'' + order.id + '\')">Submit Review' + (hasPendingProductReview && hasPendingRiderRating ? 's' : '') + '</button>' +
