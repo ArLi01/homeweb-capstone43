@@ -402,10 +402,17 @@ function renderCategoryPage() {
 
 //  STATE //
 let cart = [];
-let currentProduct = null;    
-let checkoutStep = 1;         
+let currentProduct = null;
+let checkoutStep = 1;
 let currentUser = null;
 var pendingPasswordRecovery = false;
+
+// Tracks whose merchant data is currently cached, so it only gets wiped
+// when the logged-in person actually changes — not on every auth event
+// (Supabase also fires this on routine token refreshes for the SAME
+// still-logged-in account, roughly once an hour, and we don't want that
+// to wipe out myMerchantId while someone's mid-edit on the product form). //
+var lastAuthUserId = undefined;
 
 // Has to be registered here at the top, not inside DOMContentLoaded —
 // Supabase fires PASSWORD_RECOVERY almost immediately on page load, and
@@ -418,6 +425,21 @@ supabase.auth.onAuthStateChange(async function(event, session) {
   // session's, which is how an admin role could leak to the next login. //
   await fetchUserRoles();
   loadCartForCurrentUser();
+
+  // Same class of bug as the cart leaking between accounts — myMerchantId
+  // was only ever set once and reused for the rest of the page's life.
+  // If a merchant logged out and a different merchant logged in right
+  // after (no full page reload in between), the new account would keep
+  // the OLD account's merchant id and any product they tried to add would
+  // get saved under the previous seller's store — Supabase then rejects
+  // it anyway since that merchant_id doesn't match the new auth.uid(),
+  // which is the "row violates row-level security policy" error. //
+  var newUserId = currentUser ? currentUser.id : null;
+  if (newUserId !== lastAuthUserId) {
+    myMerchantId = null;
+    myMerchantProducts = [];
+  }
+  lastAuthUserId = newUserId;
 
   updateAuthUI();
   updateNotifBadge();
