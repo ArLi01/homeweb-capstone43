@@ -524,7 +524,9 @@ let currentTrackingOrder = null;
 let shippingInfo = {
   firstName: '', lastName: '', phone: '',
   street: '', barangay: '', city: 'Sta. Barbara', zip: '5002',
-  delivery: 'standard'
+  // 'delivery' or 'pickup' — chosen with the toggle at the top of the
+  // Cart step, before the shipping/pickup-details form even renders. //
+  fulfillment: 'delivery'
 };
 let gcashStep = 1; // 1: mobile number, 2: mpin, 3: processing, 4: success
 let gcashMobile = '';
@@ -2004,7 +2006,13 @@ function addToCart(andCheckout) {
 // CHECKOUT FLOW //
 
 // #CUSTOMER_CART_CHECKOUT
-function openCheckout() {
+// Track's the current customer's pickup no-show count, so the Pick-up
+// toggle can be turned off for someone who keeps not showing up — see
+// setFulfillment() and the note above the toggle in renderCheckout(). //
+let myPickupNoShowCount = 0;
+var PICKUP_NOSHOW_LIMIT = 2; // 3rd strike loses Pick-up until support restores it
+
+async function openCheckout() {
   if (!currentUser) {
     showToast('Please log in to check out', 'info');
     openLoginModal();
@@ -2013,6 +2021,13 @@ function openCheckout() {
   if (!cart.length) { showToast('Your cart is empty', 'info'); return; }
   checkoutStep = 1;
   selectedPaymentMethod = 'cod';
+
+  const { data: myProfile } = await supabase.from('profiles').select('pickup_no_show_count').eq('id', currentUser.id).single();
+  myPickupNoShowCount = myProfile ? (myProfile.pickup_no_show_count || 0) : 0;
+  if (myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT && shippingInfo.fulfillment === 'pickup') {
+    shippingInfo.fulfillment = 'delivery'; // can't default into a mode they're locked out of
+  }
+
   renderCheckout();
   document.getElementById('sn-coOverlay').classList.add('active');
   document.getElementById('sn-checkoutModal').classList.add('active');
@@ -2025,12 +2040,24 @@ function closeCheckout() {
   document.body.style.overflow = '';
 }
 
+// Switches between Delivery and Pickup for the whole checkout — affects
+// every group's fee, since a single checkout can only be one or the other. //
+function setFulfillment(mode) {
+  if (mode === 'pickup' && myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT) {
+    showToast('Pick-up isn’t available on your account right now due to missed pickups. Please use Delivery, or contact support.', 'info');
+    return;
+  }
+  shippingInfo.fulfillment = mode;
+  renderCheckout();
+}
+
 // Render the entire checkout //
 function renderCheckout() {
   const modal = document.getElementById('sn-checkoutModal');
+  var isPickup = shippingInfo.fulfillment === 'pickup';
 
-  // Step indicator bar — Cart > Shipping > Payment > Confirm //
-  const stepNames = ['Cart', 'Shipping', 'Payment', 'Confirm'];
+  // Step indicator bar — Cart > Shipping/Pickup > Payment > Confirm //
+  const stepNames = ['Cart', isPickup ? 'Pickup Info' : 'Shipping', 'Payment', 'Confirm'];
   const stepBar = stepNames.map(function(s, i) {
     return '<div class="co-step ' + (i + 1 === checkoutStep ? 'active' : '') + ' ' + (i + 1 < checkoutStep ? 'done' : '') + '">' +
       '<div class="co-step-num">' + (i + 1 < checkoutStep ? '<i class="fas fa-check"></i>' : (i + 1)) + '</div>' +
@@ -2066,42 +2093,72 @@ function renderCheckout() {
     }).join('');
 
     const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    const shipBreakdown = calcDeliveryFeeBreakdown(shippingInfo.city, sub);
+    const shipBreakdown = effectiveShipBreakdown(sub);
     const ship = shipBreakdown.total;
 
-    body = '<div class="co-cart-list">' + rows + '</div>' +
+    var pickupLocked = myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT;
+    var fulfillToggle = '<div class="co-fulfill-toggle" style="display:flex;gap:8px;margin-bottom:14px;">' +
+      '<button type="button" class="co-btn" style="flex:1;background:' + (!isPickup ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (!isPickup ? '#fff' : '#333') + ';font-size:13px;padding:10px 6px;" onclick="setFulfillment(\'delivery\')"><i class="fas fa-motorcycle"></i> Delivery</button>' +
+      '<button type="button" class="co-btn" style="flex:1;background:' + (isPickup ? 'var(--primary,#22C55E)' : (pickupLocked ? '#F9FAFB' : '#F3F4F6')) + ';color:' + (isPickup ? '#fff' : (pickupLocked ? '#bbb' : '#333')) + ';font-size:13px;padding:10px 6px;" onclick="setFulfillment(\'pickup\')"><i class="fas fa-store"></i> Pick-up' + (pickupLocked ? ' <i class="fas fa-lock" style="font-size:10px;"></i>' : '') + '</button>' +
+      '</div>' +
+      (isPickup ? '<p style="margin:-8px 0 14px;font-size:11.5px;color:#666;"><i class="fas fa-circle-info"></i> Collect your order yourself from each seller’s stall in Sta. Barbara Public Market — no delivery fee.</p>' : '') +
+      (pickupLocked && !isPickup ? '<p style="margin:-8px 0 14px;font-size:11.5px;color:#DC2626;"><i class="fas fa-triangle-exclamation"></i> Pick-up is locked on your account after ' + myPickupNoShowCount + ' missed pickups. Contact support to restore it.</p>' : '');
+
+    body = fulfillToggle + '<div class="co-cart-list">' + rows + '</div>' +
       '<div class="co-summary">' +
       '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
-      '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
+      '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (isPickup ? '<span class="free-tag">FREE (Pick-up)</span>' : (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship))) + '</span></div>' +
       deliverySurchargeNoteHtml(shipBreakdown) +
       '<div class="co-summary-row total"><span>Total</span><span>' + fmt(sub + ship) + '</span></div>' +
       '</div>';
 
-  // STEP 2: DELIVERY //
+  // STEP 2: DELIVERY / PICKUP DETAILS //
   } else if (checkoutStep === 2) {
-    body = '<div class="co-form">' +
-      '<h3>Delivery Address</h3>' +
-      '<div class="co-form-row">' +
-      '<div class="co-field"><label>First Name <span class="co-required">*</span></label><input type="text" id="co-firstName" placeholder="First Name" value="' + shippingInfo.firstName + '"/><span class="co-field-error">First name is required</span></div>' +
-      '<div class="co-field"><label>Last Name <span class="co-required">*</span></label><input type="text" id="co-lastName" placeholder="Last Name" value="' + shippingInfo.lastName + '"/><span class="co-field-error">Last name is required</span></div>' +
-      '</div>' +
-      '<div class="co-field"><label>Phone Number <span class="co-required">*</span></label><input type="tel" id="co-phone" placeholder="+63 9XX XXX XXXX" value="' + shippingInfo.phone + '"/><span class="co-field-error">Phone number is required</span></div>' +
-      '<div class="co-field"><label>Street Address <span class="co-required">*</span></label><input type="text" id="co-street" placeholder="House No., Street" value="' + shippingInfo.street + '"/><span class="co-field-error">Street address is required</span></div>' +
-      '<div class="co-form-row">' +
-      '<div class="co-field"><label>Barangay <span class="co-required">*</span></label><input type="text" id="co-barangay" placeholder="e.g. Cabalabaguan" value="' + (shippingInfo.barangay || '') + '"/><span class="co-field-error">Barangay is required \u2014 used to match you with nearby riders</span></div>' +
-      '<div class="co-field"><label>City / Municipality <span class="co-required">*</span></label>' +
-      '<select id="co-city" onchange="updateCheckoutDeliveryEstimate()">' +
-      Object.keys(MUNICIPALITY_DISTANCES).map(function(name) {
-        return '<option value="' + name + '"' + (shippingInfo.city === name ? ' selected' : '') + '>' + name + '</option>';
-      }).join('') +
-      '</select>' +
-      '<p id="co-delivery-estimate" style="margin:4px 0 0;font-size:11.5px;color:#666;"><i class="fas fa-motorcycle"></i> Delivery fee: ' + fmt(calcDeliveryFee(shippingInfo.city, cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0))) + '</p>' +
-      '<span class="co-field-error">City is required</span></div>' +
-      '</div>' +
-      '<div class="co-field"><label>ZIP Code <span class="co-required">*</span></label><input type="text" id="co-zip" placeholder="5002" value="' + shippingInfo.zip + '"/><span class="co-field-error">ZIP code is required</span></div>' +
-      '<div class="co-field"><label>Estimated Delivery Time</label>' +
-      '<div style="background:#F0FFF4;border-radius:10px;padding:12px 14px;font-size:13px;color:#15803D;">' +
-      '<i class="fas fa-motorcycle"></i> 10\u201315 minutes, depending on distance from the seller</div></div></div>';
+    if (isPickup) {
+      var pickupGroups = groupCartByMerchant();
+      var pickupSellersList = pickupGroups.map(function(g) { return '<li>' + g.merchantName + '</li>'; }).join('');
+      body = '<div class="co-form">' +
+        '<h3>Pickup Details</h3>' +
+        '<p style="margin:-4px 0 14px;font-size:12.5px;color:#666;">We just need a way to reach you when your order is ready \u2014 no delivery address needed.</p>' +
+        '<div class="co-form-row">' +
+        '<div class="co-field"><label>First Name <span class="co-required">*</span></label><input type="text" id="co-firstName" placeholder="First Name" value="' + shippingInfo.firstName + '"/><span class="co-field-error">First name is required</span></div>' +
+        '<div class="co-field"><label>Last Name <span class="co-required">*</span></label><input type="text" id="co-lastName" placeholder="Last Name" value="' + shippingInfo.lastName + '"/><span class="co-field-error">Last name is required</span></div>' +
+        '</div>' +
+        '<div class="co-field"><label>Phone Number <span class="co-required">*</span></label><input type="tel" id="co-phone" placeholder="+63 9XX XXX XXXX" value="' + shippingInfo.phone + '"/><span class="co-field-error">Phone number is required</span></div>' +
+        '<div class="co-field"><label>Where to Collect</label>' +
+        '<div style="background:#F0FFF4;border-radius:10px;padding:12px 14px;font-size:13px;color:#15803D;">' +
+        '<i class="fas fa-store"></i> Sta. Barbara Public Market \u2014 at each seller\u2019s stall:' +
+        '<ul style="margin:6px 0 0;padding-left:18px;">' + pickupSellersList + '</ul>' +
+        '</div></div>' +
+        '<div class="co-field"><label>Estimated Ready Time</label>' +
+        '<div style="background:#FFFBEB;border-radius:10px;padding:12px 14px;font-size:13px;color:#92400E;">' +
+        '<i class="fas fa-clock"></i> We\u2019ll notify you in My Orders once the seller marks it ready \u2014 usually within a few hours.</div></div>' +
+        '</div>';
+    } else {
+      body = '<div class="co-form">' +
+        '<h3>Delivery Address</h3>' +
+        '<div class="co-form-row">' +
+        '<div class="co-field"><label>First Name <span class="co-required">*</span></label><input type="text" id="co-firstName" placeholder="First Name" value="' + shippingInfo.firstName + '"/><span class="co-field-error">First name is required</span></div>' +
+        '<div class="co-field"><label>Last Name <span class="co-required">*</span></label><input type="text" id="co-lastName" placeholder="Last Name" value="' + shippingInfo.lastName + '"/><span class="co-field-error">Last name is required</span></div>' +
+        '</div>' +
+        '<div class="co-field"><label>Phone Number <span class="co-required">*</span></label><input type="tel" id="co-phone" placeholder="+63 9XX XXX XXXX" value="' + shippingInfo.phone + '"/><span class="co-field-error">Phone number is required</span></div>' +
+        '<div class="co-field"><label>Street Address <span class="co-required">*</span></label><input type="text" id="co-street" placeholder="House No., Street" value="' + shippingInfo.street + '"/><span class="co-field-error">Street address is required</span></div>' +
+        '<div class="co-form-row">' +
+        '<div class="co-field"><label>Barangay <span class="co-required">*</span></label><input type="text" id="co-barangay" placeholder="e.g. Cabalabaguan" value="' + (shippingInfo.barangay || '') + '"/><span class="co-field-error">Barangay is required \u2014 used to match you with nearby riders</span></div>' +
+        '<div class="co-field"><label>City / Municipality <span class="co-required">*</span></label>' +
+        '<select id="co-city" onchange="updateCheckoutDeliveryEstimate()">' +
+        Object.keys(MUNICIPALITY_DISTANCES).map(function(name) {
+          return '<option value="' + name + '"' + (shippingInfo.city === name ? ' selected' : '') + '>' + name + '</option>';
+        }).join('') +
+        '</select>' +
+        '<p id="co-delivery-estimate" style="margin:4px 0 0;font-size:11.5px;color:#666;"><i class="fas fa-motorcycle"></i> Delivery fee: ' + fmt(calcDeliveryFee(shippingInfo.city, cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0))) + '</p>' +
+        '<span class="co-field-error">City is required</span></div>' +
+        '</div>' +
+        '<div class="co-field"><label>ZIP Code <span class="co-required">*</span></label><input type="text" id="co-zip" placeholder="5002" value="' + shippingInfo.zip + '"/><span class="co-field-error">ZIP code is required</span></div>' +
+        '<div class="co-field"><label>Estimated Delivery Time</label>' +
+        '<div style="background:#F0FFF4;border-radius:10px;padding:12px 14px;font-size:13px;color:#15803D;">' +
+        '<i class="fas fa-motorcycle"></i> 10\u201315 minutes, depending on distance from the seller</div></div></div>';
+    }
 
   // STEP 3: PAYMENT //
   } else if (checkoutStep === 3) {
@@ -2127,7 +2184,7 @@ function renderCheckout() {
 
     var groupsHtml = groups.map(function(g) {
       var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-      var shipBreakdown = calcDeliveryFeeBreakdown(shippingInfo.city, sub);
+      var shipBreakdown = effectiveShipBreakdown(sub);
       var ship = shipBreakdown.total;
       grandTotal += sub + ship;
       var itemList = g.items.map(function(i) {
@@ -2140,7 +2197,7 @@ function renderCheckout() {
         '<ul class="co-confirm-items">' + itemList + '</ul>' +
         '<div class="co-summary" style="margin-top:8px;">' +
         '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
-        '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship)) + '</span></div>' +
+        '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (isPickup ? '<span class="free-tag">FREE (Pick-up)</span>' : (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship))) + '</span></div>' +
         deliverySurchargeNoteHtml(shipBreakdown) +
         '<div class="co-summary-row total"><span>Order Total</span><span>' + fmt(sub + ship) + '</span></div>' +
         '</div></div>';
@@ -2149,6 +2206,7 @@ function renderCheckout() {
     body = '<div class="co-confirm">' +
       '<div class="co-confirm-icon"><i class="fas fa-clipboard-check"></i></div>' +
       '<h3>Review Your Order' + (groups.length > 1 ? 's (' + groups.length + ')' : '') + '</h3>' +
+      '<p class="co-note" style="margin-bottom:12px;"><i class="fas ' + (isPickup ? 'fa-store' : 'fa-motorcycle') + '"></i> ' + (isPickup ? 'Pick-up \u2014 no delivery fee. Collect from each seller\u2019s stall once notified.' : 'Delivery to your address.') + '</p>' +
       (groups.length > 1 ? '<p class="co-note" style="margin-bottom:12px;"><i class="fas fa-info-circle"></i> Your items are from ' + groups.length + ' different sellers, so this will place ' + groups.length + ' separate orders — each tracked independently.</p>' : '') +
       groupsHtml +
       (groups.length > 1 ? '<div class="co-summary" style="border-top:2px solid #eee;padding-top:10px;"><div class="co-summary-row total"><span>Grand Total</span><span>' + fmt(grandTotal) + '</span></div></div>' : '') +
@@ -2230,15 +2288,17 @@ function validateShippingForm() {
 
 function saveShippingForm() {
   const get = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  // Pickup mode doesn't render the address fields at all — keep whatever
+  // was previously entered instead of wiping it, in case the customer
+  // toggles back to Delivery later in the same checkout. //
+  const getOrKeep = (id, current) => { const el = document.getElementById(id); return el ? el.value.trim() : current; };
   shippingInfo.firstName = get('co-firstName');
   shippingInfo.lastName  = get('co-lastName');
   shippingInfo.phone     = get('co-phone');
-  shippingInfo.street    = get('co-street');
-  shippingInfo.barangay  = get('co-barangay');
-  shippingInfo.city      = get('co-city');
-  shippingInfo.zip       = get('co-zip');
-  const deliveryEl = document.querySelector('input[name="delivery"]:checked');
-  if (deliveryEl) shippingInfo.delivery = deliveryEl.value;
+  shippingInfo.street    = getOrKeep('co-street', shippingInfo.street);
+  shippingInfo.barangay  = getOrKeep('co-barangay', shippingInfo.barangay);
+  shippingInfo.city      = getOrKeep('co-city', shippingInfo.city);
+  shippingInfo.zip       = getOrKeep('co-zip', shippingInfo.zip);
 }
 
 // Navigate between checkout steps //
@@ -2444,6 +2504,9 @@ var ORDER_STATUS_MAP = {
   'preparing':              { label: 'Preparing Your Order',  desc: 'The seller is packing your items with care.' },
   'out_for_delivery':        { label: 'Out for Delivery',      desc: 'Your rider is on the way to deliver your order!' },
   'awaiting_confirmation':   { label: 'Delivered — Awaiting Your Confirmation', desc: 'Your rider marked this as delivered. Please confirm you received it.' },
+  // Pick-up only — takes the place of out_for_delivery/awaiting_confirmation
+  // since there's no rider in that flow, just the seller and the customer. //
+  'ready_for_pickup':       { label: 'Ready for Pickup',      desc: 'Your order is ready! Please collect it from the seller’s stall in Sta. Barbara Public Market.' },
   'delivered':              { label: 'Delivered',             desc: 'Your order has been delivered. Enjoy!' },
   'cancelled':              { label: 'Cancelled',             desc: 'No rider accepted this order within 30 minutes, so it was automatically cancelled.' }
 };
@@ -2525,6 +2588,16 @@ function calcDeliveryFeeBreakdown(municipality, subtotal) {
 
 function calcDeliveryFee(municipality, subtotal) {
   return calcDeliveryFeeBreakdown(municipality, subtotal).total;
+}
+
+// Wraps calcDeliveryFeeBreakdown() so every place in checkout that needs a
+// fee just asks "what does this subtotal cost to fulfill right now" without
+// re-checking the fulfillment mode itself — Pick-up is always free. //
+function effectiveShipBreakdown(subtotal) {
+  if (shippingInfo.fulfillment === 'pickup') {
+    return { distance: 0, baseFee: 0, surcharges: [], total: 0 };
+  }
+  return calcDeliveryFeeBreakdown(shippingInfo.city, subtotal);
 }
 
 function isWithinDeliveryRange(municipality) {
@@ -2620,11 +2693,19 @@ async function placeOrder() {
   var baseCode = 'HW' + String(Date.now()).slice(-8).toUpperCase();
   var groups = groupCartByMerchant();
   var placedOrders = []; // { id, code, merchantName, total }
+  var isPickupOrder = shippingInfo.fulfillment === 'pickup';
+
+  if (isPickupOrder && myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT) {
+    showToast('Pick-up isn’t available on your account right now due to missed pickups. Please switch to Delivery.', 'error');
+    if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
+    return;
+  }
 
   // Final safety check — the shipping form already validates this, but
-  // don't let an order through if the selected municipality somehow ended
-  // up outside our delivery range. //
-  if (!isWithinDeliveryRange(shippingInfo.city)) {
+  // don't let a delivery order through if the selected municipality somehow
+  // ended up outside our delivery range. Doesn't apply to Pick-up, since
+  // there's no address to be out of range. //
+  if (!isPickupOrder && !isWithinDeliveryRange(shippingInfo.city)) {
     showToast('Sorry, we don\'t deliver to this area yet.', 'error');
     return;
   }
@@ -2632,7 +2713,7 @@ async function placeOrder() {
   for (var g = 0; g < groups.length; g++) {
     var group = groups[g];
     var sub = group.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    var shipFee = calcDeliveryFee(shippingInfo.city, sub);
+    var shipFee = effectiveShipBreakdown(sub).total;
     var orderCode = groups.length > 1 ? baseCode + '-' + String.fromCharCode(65 + g) : baseCode;
 
     const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
@@ -2647,11 +2728,13 @@ async function placeOrder() {
       shipping_first_name: shippingInfo.firstName,
       shipping_last_name: shippingInfo.lastName,
       shipping_phone: shippingInfo.phone,
-      shipping_street: shippingInfo.street,
-      shipping_barangay: shippingInfo.barangay,
-      shipping_city: shippingInfo.city,
-      shipping_zip: shippingInfo.zip,
-      delivery_option: shippingInfo.delivery
+      // Pick-up orders have no delivery address — leave those blank rather
+      // than saving stale values left over from a previous Delivery order. //
+      shipping_street: isPickupOrder ? null : shippingInfo.street,
+      shipping_barangay: isPickupOrder ? null : shippingInfo.barangay,
+      shipping_city: isPickupOrder ? null : shippingInfo.city,
+      shipping_zip: isPickupOrder ? null : shippingInfo.zip,
+      delivery_option: isPickupOrder ? 'pickup' : 'delivery'
     }).select().single();
 
     if (orderErr) {
@@ -2688,6 +2771,13 @@ async function placeOrder() {
   saveCart();
   updateCartBadge();
 
+  if (isPickupOrder) {
+    // No rider involved at all for pickup — the seller prepares it and
+    // marks it ready themselves. See merchantMarkReadyForPickup(). //
+    showPickupOrderSuccess(placedOrders);
+    return;
+  }
+
   // A real rider now needs to claim each order — see openRiderSearchModal()
   // and acceptOrder() for how that happens.
   if (placedOrders.length === 1) {
@@ -2695,6 +2785,33 @@ async function placeOrder() {
   } else {
     showMultiOrderSuccess(placedOrders);
   }
+}
+
+// Success screen for Pick-up orders — no rider search, since nobody needs
+// to be dispatched. Just confirms the order(s) and points to My Orders,
+// where the customer will see the status move to "Ready for Pickup" once
+// the seller has it ready. //
+function showPickupOrderSuccess(placedOrders) {
+  var body = document.getElementById('sn-rider-body');
+  var rowsHtml = placedOrders.map(function(o) {
+    return '<div style="display:flex;justify-content:space-between;padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<span style="font-size:13px;"><i class="fas fa-store"></i> ' + o.merchantName + '<br/><span style="color:#999;font-size:11.5px;">Order #' + o.code + '</span></span>' +
+      '<span style="font-weight:700;font-size:13px;">' + fmt(o.total) + '</span></div>';
+  }).join('');
+
+  body.innerHTML =
+    '<div style="text-align:center;">' +
+    '<div class="login-icon" style="color:#22C55E"><i class="fas fa-bag-shopping"></i></div>' +
+    '<h2 style="margin:6px 0;">' + (placedOrders.length > 1 ? placedOrders.length + ' Orders Placed!' : 'Order Placed!') + '</h2>' +
+    '<p class="login-sub">Pick-up — no delivery fee. We’ll notify you here once each seller has your order ready to collect.</p>' +
+    '</div>' +
+    rowsHtml +
+    '<button class="co-btn co-btn--next" style="width:100%;margin-top:16px;" onclick="closeRiderModal(); openOrderTracking();">Track My Order' + (placedOrders.length > 1 ? 's' : '') + '</button>' +
+    '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal()">Continue Shopping</button>';
+
+  document.getElementById('sn-riderOverlay').classList.add('active');
+  document.getElementById('sn-riderModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
 }
 
 function showMultiOrderSuccess(placedOrders) {
@@ -2729,7 +2846,11 @@ async function advanceOrderStatus(orderDbId, newStatus) {
   if (!existing || existing.status === 'delivered') return;
   if (existing.status === newStatus) return; // already in this status — don't log a duplicate
 
-  await supabase.from('orders').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', orderDbId);
+  var orderUpdates = { status: newStatus, updated_at: new Date().toISOString() };
+  // Stamped so the 48h no-show auto-cancel (check_and_cancel_stale_pickups)
+  // knows when the pickup clock actually started. //
+  if (newStatus === 'ready_for_pickup') orderUpdates.pickup_ready_at = new Date().toISOString();
+  await supabase.from('orders').update(orderUpdates).eq('id', orderDbId);
   await supabase.from('order_status_history').insert({
     order_id: orderDbId,
     status: newStatus,
@@ -3082,11 +3203,11 @@ function closeOrderTracking() {
 
 var trackingActiveTab = 'to_ship';
 
-// placed/preparing = To Ship, out_for_delivery/awaiting_confirmation =
-// To Receive, delivered/cancelled = Completed //
+// placed/preparing = To Ship, out_for_delivery/awaiting_confirmation/
+// ready_for_pickup = To Receive, delivered/cancelled = Completed //
 function orderTrackingCategory(status) {
   if (status === 'placed' || status === 'preparing') return 'to_ship';
-  if (status === 'out_for_delivery' || status === 'awaiting_confirmation') return 'to_receive';
+  if (status === 'out_for_delivery' || status === 'awaiting_confirmation' || status === 'ready_for_pickup') return 'to_receive';
   return 'completed'; // delivered, cancelled
 }
 
@@ -3132,7 +3253,7 @@ function renderOrderList() {
   } else {
     listHtml = '<div class="track-order-list">';
     filtered.forEach(function(order) {
-      var statusInfo = getOrderStatusInfo(order.status);
+      var statusInfo = getOrderStatusInfo(order.status, order.delivery_option);
       var dateStr = formatDate(order.created_at);
       var itemNames = (order.order_items || []).map(function(item) {
         return item.product_name + (item.qty > 1 ? ' x' + item.qty : '');
@@ -3248,7 +3369,7 @@ function renderTrackingDetail(order) {
   // report actions only make sense for the customer to see //
   var isCustomerViewer = order.user_id === currentUser.id;
 
-  var statusInfo = getOrderStatusInfo(order.status);
+  var statusInfo = getOrderStatusInfo(order.status, order.delivery_option);
   var dateStr = formatDate(order.created_at);
 
   // Build simple text timeline (most recent first)
@@ -3325,7 +3446,8 @@ function renderTrackingDetail(order) {
     }
   }
 
-  // Delivery address
+  // Delivery address (or pickup location, if this was a Pick-up order)
+  var isPickupOrder = order.delivery_option === 'pickup';
   var addressStr = (order.shipping_street || '') + ', ' + (order.shipping_city || '') + ' ' + (order.shipping_zip || '');
 
   var html =
@@ -3401,9 +3523,11 @@ function renderTrackingDetail(order) {
 
     // Summary + Address
     '<div class="track-detail-section">' +
-    '<h4>Delivery Address</h4>' +
+    '<h4>' + (isPickupOrder ? 'Pickup Details' : 'Delivery Address') + '</h4>' +
     '<p>' + (order.shipping_first_name || '') + ' ' + (order.shipping_last_name || '') + '</p>' +
-    '<p>' + addressStr + '</p>' +
+    (isPickupOrder
+      ? '<p><i class="fas fa-store"></i> ' + (order._storeName || 'Seller') + '’s stall, Sta. Barbara Public Market</p>'
+      : '<p>' + addressStr + '</p>') +
     '<p>' + (order.shipping_phone || '') + '</p>' +
     '</div>' +
 
@@ -3417,6 +3541,15 @@ function renderTrackingDetail(order) {
     '<div class="track-summary-row"><span>Placed on</span><span>' + dateStr + '</span></div>' +
     '</div>' +
     '</div>';
+
+  // Pick-up orders don't have a customer confirm-receipt step — the seller
+  // confirms it in person when the customer actually shows up (see
+  // merchantAdvancePickupOrder), so this is purely informational. //
+  if (order.status === 'ready_for_pickup' && isCustomerViewer) {
+    html += '<div style="background:#F0FFF4;border-radius:10px;padding:14px;margin-top:16px;border:1px solid #BBF7D0;">' +
+      '<p style="margin:0;font-size:13px;color:#15803D;"><i class="fas fa-circle-check"></i> <b>Your order is ready!</b> Head over to ' + (order._storeName || 'the seller') + '’s stall in Sta. Barbara Public Market to collect it.</p>' +
+      '</div>';
+  }
 
   // Confirm-receipt only shows once actually delivered, and only to the
   // customer — merchant/rider can view the order but not act on it here.
@@ -3459,13 +3592,17 @@ function renderTrackingDetail(order) {
 
 // Helpers for order tracking
 // #GLOBAL_ORDER_STATUS_DEFINITIONS
-function getOrderStatusInfo(status) {
+function getOrderStatusInfo(status, deliveryOption) {
   var map = {
     'placed':                { label: 'Order Placed',        icon: '' },
     'preparing':             { label: 'Preparing',           icon: '' },
     'out_for_delivery':      { label: 'Out for Delivery',    icon: '' },
     'awaiting_confirmation': { label: 'Awaiting Confirmation', icon: '' },
-    'delivered':             { label: 'Delivered',           icon: '' },
+    'ready_for_pickup':      { label: 'Ready for Pickup',    icon: '' },
+    // Pick-up orders finish in this same 'delivered' status as regular
+    // orders (keeps every report/notif/review check that already keys off
+    // 'delivered' working for both), just relabeled for the pickup case. //
+    'delivered':             { label: deliveryOption === 'pickup' ? 'Picked Up' : 'Delivered', icon: '' },
     'cancelled':             { label: 'Cancelled',           icon: '' }
   };
   return map[status] || map['placed'];
@@ -4420,7 +4557,7 @@ async function renderAdminOrders() {
 
   var rows = shown.length
     ? shown.map(function(o) {
-        var statusInfo = getOrderStatusInfo(o.status);
+        var statusInfo = getOrderStatusInfo(o.status, o.delivery_option);
         return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
           '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
           '<span style="font-weight:700;font-size:13px;">Order #' + o.order_code + '</span>' +
@@ -5177,6 +5314,7 @@ var NOTIF_ICON_MAP = {
   'preparing':              'fa-box-open',
   'out_for_delivery':        'fa-truck',
   'awaiting_confirmation':   'fa-clock',
+  'ready_for_pickup':       'fa-store',
   'delivered':              'fa-check-circle',
   'low_stock':              'fa-triangle-exclamation'
 };
@@ -5373,6 +5511,8 @@ function merchantNotifDescription(s, orderCode) {
       return 'Order #' + code + ' has been picked up and is on the way to the customer.';
     case 'awaiting_confirmation':
       return 'Order #' + code + ' was marked delivered by the rider, awaiting customer confirmation.';
+    case 'ready_for_pickup':
+      return 'You marked order #' + code + ' ready for pickup. Waiting for the customer to collect it.';
     case 'delivered':
       return 'Order #' + code + ' was confirmed received by the customer.';
     default:
@@ -5826,13 +5966,14 @@ async function uploadAvatar(file) {
 let myMerchantId = null;
 let myMerchantProducts = [];
 let myMerchantSales = null;
+let myMerchantReviews = null;
 let merchantDashboardView = 'products'; // 'products' | 'sales'
 let merchantSalesDateFilter = 'all';
-let merchantActivityVisibleCount = 5;
+let merchantReviewsVisibleCount = 5;
 
-function showMoreMerchantActivity(count) {
-  merchantActivityVisibleCount = count;
-  renderMerchantSalesView();
+function showMoreMerchantReviews(count) {
+  merchantReviewsVisibleCount = count;
+  renderMerchantReviewsView(myMerchantReviews);
 }
 let merchantSalesSpecificDate = ''; // '' = not set; otherwise 'YYYY-MM-DD'
 
@@ -5999,8 +6140,6 @@ async function fetchMerchantSales(dateFilter, specificDate) {
     recentOrders.forEach(function(o) { o.customerName = nameById[o.customerId] || 'Customer'; });
   }
 
-  var activity = await fetchMerchantActivity(orderIds, orderIdSet);
-
   // Order completion rate: real, computed from actual order statuses //
   var deliveredCount = Object.values(byOrder).filter(function(o) { return o.status === 'delivered'; }).length;
   var completionRate = orderIds.length > 0 ? Math.round((deliveredCount / orderIds.length) * 100) : null;
@@ -6031,7 +6170,6 @@ async function fetchMerchantSales(dateFilter, specificDate) {
     dateFilter: dateFilter,
     specificDate: specificDate,
     recentOrders: recentOrders,
-    activity: activity,
     byCategory: byCategory,
     knownProfit: knownProfit,
     itemsWithCost: itemsWithCost,
@@ -6045,31 +6183,96 @@ async function fetchMerchantSales(dateFilter, specificDate) {
   return myMerchantSales;
 }
 
-// merged chronological log: order changes, stock in/out, new reviews //
-async function fetchMerchantActivity(orderIds, orderCodeMap) {
-  var events = [];
-
-  const { data: reviewRows, error: reviewErr } = await supabase
+// Customer feedback — kept on its own tab rather than folded into the
+// Sales Report, per panel feedback that the two shouldn't share a page. //
+async function fetchMerchantReviews() {
+  const { data: reviewRows, error } = await supabase
     .from('reviews')
     .select('rating, comment, created_at, is_anonymous, reviewer_name, products!inner(name, merchant_id)')
     .eq('products.merchant_id', myMerchantId)
     .order('created_at', { ascending: false })
-    .limit(50);
-  if (reviewErr) console.error('activity: reviews error', reviewErr);
+    .limit(100);
 
-  (reviewRows || []).forEach(function(r) {
-    events.push({
-      type: 'review',
-      icon: 'fa-star',
-      color: '#F59E0B',
-      title: 'New ' + r.rating + '-star review — ' + r.products.name,
-      detail: (r.is_anonymous ? 'Anonymous Customer' : (r.reviewer_name || 'A customer')) + (r.comment ? ': "' + r.comment + '"' : ''),
-      at: r.created_at
-    });
+  if (error) { console.error('fetchMerchantReviews error:', error); return { error: error.message }; }
+
+  var reviews = (reviewRows || []).map(function(r) {
+    return {
+      rating: r.rating,
+      comment: r.comment,
+      reviewerName: r.is_anonymous ? 'Anonymous Customer' : (r.reviewer_name || 'A customer'),
+      productName: r.products.name,
+      createdAt: r.created_at
+    };
   });
 
-  events.sort(function(a, b) { return new Date(b.at) - new Date(a.at); });
-  return events.slice(0, 60);
+  var avgRating = reviews.length
+    ? (reviews.reduce(function(sum, r) { return sum + r.rating; }, 0) / reviews.length)
+    : 0;
+
+  myMerchantReviews = { reviews: reviews, avgRating: avgRating };
+  return myMerchantReviews;
+}
+
+// #VENDOR_REVIEWS_TAB
+function renderMerchantReviewsView(data) {
+  var body = document.getElementById('sn-merchant-body');
+  var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'orders\')">Orders</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'reviews\')">Reviews</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
+    '</div>';
+
+  if (!data || data.error) {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+      '<div class="track-empty"><p>Could not load reviews' + (data && data.error ? ': ' + data.error : '') + '.</p></div>';
+    return;
+  }
+
+  var reviews = data.reviews;
+
+  var summaryHtml = '<div style="display:flex;gap:10px;margin-bottom:16px;">' +
+    '<div style="flex:1;background:#FFFBEB;border-radius:10px;padding:14px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Average Rating</p>' +
+    '<p style="margin:4px 0 0;font-weight:700;font-size:18px;color:#B45309;">' + (reviews.length ? '★ ' + data.avgRating.toFixed(1) : '—') + '</p></div>' +
+    '<div style="flex:1;background:#F0F8FF;border-radius:10px;padding:14px;text-align:center;">' +
+    '<p style="margin:0;font-size:11px;color:#666;">Total Reviews</p>' +
+    '<p style="margin:4px 0 0;font-weight:700;font-size:18px;color:#3B82F6;">' + reviews.length + '</p></div>' +
+    '</div>';
+
+  var shown = Math.min(merchantReviewsVisibleCount, reviews.length);
+  var visible = reviews.slice(0, shown);
+
+  var listHtml = visible.length
+    ? visible.map(function(r) {
+        return '<div style="padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">' +
+          '<span style="font-weight:700;font-size:13px;">' + r.productName + '</span>' +
+          '<span style="font-size:11px;color:#aaa;flex-shrink:0;">' + timeAgo(r.createdAt) + '</span>' +
+          '</div>' +
+          '<div style="color:#F59E0B;font-size:13px;margin:3px 0;">' + reviewStarsHTML(r.rating) + '</div>' +
+          '<p style="margin:2px 0 0;font-size:12.5px;color:#555;">' +
+          '<span style="color:#333;font-weight:600;">' + r.reviewerName + '</span>' +
+          (r.comment ? ': "' + r.comment + '"' : ' left no written comment.') +
+          '</p></div>';
+      }).join('')
+    : '<p style="color:#999;font-size:13px;">No reviews on your products yet.</p>';
+
+  var loadMoreHtml = '';
+  if (reviews.length > shown) {
+    var next = Math.min(5, reviews.length - shown);
+    loadMoreHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="showMoreMerchantReviews(' + (shown + 5) + ')">Show ' + next + ' more</button>';
+  } else if (reviews.length > 5) {
+    loadMoreHtml = '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="showMoreMerchantReviews(5)">Show fewer</button>';
+  }
+
+  body.innerHTML =
+    '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs +
+    summaryHtml +
+    '<h3 style="margin:0 0 8px;font-size:14px;">Customer Reviews</h3>' +
+    listHtml + loadMoreHtml;
 }
 
 // ============================================================
@@ -6094,7 +6297,7 @@ function changeMerchantOrdersProductFilter(value) {
 async function fetchMerchantOrdersFull() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, product_name, products!inner(name, merchant_id), orders(id, order_code, status, created_at, payment_method, user_id)')
+    .select('qty, price, product_id, product_name, products!inner(name, merchant_id), orders(id, order_code, status, created_at, payment_method, user_id, delivery_option)')
     .eq('products.merchant_id', myMerchantId)
     .order('orders(created_at)', { ascending: false });
 
@@ -6106,7 +6309,7 @@ async function fetchMerchantOrdersFull() {
     if (!r.orders) return;
     var oid = r.orders.id;
     if (!byOrder[oid]) {
-      byOrder[oid] = { orderId: oid, orderCode: r.orders.order_code, status: r.orders.status, createdAt: r.orders.created_at, paymentMethod: r.orders.payment_method, items: [], total: 0 };
+      byOrder[oid] = { orderId: oid, orderCode: r.orders.order_code, status: r.orders.status, deliveryOption: r.orders.delivery_option, createdAt: r.orders.created_at, paymentMethod: r.orders.payment_method, items: [], total: 0 };
       order.push(oid);
     }
     byOrder[oid].items.push({ name: r.product_name || (r.products ? r.products.name : 'Item'), qty: r.qty, price: r.price });
@@ -6135,6 +6338,7 @@ function renderMerchantOrdersView(data) {
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'orders\')">Orders</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'reviews\')">Reviews</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
@@ -6215,15 +6419,63 @@ function renderMerchantOrdersView(data) {
 }
 
 function orderRowHtml(o) {
-  var statusInfo = getOrderStatusInfo(o.status);
+  var statusInfo = getOrderStatusInfo(o.status, o.deliveryOption);
   var itemsSummary = o.items.map(function(it) { return it.name + ' x' + it.qty; }).join(', ');
   return '<div style="padding:10px 4px;border-bottom:1px solid #f5f5f5;">' +
     '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
     '<span style="font-weight:600;font-size:13px;">Order #' + o.orderCode + '</span>' +
     '<span style="font-weight:700;font-size:13px;">' + fmt(o.total) + '</span></div>' +
     '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + itemsSummary + '</p>' +
-    '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + statusInfo.label + ' \u2022 ' + (o.paymentMethod === 'cod' ? 'COD' : 'GCash') + '</p>' +
+    '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + statusInfo.label + ' \u2022 ' + (o.paymentMethod === 'cod' ? 'COD' : 'GCash') + (o.deliveryOption === 'pickup' ? ' \u2022 <i class="fas fa-store"></i> Pick-up' : '') + '</p>' +
+    merchantPickupActionsHtml(o) +
     '</div>';
+}
+
+// Pick-up orders have no rider to move them along, so the seller drives
+// the status themselves: Start Preparing -> Mark Ready -> Confirm Picked Up.
+// "Didn't Show" is the seller's manual out if the customer clearly isn't
+// coming (separate from the automatic 48h no-show cancellation). //
+function merchantPickupActionsHtml(o) {
+  if (o.deliveryOption !== 'pickup') return '';
+  if (o.status === 'placed') {
+    return '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:6px;font-size:12px;" onclick="merchantAdvancePickupOrder(\'' + o.orderId + '\', \'preparing\')">Start Preparing</button>';
+  }
+  if (o.status === 'preparing') {
+    return '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;padding:6px;font-size:12px;" onclick="merchantAdvancePickupOrder(\'' + o.orderId + '\', \'ready_for_pickup\')">Mark Ready for Pickup</button>';
+  }
+  if (o.status === 'ready_for_pickup') {
+    return '<div style="display:flex;gap:6px;margin-top:8px;">' +
+      '<button class="co-btn co-btn--next" style="flex:1;padding:6px;font-size:12px;" onclick="merchantAdvancePickupOrder(\'' + o.orderId + '\', \'delivered\')">Confirm Picked Up</button>' +
+      '<button class="co-btn" style="flex:1;background:#FEE2E2;color:#DC2626;padding:6px;font-size:12px;" onclick="merchantCancelPickupNoShow(\'' + o.orderId + '\')">Didn\u2019t Show</button>' +
+      '</div>';
+  }
+  return '';
+}
+
+// #MERCHANT_PICKUP_ADVANCE_STATUS
+async function merchantAdvancePickupOrder(orderId, newStatus) {
+  await advanceOrderStatus(orderId, newStatus);
+  showToast(
+    newStatus === 'ready_for_pickup' ? 'Marked ready for pickup \ud83d\udce6 \u2014 the customer has been notified.' :
+    newStatus === 'delivered' ? 'Marked as picked up \u2705' :
+    'Order updated'
+  );
+  if (typeof switchMerchantView === 'function') switchMerchantView('orders');
+}
+
+// Seller-triggered no-show cancel \u2014 restores stock and counts against the
+// customer's pickup record (see cancel_pickup_noshow() in the database). //
+async function merchantCancelPickupNoShow(orderId) {
+  if (!confirm('Cancel this order because the customer did not come to collect it? Stock will be restored, and this will count against the customer\u2019s pickup record.')) return;
+
+  const { error } = await supabase.rpc('cancel_pickup_noshow', { order_id_input: orderId });
+  if (error) {
+    showToast('Could not cancel order: ' + error.message, 'error');
+    return;
+  }
+  showToast('Order cancelled and stock restored');
+  updateNotifBadge();
+  if (typeof switchMerchantView === 'function') switchMerchantView('orders');
 }
 
 let merchantInventoryProductFilter = 'all';
@@ -6269,6 +6521,7 @@ function renderMerchantInventoryView(data) {
     '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'orders\')">Orders</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'reviews\')">Reviews</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
@@ -6403,6 +6656,7 @@ function renderMerchantSalesView() {
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'orders\')">Orders</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'reviews\')">Reviews</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
@@ -6537,26 +6791,6 @@ function renderMerchantSalesView() {
       }).join('')
     : '<p style="color:#999;font-size:13px;">No orders yet.</p>';
 
-  var activityShown = Math.min(merchantActivityVisibleCount, (s.activity || []).length);
-  var activityHtml = (s.activity && s.activity.length)
-    ? s.activity.slice(0, activityShown).map(function(e) {
-        return '<div style="display:flex;gap:10px;padding:10px 4px;border-bottom:1px solid #f0f0f0;">' +
-          '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:#F5F5F3;color:' + e.color + ';display:flex;align-items:center;justify-content:center;font-size:12px;"><i class="fas ' + e.icon + '"></i></div>' +
-          '<div style="flex:1;min-width:0;">' +
-          '<p style="margin:0;font-size:12.5px;font-weight:600;">' + e.title + '</p>' +
-          (e.detail ? '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + e.detail + '</p>' : '') +
-          '<p style="margin:2px 0 0;font-size:11px;color:#aaa;">' + formatDate(e.at) + ' \u2022 ' + timeAgo(e.at) + '</p>' +
-          '</div></div>';
-      }).join('')
-    : '<p style="color:#999;font-size:13px;">No activity yet. Sales, stock changes, and reviews will appear here.</p>';
-
-  if (s.activity && s.activity.length > activityShown) {
-    var actNext = Math.min(5, s.activity.length - activityShown);
-    activityHtml += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="showMoreMerchantActivity(' + (activityShown + 5) + ')">Show ' + actNext + ' more</button>';
-  } else if (s.activity && s.activity.length > 5) {
-    activityHtml += '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:8px;padding:8px;" onclick="showMoreMerchantActivity(5)">Show fewer</button>';
-  }
-
   var exportButtons = '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportPDF()"><i class="fas fa-file-pdf"></i> Download as PDF</button>' +
     '<button class="co-btn" style="flex:1;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="downloadSalesReportImage()"><i class="fas fa-image"></i> Download as Image</button>' +
@@ -6572,10 +6806,7 @@ function renderMerchantSalesView() {
     '<h3 style="margin:18px 0 8px;font-size:14px;">Revenue by Category</h3>' + categoryChartHtml +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Net Profit</h3>' + profitHtml +
     (productProfitHtml ? '<h3 style="margin:18px 0 8px;font-size:14px;">Profit by Product</h3>' + productProfitHtml : '') +
-    '<h3 style="margin:18px 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
-    '<h3 style="margin:18px 0 8px;font-size:14px;">Customer Feedback</h3>' +
-    '<p style="margin:0 0 6px;font-size:11.5px;color:#999;">New reviews on your products \u2014 see the Inventory tab for stock activity</p>' +
-    activityHtml;
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml;
 }
 
 // Builds the PDF from real data instead of screenshotting the dashboard —
@@ -6854,6 +7085,7 @@ function renderMerchantDashboard() {
     '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'inventory' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'inventory' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'orders' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'orders' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'orders\')">Orders</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'sales' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'sales' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'sales\')">Sales Report</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'reviews' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'reviews' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'reviews\')">Reviews</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'verify' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'verify' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'verify\')">Verification</button>' +
     '</div>';
 
@@ -6866,6 +7098,12 @@ function renderMerchantDashboard() {
   if (merchantDashboardView === 'sales') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading sales report...</p></div>';
     fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
+    return;
+  }
+
+  if (merchantDashboardView === 'reviews') {
+    body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading reviews...</p></div>';
+    fetchMerchantReviews().then(renderMerchantReviewsView);
     return;
   }
 
@@ -7415,6 +7653,9 @@ async function checkForRiderOrderAlert() {
     .select('*, order_items(*)')
     .eq('status', 'placed')
     .is('rider_user_id', null)
+    // Pick-up orders never need a rider — the seller hands them off in
+    // person, so riders should never see them as available deliveries. //
+    .or('delivery_option.is.null,delivery_option.neq.pickup')
     .gte('created_at', cutoff)
     .order('created_at', { ascending: true })
     .limit(10);
@@ -7614,6 +7855,7 @@ async function loadAvailableOrders() {
     .select('*, order_items(*)')
     .eq('status', 'placed')
     .is('rider_user_id', null)
+    .or('delivery_option.is.null,delivery_option.neq.pickup')
     .gte('created_at', cutoff)
     .order('created_at', { ascending: false });
   availableOrders = error ? [] : (data || []);
@@ -7971,6 +8213,12 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (currentUser) {
       supabase.rpc('check_and_cancel_stale_orders').then(function(res) {
         if (res.error) console.error('check_and_cancel_stale_orders error:', res.error);
+      });
+      // Same idea, but for Pick-up orders: cancels ones the seller never
+      // prepared, and ones that were ready but never collected within 48h
+      // (which also counts as a no-show against the customer). //
+      supabase.rpc('check_and_cancel_stale_pickups').then(function(res) {
+        if (res.error) console.error('check_and_cancel_stale_pickups error:', res.error);
       });
     }
   }, 30000);
