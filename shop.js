@@ -72,8 +72,28 @@ var SEARCH_KEYWORD_MAP = {
   meat: ['meat', 'karne'],
   seafood: ['seafood', 'fish', 'isda'],
   vegetable: ['vegetable', 'vegetables', 'gulay'],
-  drinks: ['drink', 'drinks', 'beverage', 'inumin'],
+  drinks: ['drink', 'drinks', 'beverage', 'beverages', 'inumin', 'alak'],
   sarisari: ['sari-sari', 'sarisari', 'grocery', 'goods']
+};
+
+// Local-word synonyms for a SPECIFIC item, as opposed to the category-level
+// words above — "baboy" means pork specifically, not meat in general, so it
+// belongs here rather than in SEARCH_KEYWORD_MAP (same reasoning the comment
+// above gives for why "pork" itself isn't a category word). Most seafood
+// items already spell out their Tagalog name in the product name itself
+// (e.g. "Bangus (Milkfish)"), which is why searching those already worked —
+// this covers the common words that AREN'T already embedded that way, by
+// expanding the search to also check for the English word(s) they mean.
+// "alak" is intentionally broad (covers the common liquor types actually
+// sold here) since there's no single English word for it. //
+var SEARCH_TERM_SYNONYMS = {
+  baboy: ['pork'],
+  manok: ['chicken'],
+  baka: ['beef'],
+  kambing: ['goat'],
+  itlog: ['egg'],
+  tubig: ['water'],
+  alak: ['tequila', 'rum', 'beer', 'gin', 'vodka', 'whiskey', 'whisky', 'brandy', 'wine']
 };
 
 // Returns the category a single search word belongs to, or null if the
@@ -95,6 +115,15 @@ function queryMatchesProductCategory(query, category) {
   return words.some(function(w) { return categoryForSearchWord(w) === category; });
 }
 
+// True if a single typed word appears in the text directly, OR — via
+// SEARCH_TERM_SYNONYMS — one of its known English equivalents does (so
+// "baboy" finds a product actually named "Pork Chop"). //
+function wordMatchesText(word, lowerText) {
+  if (lowerText.indexOf(word) !== -1) return true;
+  var synonyms = SEARCH_TERM_SYNONYMS[word];
+  return !!synonyms && synonyms.some(function(syn) { return lowerText.indexOf(syn) !== -1; });
+}
+
 // True if every word typed appears somewhere in the text — order and
 // adjacency don't matter, so "pork ribs" matches "Pork Spare Ribs"
 // (both words are in there, just with "Spare" in between) without also
@@ -104,7 +133,7 @@ function allWordsFoundIn(text, query) {
   if (!text) return false;
   var lower = text.toLowerCase();
   var words = query.split(/\s+/).filter(Boolean);
-  return words.length > 0 && words.every(function(w) { return lower.indexOf(w) !== -1; });
+  return words.length > 0 && words.every(function(w) { return wordMatchesText(w, lower); });
 }
 
 // Wraps every occurrence of any query word in <mark>, instead of only
