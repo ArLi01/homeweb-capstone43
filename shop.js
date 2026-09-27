@@ -371,10 +371,20 @@ function renderHomeProducts() {
     if (r > maxRecent) maxRecent = r;
   });
 
+  // Panel's requirement: recommendations are ordered by rating, highest
+  // to lowest — not by the blended popularity score. That score is kept
+  // as the tie-breaker so unrated items still order sensibly among
+  // themselves instead of coming out in whatever order the DB returned. //
   var scored = products
     .filter(function(p) { return p.stock_qty > 0; }) // don't recommend out-of-stock items
     .map(function(p) { return { p: p, score: recommendationScore(p, maxRecent) }; })
-    .sort(function(a, b) { return b.score - a.score; });
+    .sort(function(a, b) {
+      var ra = a.p.ratingCount > 0 ? a.p.ratingAvg : -1; // unrated sinks below every rated item
+      var rb = b.p.ratingCount > 0 ? b.p.ratingAvg : -1;
+      if (rb !== ra) return rb - ra;
+      if (b.p.ratingCount !== a.p.ratingCount) return b.p.ratingCount - a.p.ratingCount;
+      return b.score - a.score;
+    });
 
   // If nothing has any sales or ratings yet (brand-new shop), fall back
   // to just showing available products so the row is never empty. //
@@ -388,6 +398,7 @@ function renderHomeProducts() {
 }
 
 let recommendMode = 'products'; // 'products' | 'merchants'
+let homeStoreSearchQuery = '';
 
 // #CUSTOMER_RECOMMENDATIONS_TOGGLE
 function switchRecommendMode(mode) {
@@ -400,15 +411,34 @@ function switchRecommendMode(mode) {
   }
   var pGrid = document.getElementById('home-product-grid');
   var mGrid = document.getElementById('home-merchant-grid');
+  var storeSearch = document.getElementById('home-store-search');
   if (mode === 'merchants') {
     if (pGrid) pGrid.style.display = 'none';
     if (mGrid) mGrid.style.display = '';
+    if (storeSearch) storeSearch.style.display = '';
     renderHomeMerchants();
   } else {
     if (mGrid) mGrid.style.display = 'none';
+    if (storeSearch) storeSearch.style.display = 'none';
     if (pGrid) pGrid.style.display = '';
     renderHomeProducts();
   }
+}
+
+// Store-name search inside the Stores tab of "Recommended For You" —
+// lets a customer jump straight to a stall they already know by name
+// instead of scrolling the recommendation row. //
+function filterHomeStores(value) {
+  homeStoreSearchQuery = value || '';
+  var clearBtn = document.getElementById('home-store-search-clear');
+  if (clearBtn) clearBtn.style.display = homeStoreSearchQuery.trim() ? '' : 'none';
+  renderHomeMerchants();
+}
+
+function clearHomeStoreSearch() {
+  var input = document.getElementById('home-store-search-input');
+  if (input) input.value = '';
+  filterHomeStores('');
 }
 
 // Same scoring as products above, aggregated to store level. //
@@ -446,12 +476,32 @@ function renderHomeMerchants() {
     m.avgRating = avgRating;
   });
 
-  merchants.sort(function(a, b) { return b.score - a.score; });
-  var list = merchants.slice(0, 8);
+  // Same rule as the product row — rating first, highest to lowest, with
+  // the popularity score only breaking ties among equally-rated stores. //
+  merchants.sort(function(a, b) {
+    var ra = a.ratingCountSum > 0 ? a.avgRating : -1;
+    var rb = b.ratingCountSum > 0 ? b.avgRating : -1;
+    if (rb !== ra) return rb - ra;
+    if (b.ratingCountSum !== a.ratingCountSum) return b.ratingCountSum - a.ratingCountSum;
+    return b.score - a.score;
+  });
+
+  // Store name search — when the customer has typed something, show every
+  // matching store rather than only the top 8, since they're looking for
+  // one specific stall, not a recommendation. //
+  var q = (homeStoreSearchQuery || '').trim().toLowerCase();
+  var list;
+  if (q) {
+    list = merchants.filter(function(m) { return (m.storeName || '').toLowerCase().indexOf(q) !== -1; });
+  } else {
+    list = merchants.slice(0, 8);
+  }
 
   mGrid.innerHTML = list.length
     ? list.map(renderMerchantCardHtml).join('')
-    : '<p style="color:#999;padding:2rem;">No stores available yet.</p>';
+    : (q
+        ? '<p style="color:#999;padding:2rem;">No store found matching “' + q + '”.</p>'
+        : '<p style="color:#999;padding:2rem;">No stores available yet.</p>');
 
   mGrid.querySelectorAll('[data-merchant-id]').forEach(function(card) {
     card.addEventListener('click', function() {
@@ -570,6 +620,10 @@ let activeRole = 'customer';
 let currentTrackingOrder = null; 
 let shippingInfo = {
   firstName: '', lastName: '', phone: '',
+  // Who the order is actually for. Captured at the Cart step and never
+  // allowed to be blank — it falls back to the account holder's own name
+  // when the customer doesn't type anyone else in. //
+  recipientName: '',
   street: '', barangay: '', city: 'Sta. Barbara', zip: '5002',
   // 'delivery' or 'pickup' — chosen with the toggle at the top of the
   // Cart step, before the shipping/pickup-details form even renders. //
@@ -2238,6 +2292,158 @@ function addToCart(andCheckout) {
 let myPickupNoShowCount = 0;
 var PICKUP_NOSHOW_LIMIT = 2; // 3rd strike loses Pick-up until support restores it
 
+// Panel item 8 — how long an order may sit unclaimed before the system
+// cancels it and puts the stock back. For Delivery the clock runs from
+// checkout (waiting on a rider); for Pick-up it restarts when the seller
+// marks it ready (waiting on the customer). //
+var UNCLAIMED_ORDER_HOURS = 24;
+
+var UNCLAIMED_ORDER_DISCLAIMER =
+  'Orders left unclaimed for ' + UNCLAIMED_ORDER_HOURS + ' hours are automatically cancelled and the ' +
+  'items returned to the seller’s stock. For Delivery, that means no rider accepted it; for Pick-up, ' +
+  'that means it wasn’t collected from the stall within ' + UNCLAIMED_ORDER_HOURS + ' hours of being marked ready.';
+
+// Sweeps any order whose 24h window has run out. Server-side function does
+// the real work (stock restore + status history) so it stays correct no
+// matter which client happens to trigger it. Fire-and-forget: a failure
+// here must never block whatever the customer was actually doing. //
+// Live "this expires in N hours" banner for an order still waiting to be
+// claimed, so the 24h rule is visible while it still matters rather than
+// only turning up as a surprise cancellation. //
+function unclaimedCountdownHtml(order) {
+  if (!order || !order.auto_cancel_at) return '';
+  if (order.status !== 'placed' && order.status !== 'ready_for_pickup') return '';
+
+  var msLeft = new Date(order.auto_cancel_at).getTime() - Date.now();
+  if (isNaN(msLeft)) return '';
+
+  var isPickupOrder = order.delivery_option === 'pickup';
+  var waitingOn = isPickupOrder
+    ? 'collected from the seller’s stall'
+    : 'accepted by a rider';
+
+  if (msLeft <= 0) {
+    return '<div style="background:#FEE2E2;border-radius:10px;padding:12px 14px;margin-bottom:14px;">' +
+      '<p style="margin:0;font-size:12.5px;color:#991B1B;"><i class="fas fa-hourglass-end"></i> ' +
+      'This order passed its ' + UNCLAIMED_ORDER_HOURS + '-hour window and is being cancelled. Stock is returned automatically.</p></div>';
+  }
+
+  var hoursLeft = Math.floor(msLeft / 3600000);
+  var minsLeft = Math.floor((msLeft % 3600000) / 60000);
+  var leftLabel = hoursLeft > 0
+    ? hoursLeft + ' hour' + (hoursLeft === 1 ? '' : 's') + (minsLeft > 0 ? ' ' + minsLeft + ' min' : '')
+    : minsLeft + ' minute' + (minsLeft === 1 ? '' : 's');
+  var urgent = msLeft < 3 * 3600000;
+
+  return '<div style="background:' + (urgent ? '#FEF2F2' : '#FFFBEB') + ';border:1px solid ' + (urgent ? '#FECACA' : '#FDE68A') + ';border-radius:10px;padding:12px 14px;margin-bottom:14px;">' +
+    '<p style="margin:0;font-size:12.5px;color:' + (urgent ? '#991B1B' : '#92400E') + ';line-height:1.6;">' +
+    '<i class="fas fa-hourglass-half"></i> <b>' + leftLabel + ' left.</b> ' +
+    'If this order isn’t ' + waitingOn + ' within that time it will be cancelled automatically and the items returned to stock.</p></div>';
+}
+
+// Panel item 7 — the buyer's Delivery PIN. Fetched separately because it
+// lives in its own table that only the buyer can read; the rider's copy of
+// the order has no PIN column at all. Rendered as a placeholder and filled
+// in by loadDeliveryPinInto() so a slow lookup never holds up the page. //
+function deliveryPinHtml(order) {
+  if (!order) return '';
+  if (order.delivery_option === 'pickup') return '';
+  var inFlight = order.status === 'preparing' || order.status === 'out_for_delivery';
+  if (!inFlight) return '';
+
+  setTimeout(function() { loadDeliveryPinInto(order.id); }, 0);
+  return '<div id="delivery-pin-box-' + order.id + '"></div>';
+}
+
+async function loadDeliveryPinInto(orderId) {
+  var el = document.getElementById('delivery-pin-box-' + orderId);
+  if (!el) return;
+
+  const { data, error } = await supabase
+    .from('order_delivery_pins').select('pin').eq('order_id', orderId).maybeSingle();
+
+  // Orders placed before this feature shipped simply have no PIN. //
+  if (error || !data || !data.pin) { el.innerHTML = ''; return; }
+
+  el.innerHTML =
+    '<div style="background:#F0FFF4;border:1px solid #BBF7D0;border-radius:10px;padding:14px;margin-bottom:14px;text-align:center;">' +
+    '<p style="margin:0 0 6px;font-size:12px;color:#15803D;font-weight:700;"><i class="fas fa-shield-halved"></i> YOUR DELIVERY PIN</p>' +
+    '<p style="margin:0;font-size:30px;font-weight:800;letter-spacing:10px;color:#15803D;font-family:monospace;">' + data.pin + '</p>' +
+    '<p style="margin:8px 0 0;font-size:11.5px;color:#15803D;line-height:1.6;">' +
+    'Give this to your rider <b>only when your order is actually in your hands</b>. ' +
+    'They can’t mark it delivered without it — that’s what stops an order being closed at the wrong address.</p>' +
+    '<p style="margin:6px 0 0;font-size:11px;color:#B45309;"><i class="fas fa-circle-info"></i> Never share it in advance, over chat, or before you receive the items.</p>' +
+    '</div>';
+}
+
+// Shows what the PIN + coordinates actually proved, for the customer and
+// the admin looking at a dispute. Coordinates are a map link rather than a
+// distance figure, since HomeWeb doesn't geocode street addresses — the
+// point is that the photo now carries a checkable location. //
+function proofVerificationHtml(order) {
+  var bits = '';
+
+  if (order.pin_verified_at) {
+    bits += '<p style="margin:6px 0 0;font-size:11.5px;color:#15803D;"><i class="fas fa-shield-check"></i> ' +
+      'Delivery PIN verified at handover — confirms the rider was with the recipient.</p>';
+  } else {
+    bits += '<p style="margin:6px 0 0;font-size:11.5px;color:#B45309;"><i class="fas fa-circle-info"></i> ' +
+      'No PIN on this order (placed before PIN confirmation was introduced).</p>';
+  }
+
+  if (order.proof_latitude != null && order.proof_longitude != null) {
+    var lat = Number(order.proof_latitude).toFixed(6);
+    var lng = Number(order.proof_longitude).toFixed(6);
+    bits += '<p style="margin:4px 0 0;font-size:11.5px;color:#666;"><i class="fas fa-location-dot"></i> ' +
+      'Photo location: <a href="https://www.google.com/maps?q=' + lat + ',' + lng + '" target="_blank" rel="noopener" style="color:#3B82F6;text-decoration:underline;">' +
+      lat + ', ' + lng + '</a>' +
+      (order.proof_accuracy_m ? ' <span style="color:#aaa;">(±' + Math.round(order.proof_accuracy_m) + 'm)</span>' : '') +
+      '</p>';
+  } else {
+    bits += '<p style="margin:4px 0 0;font-size:11.5px;color:#aaa;"><i class="fas fa-location-dot"></i> ' +
+      'No location recorded — the rider’s device did not share GPS.</p>';
+  }
+
+  return bits;
+}
+
+function sweepExpiredOrders() {
+  if (!currentUser) return Promise.resolve(0);
+  return supabase.rpc('auto_cancel_expired_orders').then(function(res) {
+    return (res && !res.error && res.data) ? res.data : 0;
+  }).catch(function() { return 0; });
+}
+
+// The logged-in account's own name, used as the fallback recipient. //
+let accountDefaultName = '';
+
+// Reads the recipient field, falling back to the account name and then to
+// the shipping name, so an order can never be created without one. //
+function effectiveRecipientName() {
+  var typed = (shippingInfo.recipientName || '').trim();
+  if (typed) return typed;
+  if (accountDefaultName) return accountDefaultName;
+  var composed = ((shippingInfo.firstName || '') + ' ' + (shippingInfo.lastName || '')).trim();
+  return composed || 'Account holder';
+}
+
+function setRecipientName(value) {
+  shippingInfo.recipientName = value;
+  var note = document.getElementById('co-recipient-note');
+  if (!note) return;
+  var typed = (value || '').trim();
+  if (!typed) {
+    note.innerHTML = '<i class="fas fa-circle-info"></i> Leave blank and we’ll use your account name: <b>' + (accountDefaultName || 'your name') + '</b>';
+    note.style.color = '#666';
+  } else if (accountDefaultName && typed.toLowerCase() === accountDefaultName.toLowerCase()) {
+    note.innerHTML = '<i class="fas fa-user-check"></i> Using your account name.';
+    note.style.color = '#15803D';
+  } else {
+    note.innerHTML = '<i class="fas fa-gift"></i> Ordering for someone else — the rider will look for <b>' + typed + '</b>.';
+    note.style.color = '#15803D';
+  }
+}
+
 async function openCheckout() {
   if (!currentUser) {
     showToast('Please log in to check out', 'info');
@@ -2248,8 +2454,15 @@ async function openCheckout() {
   checkoutStep = 1;
   selectedPaymentMethod = 'cod';
 
-  const { data: myProfile } = await supabase.from('profiles').select('pickup_no_show_count').eq('id', currentUser.id).single();
+  const { data: myProfile } = await supabase.from('profiles').select('pickup_no_show_count, full_name, phone').eq('id', currentUser.id).single();
   myPickupNoShowCount = myProfile ? (myProfile.pickup_no_show_count || 0) : 0;
+
+  // Default recipient = the account holder. The panel's requirement is
+  // that an order can never leave the cart without a name attached, so
+  // this is pre-filled rather than left for the customer to remember. //
+  accountDefaultName = (myProfile && myProfile.full_name) ? myProfile.full_name.trim() : '';
+  if (!shippingInfo.recipientName) shippingInfo.recipientName = accountDefaultName;
+  if (!shippingInfo.phone && myProfile && myProfile.phone) shippingInfo.phone = myProfile.phone;
   if (myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT && shippingInfo.fulfillment === 'pickup') {
     shippingInfo.fulfillment = 'delivery'; // can't default into a mode they're locked out of
   }
@@ -2264,6 +2477,7 @@ function closeCheckout() {
   document.getElementById('sn-coOverlay').classList.remove('active');
   document.getElementById('sn-checkoutModal').classList.remove('active');
   document.body.style.overflow = '';
+  clearCheckoutDeliveryFeeLock(); // next checkout re-prices from scratch
 }
 
 // Switches between Delivery and Pickup for the whole checkout — affects
@@ -2274,6 +2488,7 @@ function setFulfillment(mode) {
     return;
   }
   shippingInfo.fulfillment = mode;
+  clearCheckoutDeliveryFeeLock();
   renderCheckout();
 }
 
@@ -2319,8 +2534,9 @@ function renderCheckout() {
     }).join('');
 
     const sub = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    const shipBreakdown = effectiveShipBreakdown(sub);
+    const shipBreakdown = checkoutDeliveryBreakdown(); // one fee for the whole cart
     const ship = shipBreakdown.total;
+    const cartStoreCount = groupCartByMerchant().length;
 
     var pickupLocked = myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT;
     var fulfillToggle = '<div class="co-fulfill-toggle" style="display:flex;gap:8px;margin-bottom:14px;">' +
@@ -2330,11 +2546,29 @@ function renderCheckout() {
       (isPickup ? '<p style="margin:-8px 0 14px;font-size:11.5px;color:#666;"><i class="fas fa-circle-info"></i> Collect your order yourself from each seller’s stall in Sta. Barbara Public Market — no delivery fee.</p>' : '') +
       (pickupLocked && !isPickup ? '<p style="margin:-8px 0 14px;font-size:11.5px;color:#DC2626;"><i class="fas fa-triangle-exclamation"></i> Pick-up is locked on your account after ' + myPickupNoShowCount + ' missed pickups. Contact support to restore it.</p>' : '');
 
+    // #CUSTOMER_RECIPIENT_NAME — panel requirement: an order leaving the
+    // cart must always carry a recipient, defaulting to the account name. //
+    var recipientTyped = (shippingInfo.recipientName || '').trim();
+    var recipientField = '<div class="co-field" style="margin:14px 0 4px;">' +
+      '<label>' + (isPickup ? 'Who is collecting this order?' : 'Recipient Name') + ' <span class="co-required">*</span></label>' +
+      '<input type="text" id="co-recipientName" placeholder="' + (accountDefaultName || 'Full name of the person receiving this') + '" value="' + recipientTyped.replace(/"/g, '&quot;') + '" oninput="setRecipientName(this.value)"/>' +
+      '<p id="co-recipient-note" style="margin:5px 0 0;font-size:11.5px;color:' + (recipientTyped ? '#15803D' : '#666') + ';">' +
+      (recipientTyped
+        ? (accountDefaultName && recipientTyped.toLowerCase() === accountDefaultName.toLowerCase()
+            ? '<i class="fas fa-user-check"></i> Using your account name.'
+            : '<i class="fas fa-gift"></i> Ordering for someone else — the rider will look for <b>' + recipientTyped + '</b>.')
+        : '<i class="fas fa-circle-info"></i> Leave blank and we’ll use your account name: <b>' + (accountDefaultName || 'your name') + '</b>') +
+      '</p></div>';
+
     body = fulfillToggle + '<div class="co-cart-list">' + rows + '</div>' +
+      recipientField +
       '<div class="co-summary">' +
       '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
       '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (isPickup ? '<span class="free-tag">FREE (Pick-up)</span>' : (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship))) + '</span></div>' +
       deliverySurchargeNoteHtml(shipBreakdown) +
+      (!isPickup && cartStoreCount > 1
+        ? '<p style="margin:2px 0 6px;font-size:11.5px;color:#15803D;text-align:right;"><i class="fas fa-motorcycle"></i> One fee for all ' + cartStoreCount + ' stores — one rider delivers them together.</p>'
+        : '') +
       '<div class="co-summary-row total"><span>Total</span><span>' + fmt(sub + ship) + '</span></div>' +
       '</div>';
 
@@ -2406,13 +2640,18 @@ function renderCheckout() {
   // STEP 4: CONFIRM ORDER //
   } else if (checkoutStep === 4) {
     var groups = groupCartByMerchant();
-    var grandTotal = 0;
+
+    // One delivery fee for the whole checkout, not one per seller \u2014
+    // see checkoutDeliveryBreakdown(). Each seller's card shows only
+    // that seller's goods; the single delivery fee is added once at the
+    // bottom so the customer can see they're not being charged twice. //
+    var confirmShipBreakdown = lockCheckoutDeliveryFee();
+    var confirmShip = confirmShipBreakdown.total;
+    var confirmItemsTotal = 0;
 
     var groupsHtml = groups.map(function(g) {
       var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-      var shipBreakdown = effectiveShipBreakdown(sub);
-      var ship = shipBreakdown.total;
-      grandTotal += sub + ship;
+      confirmItemsTotal += sub;
       var itemList = g.items.map(function(i) {
         return '<li><span>' + i.name + ' (' + (i.unit || 'pc') + ') \u00D7 ' + i.qty + '</span><span>' + fmt(i.price * i.qty) + '</span></li>';
       }).join('');
@@ -2422,12 +2661,31 @@ function renderCheckout() {
         (groups.length > 1 ? '<span style="float:right;font-weight:400;color:#999;font-size:11.5px;">Separate order</span>' : '') + '</p>' +
         '<ul class="co-confirm-items">' + itemList + '</ul>' +
         '<div class="co-summary" style="margin-top:8px;">' +
-        '<div class="co-summary-row"><span>Subtotal</span><span>' + fmt(sub) + '</span></div>' +
-        '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (isPickup ? '<span class="free-tag">FREE (Pick-up)</span>' : (ship === 0 ? '<span class="free-tag">FREE</span>' : fmt(ship))) + '</span></div>' +
-        deliverySurchargeNoteHtml(shipBreakdown) +
-        '<div class="co-summary-row total"><span>Order Total</span><span>' + fmt(sub + ship) + '</span></div>' +
+        '<div class="co-summary-row total"><span>Items Subtotal</span><span>' + fmt(sub) + '</span></div>' +
         '</div></div>';
     }).join('');
+
+    var grandTotal = confirmItemsTotal + confirmShip;
+
+    // The combined footer \u2014 this is where the single delivery fee lands. //
+    groupsHtml += '<div style="background:#F0FFF4;border:1px solid #DCFCE7;border-radius:10px;padding:14px;margin-bottom:12px;">' +
+      '<div class="co-summary" style="margin:0;">' +
+      '<div class="co-summary-row"><span>Items Subtotal' + (groups.length > 1 ? ' (' + groups.length + ' stores)' : '') + '</span><span>' + fmt(confirmItemsTotal) + '</span></div>' +
+      '<div class="co-summary-row"><span>Delivery Fee</span><span>' + (isPickup ? '<span class="free-tag">FREE (Pick-up)</span>' : (confirmShip === 0 ? '<span class="free-tag">FREE</span>' : fmt(confirmShip))) + '</span></div>' +
+      deliverySurchargeNoteHtml(confirmShipBreakdown) +
+      (!isPickup && groups.length > 1
+        ? '<p style="margin:2px 0 6px;font-size:11.5px;color:#15803D;"><i class="fas fa-motorcycle"></i> Charged once \u2014 one rider collects from all ' + groups.length + ' stores and delivers them together.</p>'
+        : '') +
+      '<div class="co-summary-row total"><span>Amount to Pay</span><span>' + fmt(grandTotal) + '</span></div>' +
+      '</div></div>' +
+      '<div style="background:#F9FAFB;border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:12.5px;">' +
+      '<i class="fas fa-user" style="color:#666;"></i> <span style="color:#666;">' + (isPickup ? 'Collected by' : 'Recipient') + ':</span> <b>' + effectiveRecipientName() + '</b>' +
+      '</div>' +
+      // #ORDER_DISCLAIMER — panel item 8
+      '<div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:12px 14px;margin-bottom:12px;">' +
+      '<p style="margin:0 0 4px;font-weight:700;font-size:12.5px;color:#92400E;"><i class="fas fa-triangle-exclamation"></i> Before you place this order</p>' +
+      '<p style="margin:0;font-size:11.5px;color:#92400E;line-height:1.6;">' + UNCLAIMED_ORDER_DISCLAIMER + '</p>' +
+      '</div>';
 
     body = '<div class="co-confirm">' +
       '<div class="co-confirm-icon"><i class="fas fa-clipboard-check"></i></div>' +
@@ -2621,12 +2879,12 @@ function cancelGcashPayment() {
   closeGcashModal();
 }
 
+// Items across every seller + ONE delivery fee for the whole trip —
+// must match the "Amount to Pay" shown on the confirm step. //
 function gcashOrderTotal() {
-  var groups = groupCartByMerchant();
-  return groups.reduce(function(total, g) {
-    var sub = g.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    return total + sub + calcDeliveryFee(shippingInfo.city, sub);
-  }, 0);
+  var itemsTotal = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+  var bd = lockedCheckoutShipBreakdown || checkoutDeliveryBreakdown();
+  return itemsTotal + bd.total;
 }
 
 function renderGcashStep() {
@@ -2826,6 +3084,47 @@ function effectiveShipBreakdown(subtotal) {
   return calcDeliveryFeeBreakdown(shippingInfo.city, subtotal);
 }
 
+// A ₱0 shipping line means different things depending on the order, and
+// calling all of them "FREE" is misleading. Pick-up really is free; a
+// sibling order in a multi-store batch isn't — its delivery was already
+// paid once on the first order of that batch. //
+function shippingLineLabel(order) {
+  if (Number(order.shipping_fee) !== 0) return fmt(order.shipping_fee);
+  if (order.delivery_option === 'pickup') return '<span class="free-tag">FREE (Pick-up)</span>';
+  if (order.batch_code) {
+    return '<span style="font-size:11.5px;color:#15803D;">Charged once for order group #' + order.batch_code + '</span>';
+  }
+  return '<span class="free-tag">FREE</span>';
+}
+
+// The fee shown on the Confirm step, frozen at the moment it was shown.
+// calcDeliveryFeeBreakdown() reads the clock (peak-hour surcharge), and the
+// mock GCash flow takes ~3s between "Amount to Pay" and the actual insert —
+// crossing 11:00 or 13:00 in that window would otherwise charge a different
+// number than the customer agreed to. //
+var lockedCheckoutShipBreakdown = null;
+
+function lockCheckoutDeliveryFee() {
+  lockedCheckoutShipBreakdown = checkoutDeliveryBreakdown();
+  return lockedCheckoutShipBreakdown;
+}
+
+function clearCheckoutDeliveryFeeLock() {
+  lockedCheckoutShipBreakdown = null;
+}
+
+// ONE delivery fee for the whole checkout, however many sellers the cart
+// spans. A single rider collects from every stall in the same market and
+// makes one trip to the customer, so charging per-seller would bill the
+// customer several times for one delivery. The fee is calculated from the
+// FULL cart subtotal (so the small-order surcharge is judged on what the
+// customer actually spent, not on one seller's slice of it).
+// #CUSTOMER_SINGLE_DELIVERY_FEE
+function checkoutDeliveryBreakdown() {
+  var cartSubtotal = cart.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
+  return effectiveShipBreakdown(cartSubtotal);
+}
+
 function isWithinDeliveryRange(municipality) {
   var distance = MUNICIPALITY_DISTANCES[municipality];
   if (distance === undefined) return true; // unrecognized value shouldn't hard-block existing data
@@ -2882,6 +3181,19 @@ async function placeOrder() {
   const nextBtn = document.querySelector('#sn-checkoutModal .co-btn--next');
   if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = 'Checking stock...'; }
 
+  // A suspension has to actually stop new orders, not just show a toast
+  // at login — otherwise an already-open session keeps ordering straight
+  // through it. Checked fresh here so a suspension applied mid-session
+  // takes effect immediately. Panel item 10. //
+  const { data: meRow } = await supabase
+    .from('profiles').select('is_suspended, suspended_reason').eq('id', currentUser.id).single();
+  if (meRow && meRow.is_suspended) {
+    if (nextBtn) { nextBtn.disabled = false; nextBtn.innerHTML = 'Place Order <i class="fas fa-check-circle"></i>'; }
+    showToast('Your account is suspended and cannot place orders' +
+      (meRow.suspended_reason ? ': ' + meRow.suspended_reason : '.') + ' Contact HomeWeb support.', 'error');
+    return;
+  }
+
   // Recheck stock right before placing — cart may be stale by now //
   var productIds = cart.map(function(i) { return i.id; });
   const { data: freshProducts, error: stockErr } = await supabase.from('products').select('id, name, stock_qty, cost_price').in('id', productIds);
@@ -2936,10 +3248,22 @@ async function placeOrder() {
     return;
   }
 
+  // ONE delivery fee for the whole checkout. When the cart spans several
+  // sellers we still create one order per seller (they each fulfil their
+  // own goods), but the single delivery fee is carried entirely by the
+  // FIRST order in the batch and the rest are stored at zero — so the
+  // customer is billed once for the one rider trip. Tracking screens read
+  // batch_code to explain a ₱0 shipping line rather than calling it free. //
+  var batchShipFee = (lockedCheckoutShipBreakdown || checkoutDeliveryBreakdown()).total;
+  // The fee rides on the first order that is actually created. Assigning it
+  // to group 0 unconditionally meant a failed first insert silently dropped
+  // the whole delivery fee while the customer had already been charged it. //
+  var shipFeeAssigned = false;
+
   for (var g = 0; g < groups.length; g++) {
     var group = groups[g];
     var sub = group.items.reduce(function(a, b) { return a + b.price * b.qty; }, 0);
-    var shipFee = effectiveShipBreakdown(sub).total;
+    var shipFee = shipFeeAssigned ? 0 : batchShipFee;
     var orderCode = groups.length > 1 ? baseCode + '-' + String.fromCharCode(65 + g) : baseCode;
 
     const { data: orderRow, error: orderErr } = await supabase.from('orders').insert({
@@ -2954,6 +3278,12 @@ async function placeOrder() {
       shipping_first_name: shippingInfo.firstName,
       shipping_last_name: shippingInfo.lastName,
       shipping_phone: shippingInfo.phone,
+      recipient_name: effectiveRecipientName(),
+      // Panel item 8 — unclaimed orders expire. For Delivery this is the
+      // window for a rider to accept; for Pick-up the clock is reset to
+      // 24h from the moment the seller marks it ready (see
+      // advanceOrderStatus). auto_cancel_expired_orders() does the sweep. //
+      auto_cancel_at: new Date(Date.now() + UNCLAIMED_ORDER_HOURS * 3600 * 1000).toISOString(),
       // Pick-up orders have no delivery address — leave those blank rather
       // than saving stale values left over from a previous Delivery order. //
       shipping_street: isPickupOrder ? null : shippingInfo.street,
@@ -2968,6 +3298,11 @@ async function placeOrder() {
       continue; // keep trying the other sellers' orders rather than losing everything
     }
 
+    // Only now is the fee genuinely charged — if this had failed, the next
+    // successful order would have carried it instead. //
+    if (shipFee > 0) shipFeeAssigned = true;
+    if (!batchShipFee) shipFeeAssigned = true; // free delivery: nothing to carry forward
+
     const itemRows = group.items.map(function(item) {
       return { order_id: orderRow.id, product_id: item.id, product_name: item.name, price: item.price, qty: item.qty, unit: item.unit || 'pc', cost_price: costPriceById[item.id] !== undefined ? costPriceById[item.id] : null };
     });
@@ -2979,6 +3314,17 @@ async function placeOrder() {
       label: ORDER_STATUS_MAP.placed.label,
       description: ORDER_STATUS_MAP.placed.desc
     });
+
+    // Panel item 7 — a 4-digit Delivery PIN the rider has to be told by
+    // the customer before they can close the order out. Delivery only;
+    // a Pick-up handover already happens face to face at the stall.
+    // Stored in its own table so the rider can't read it (see the
+    // order_delivery_pins policies). //
+    if (!isPickupOrder) {
+      var pin = String(Math.floor(1000 + Math.random() * 9000));
+      const { error: pinErr } = await supabase.from('order_delivery_pins').insert({ order_id: orderRow.id, pin: pin });
+      if (pinErr) console.error('Could not create delivery PIN for', orderCode, pinErr);
+    }
 
     placedOrders.push({ id: orderRow.id, code: orderCode, merchantName: group.merchantName, total: sub + shipFee });
   }
@@ -3076,6 +3422,17 @@ async function advanceOrderStatus(orderDbId, newStatus) {
   // Stamped so the 48h no-show auto-cancel (check_and_cancel_stale_pickups)
   // knows when the pickup clock actually started. //
   if (newStatus === 'ready_for_pickup') orderUpdates.pickup_ready_at = new Date().toISOString();
+
+  // Panel item 8 — the unclaimed clock. It restarts when a Pick-up order
+  // becomes collectable, and stops for good once the order is moving
+  // (preparing/out for delivery) or has finished, since from then on
+  // nobody is waiting on an unclaimed order any more. //
+  if (newStatus === 'ready_for_pickup') {
+    orderUpdates.auto_cancel_at = new Date(Date.now() + UNCLAIMED_ORDER_HOURS * 3600 * 1000).toISOString();
+  } else if (newStatus !== 'placed') {
+    orderUpdates.auto_cancel_at = null;
+  }
+
   await supabase.from('orders').update(orderUpdates).eq('id', orderDbId);
   await supabase.from('order_status_history').insert({
     order_id: orderDbId,
@@ -3295,29 +3652,61 @@ function showOrderSuccess(orderCode) {
 // ============================================================
 
 let riderSearchOrderId = null;
-let riderSearchStep = 1; // 1: searching, 2: rider found
+let riderSearchStep = 1; // 1: searching, 2: rider found, 3: no rider available
 
 let riderPollIntervalId = null;
 
+// How long the "finding a rider" spinner runs before we stop pretending
+// and tell the customer plainly that nobody has taken it. The order stays
+// live either way — this only changes what the screen says. //
+var NO_RIDER_TIMEOUT_MS = 90 * 1000;
+var riderSearchStartedAt = 0;
+var riderSearchOrderCode = '';
+
+// Are there any riders who could actually take this right now? Used to
+// show the "no rider available" pop-up immediately instead of spinning
+// for 90 seconds when the answer was never going to change. //
+// #CUSTOMER_NO_RIDER_CHECK
+async function countAvailableRiders() {
+  const { count, error } = await supabase
+    .from('riders')
+    .select('id', { count: 'exact', head: true })
+    .eq('is_available', true)
+    .eq('is_suspended', false);
+  if (error) return null; // unknown — don't claim "nobody's online" on a failed query
+  return count || 0;
+}
+
 function openRiderSearchModal(orderId, orderCode) {
   riderSearchOrderId = orderId;
+  riderSearchOrderCode = orderCode;
   riderSearchStep = 1;
+  riderSearchStartedAt = Date.now();
   renderRiderStep(orderCode, null);
 
   document.getElementById('sn-riderOverlay').classList.add('active');
   document.getElementById('sn-riderModal').classList.add('active');
   document.body.style.overflow = 'hidden';
 
+  // Panel item 6 — if nobody is online at all, say so straight away
+  // rather than making the customer watch a spinner that can't resolve. //
+  countAvailableRiders().then(function(n) {
+    if (n === 0 && riderSearchStep === 1 && riderSearchOrderId === orderId) {
+      riderSearchStep = 3;
+      renderRiderStep(orderCode, null);
+    }
+  });
+
   // Polling since there's no realtime connection here //
   if (riderPollIntervalId) clearInterval(riderPollIntervalId);
   riderPollIntervalId = setInterval(async function() {
-    if (riderSearchStep !== 1 || riderSearchOrderId !== orderId) {
+    if (riderSearchStep === 2 || riderSearchOrderId !== orderId) {
       clearInterval(riderPollIntervalId);
       return;
     }
     const { data: order } = await supabase
       .from('orders')
-      .select('rider_name, rider_phone, rider_vehicle, rider_plate, rider_rating, rider_license_path')
+      .select('rider_name, rider_phone, rider_vehicle, rider_plate, rider_rating, rider_license_path, status')
       .eq('id', orderId)
       .single();
 
@@ -3329,8 +3718,39 @@ function openRiderSearchModal(orderId, orderCode) {
         plate: order.rider_plate, rating: order.rider_rating, eta: randomBetween(15, 30),
         licensePath: order.rider_license_path
       });
+      return;
+    }
+
+    // Still nobody after the grace period — switch to the honest screen.
+    // Keeps polling underneath, so if a rider accepts while the customer
+    // is reading it, the "Rider Found!" step still takes over. //
+    if (riderSearchStep === 1 && Date.now() - riderSearchStartedAt > NO_RIDER_TIMEOUT_MS) {
+      riderSearchStep = 3;
+      renderRiderStep(orderCode, null);
     }
   }, 4000);
+}
+
+// Re-runs the availability check from the "no rider" screen. //
+async function retryRiderSearch() {
+  var btn = document.getElementById('sn-retry-rider-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking...'; }
+
+  var n = await countAvailableRiders();
+  if (n === null || n === 0) {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-rotate-right"></i> Check again';
+    }
+    showToast(n === 0 ? 'Still no riders online right now' : 'Could not check rider availability', 'info');
+    return;
+  }
+
+  // Someone came online — go back to searching. //
+  riderSearchStep = 1;
+  riderSearchStartedAt = Date.now();
+  renderRiderStep(riderSearchOrderCode, null);
+  showToast(n + ' rider' + (n === 1 ? '' : 's') + ' online — searching again', 'info');
 }
 
 function closeRiderModal() {
@@ -3379,6 +3799,30 @@ function renderRiderStep(orderCode, rider) {
         : '') +
       '<button class="co-btn co-btn--next" style="width:100%;margin-top:10px;" onclick="closeRiderModal(); viewOrderNow(\'' + riderSearchOrderId + '\');">Track This Order</button>' +
       '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal()">Continue Shopping</button>';
+
+  // STEP 3 — no rider available. Panel item 6. The order is NOT lost: it
+  // stays live and any rider coming online can still claim it, up to the
+  // 24h unclaimed window. This screen just stops the endless spinner and
+  // gives the customer a real decision to make. //
+  } else if (riderSearchStep === 3) {
+    body.innerHTML =
+      '<div style="text-align:center;padding:4px;">' +
+      '<div class="login-icon" style="color:#F59E0B;"><i class="fas fa-motorcycle"></i></div>' +
+      '<h2 style="margin:6px 0;">No rider available right now</h2>' +
+      '<p class="login-sub">Order #' + orderCode + ' is placed and waiting — we just haven’t found anyone free to pick it up yet.</p>' +
+      '</div>' +
+      '<div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:14px;margin:14px 0;">' +
+      '<p style="margin:0 0 8px;font-weight:700;font-size:12.5px;color:#92400E;"><i class="fas fa-circle-info"></i> What happens now</p>' +
+      '<ul style="margin:0;padding-left:18px;font-size:12px;color:#92400E;line-height:1.7;">' +
+      '<li>Your order stays active — the next rider who comes online can accept it.</li>' +
+      '<li>We’ll notify you here and in <b>My Orders</b> the moment someone does.</li>' +
+      '<li>If nobody accepts within ' + UNCLAIMED_ORDER_HOURS + ' hours it’s cancelled automatically and your items go back to stock — you won’t be charged.</li>' +
+      '<li>You can cancel it yourself any time before a rider accepts.</li>' +
+      '</ul></div>' +
+      '<button class="co-btn co-btn--next" id="sn-retry-rider-btn" style="width:100%;" onclick="retryRiderSearch()"><i class="fas fa-rotate-right"></i> Check again</button>' +
+      '<button class="co-btn" style="background:#F3F4F6;color:#333;width:100%;margin-top:10px;" onclick="closeRiderModal(); viewOrderNow(\'' + riderSearchOrderId + '\');">Track This Order</button>' +
+      '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-top:10px;" onclick="closeRiderModal(); cancelOrderByCustomer(\'' + riderSearchOrderId + '\', \'' + orderCode + '\');"><i class="fas fa-ban"></i> Cancel This Order</button>' +
+      '<button class="co-btn" style="background:none;color:#999;width:100%;margin-top:6px;font-size:12.5px;" onclick="closeRiderModal()">Continue Shopping</button>';
   }
 }
 
@@ -3440,6 +3884,11 @@ async function openOrderTracking(e) {
 
 // Fetch this user's orders (with their items) from Supabase //
 async function fetchOrders() {
+  // Clear out anything that timed out before showing the list, so the
+  // customer never sees a "waiting for rider" order that expired hours
+  // ago. Awaited deliberately — the sweep has to land before the read. //
+  await sweepExpiredOrders();
+
   const { data, error } = await supabase
     .from('orders')
     .select('*, order_items(*, products(merchant_id, merchants(store_name)))')
@@ -3544,7 +3993,16 @@ function renderOrderList() {
     listHtml += '</div>';
   }
 
-  container.innerHTML = tabsHtml + listHtml;
+  // Rewriting identical markup on every 5s poll tick would reset the
+  // scroll position and flash the list, so only touch the DOM when the
+  // content genuinely changed — and keep the scroll steady when it does. //
+  var nextHtml = tabsHtml + listHtml;
+  if (container.innerHTML === nextHtml) return;
+
+  var scroller = document.getElementById('sn-trackingModal');
+  var savedScroll = scroller ? scroller.scrollTop : 0;
+  container.innerHTML = nextHtml;
+  if (scroller) scroller.scrollTop = savedScroll;
 }
 
 // Customer can cancel while still waiting for a rider //
@@ -3751,8 +4209,15 @@ function renderTrackingDetail(order) {
     '<h3>' + statusInfo.label + ' — Order #' + order.order_code + '</h3>' +
     (order._storeName ? '<p style="margin:2px 0 12px;font-size:12.5px;color:#777;"><i class="fas fa-store"></i> ' + order._storeName + '</p>' : '') +
 
+    unclaimedCountdownHtml(order) +
+
     (order.status === 'placed' && !order.rider_user_id
       ? '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-bottom:14px;" onclick="cancelOrderByCustomer(\'' + order.id + '\', \'' + order.order_code + '\')"><i class="fas fa-ban"></i> Cancel Order</button>'
+      : '') +
+
+    (order.status === 'cancelled' && order.cancel_reason
+      ? '<div style="background:#FEE2E2;border-radius:10px;padding:12px 14px;margin-bottom:14px;">' +
+        '<p style="margin:0;font-size:12.5px;color:#991B1B;"><i class="fas fa-ban"></i> <b>Cancelled:</b> ' + order.cancel_reason + '</p></div>'
       : '') +
 
     // Timeline
@@ -3761,6 +4226,22 @@ function renderTrackingDetail(order) {
     timelineHtml +
     '</div>' +
 
+    // Panel item 7 — the PIN the rider must be given. Only shown to the
+    // buyer, only while a delivery is actually in flight. //
+    // Buyer only. RLS already restricts the PIN table to the order owner,
+    // but a rider opening this same shared detail view shouldn't even be
+    // issuing the query. //
+    (isCustomerViewer ? deliveryPinHtml(order) : '') +
+
+    (order.failed_attempt_reason && order.status === 'out_for_delivery'
+      ? '<div style="background:#FEE2E2;border-radius:10px;padding:12px 14px;margin-bottom:14px;">' +
+        '<p style="margin:0;font-weight:700;font-size:12.5px;color:#991B1B;"><i class="fas fa-triangle-exclamation"></i> Delivery attempt failed</p>' +
+        '<p style="margin:4px 0 0;font-size:12px;color:#991B1B;">' + order.failed_attempt_reason +
+        ' <span style="color:#aaa;">(' + timeAgo(order.failed_attempt_at) + ')</span></p>' +
+        '<p style="margin:6px 0 0;font-size:11.5px;color:#991B1B;">Your rider will try again or contact you. Message them if the details need correcting.</p>' +
+        '</div>'
+      : '') +
+
     (order.proof_of_delivery_url
       ? '<div class="track-detail-section">' +
         '<h4>Proof of Delivery</h4>' +
@@ -3768,6 +4249,7 @@ function renderTrackingDetail(order) {
         '<img src="' + order.proof_of_delivery_url + '" style="width:100%;max-width:280px;border-radius:10px;border:1px solid #eee;"/>' +
         '</a>' +
         '<p style="margin:6px 0 0;font-size:11.5px;color:#999;">Photo taken by your rider when the order was marked delivered.</p>' +
+        proofVerificationHtml(order) +
         '</div>'
       : '') +
 
@@ -3821,7 +4303,12 @@ function renderTrackingDetail(order) {
     // Summary + Address
     '<div class="track-detail-section">' +
     '<h4>' + (isPickupOrder ? 'Pickup Details' : 'Delivery Address') + '</h4>' +
-    '<p>' + (order.shipping_first_name || '') + ' ' + (order.shipping_last_name || '') + '</p>' +
+    (order.recipient_name
+      ? '<p style="font-weight:700;"><i class="fas fa-user" style="color:#999;font-size:12px;"></i> ' + order.recipient_name +
+        ' <span style="font-weight:400;color:#999;font-size:11.5px;">(' + (isPickupOrder ? 'collecting' : 'recipient') + ')</span></p>'
+      : '') +
+    '<p>' + (order.shipping_first_name || '') + ' ' + (order.shipping_last_name || '') +
+    (order.recipient_name ? ' <span style="color:#999;font-size:11.5px;">(ordered by)</span>' : '') + '</p>' +
     (isPickupOrder
       ? '<p><i class="fas fa-store"></i> ' + (order._storeName || 'Seller') + '’s stall, Sta. Barbara Public Market</p>'
       : '<p>' + addressStr + '</p>') +
@@ -3832,7 +4319,7 @@ function renderTrackingDetail(order) {
     '<h4>Order Summary</h4>' +
     '<div class="track-summary-rows">' +
     '<div class="track-summary-row"><span>Subtotal</span><span>' + fmt(order.subtotal) + '</span></div>' +
-    '<div class="track-summary-row"><span>Shipping</span><span>' + (Number(order.shipping_fee) === 0 ? 'FREE' : fmt(order.shipping_fee)) + '</span></div>' +
+    '<div class="track-summary-row"><span>Shipping</span><span>' + shippingLineLabel(order) + '</span></div>' +
     '<div class="track-summary-row total"><span>Total</span><span>' + fmt(order.total) + '</span></div>' +
     '<div class="track-summary-row"><span>Payment</span><span>' + (order.payment_method === 'cod' ? 'Cash on Delivery' : order.payment_method === 'gcash' ? 'GCash' : order.payment_method) + '</span></div>' +
     '<div class="track-summary-row"><span>Placed on</span><span>' + dateStr + '</span></div>' +
@@ -4226,6 +4713,10 @@ async function submitAdminLogin() {
 
 let adminView = 'overview'; // 'overview' | 'merchants' | 'riders'
 let adminPollIntervalId = null;
+// Slower than the old 5s now that refreshes are silent — approvals and
+// reports don't need second-by-second latency, and a longer gap means
+// fewer queries against Supabase for every admin who leaves this open. //
+var ADMIN_POLL_MS = 8000;
 
 async function openAdminDashboard() {
   document.getElementById('sn-adminOverlay').classList.add('active');
@@ -4243,10 +4734,13 @@ async function openAdminDashboard() {
     // Don't yank focus away from a search box the admin is mid-typing
     // into — just skip this tick and catch it on the next one. //
     var active = document.activeElement;
-    var body = document.getElementById('sn-admin-body');
-    if (active && body && body.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
-    renderAdminDashboard();
-  }, 5000);
+    var body = adminBodyEl();
+    if (active && body && body.contains(active) &&
+        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT')) return;
+    // Silent = build the new view off-screen first and only touch the
+    // page if something actually changed. See renderAdminDashboard(). //
+    renderAdminDashboard(true);
+  }, ADMIN_POLL_MS);
 }
 
 function closeAdminDashboard() {
@@ -4265,14 +4759,12 @@ function adminTabsHtml() {
 }
 
 function switchAdminView(view) {
+  abortAdminSilentRefresh();
   adminView = view;
   renderAdminDashboard();
 }
 
-async function renderAdminDashboard() {
-  var body = document.getElementById('sn-admin-body');
-  body.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() + '<div class="track-empty"><p>Loading...</p></div>';
-
+function runAdminViewRenderer() {
   if (adminView === 'overview') return renderAdminOverview();
   if (adminView === 'merchants') return renderAdminMerchants();
   if (adminView === 'riders') return renderAdminRiders();
@@ -4282,9 +4774,93 @@ async function renderAdminDashboard() {
   if (adminView === 'activity') return renderAdminActivityLog();
 }
 
+// Auto-refresh without the flicker.
+//
+// The old version blanked the panel to "Loading..." on every 5s tick and
+// rebuilt it, which made the screen blink and threw the admin back to the
+// top of the page mid-scroll. In silent mode the new view is built into a
+// detached twin that temporarily carries the #sn-admin-body id — so every
+// existing renderer writes into it unchanged — and the visible panel is
+// only touched when the resulting markup is actually different. Scroll
+// position is restored across that swap.
+// #ADMIN_SILENT_REFRESH
+var adminSilentRefreshInFlight = false;
+var adminSilentRefreshStale = false;
+
+// Where admin renderers write. Normally the real panel; during a silent
+// refresh it points at an off-screen div so the new markup can be built and
+// compared before anything visible changes. Every renderer goes through
+// this accessor, so no element ever has to be renamed. //
+var adminRenderTarget = null;
+function adminBodyEl() {
+  return adminRenderTarget || document.getElementById('sn-admin-body');
+}
+
+// A deliberate user action (tab switch, search, an approve/suspend button)
+// must beat an in-flight silent pass. Clearing the target sends the user's
+// render straight to the real panel, and the stale flag makes the silent
+// pass throw its own result away instead of overwriting them. //
+function abortAdminSilentRefresh() {
+  if (!adminSilentRefreshInFlight) return;
+  adminSilentRefreshStale = true;
+  adminRenderTarget = null;
+}
+
+// Auto-refresh without the flicker.
+//
+// The original version blanked the panel to "Loading..." on every 5s tick
+// and rebuilt it, which made the screen blink and threw the admin back to
+// the top of the page mid-scroll. A silent pass instead builds the new view
+// off-screen and only touches the visible panel when the markup actually
+// differs, preserving scroll position across the swap.
+// #ADMIN_SILENT_REFRESH
+async function renderAdminDashboard(silent) {
+  var live = document.getElementById('sn-admin-body');
+  if (!live) return;
+
+  if (!silent) {
+    abortAdminSilentRefresh();
+    live.innerHTML = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml() + '<div class="track-empty"><p>Loading...</p></div>';
+    return runAdminViewRenderer();
+  }
+
+  // A slow tab (Reports joins several tables) can still be rendering when
+  // the next tick fires; skip rather than interleave two passes. //
+  if (adminSilentRefreshInFlight) return;
+
+  adminSilentRefreshInFlight = true;
+  adminSilentRefreshStale = false;
+  var staging = document.createElement('div');
+  var newHtml = '';
+
+  try {
+    adminRenderTarget = staging;
+    await runAdminViewRenderer();
+    newHtml = staging.innerHTML;
+  } catch (e) {
+    console.error('[admin-refresh] silent render failed', e);
+  } finally {
+    // Never leave the target pointing at a discarded node, whatever happened. //
+    if (adminRenderTarget === staging) adminRenderTarget = null;
+    adminSilentRefreshInFlight = false;
+  }
+
+  // A user action overtook this pass — its markup describes the old view. //
+  if (adminSilentRefreshStale) { adminSilentRefreshStale = false; return; }
+
+  // Nothing new to show — leave the DOM completely alone. This is the
+  // common case, and it's what stops the constant blinking. //
+  if (!newHtml || newHtml === live.innerHTML) return;
+
+  var scroller = document.getElementById('sn-adminModal');
+  var savedScroll = scroller ? scroller.scrollTop : 0;
+  live.innerHTML = newHtml;
+  if (scroller) scroller.scrollTop = savedScroll;
+}
+
 // #ADMIN_OVERVIEW_TAB
 async function renderAdminOverview() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
 
   const [{ count: merchantCount }, { count: riderCount }, { count: customerCount }, { count: orderCount }, { count: productCount }, { count: pendingPermits }, { count: pendingReports }] = await Promise.all([
     supabase.from('merchants').select('id', { count: 'exact', head: true }),
@@ -4333,7 +4909,7 @@ let adminMerchantSearch = '';
 
 // #ADMIN_MERCHANTS_TAB
 async function renderAdminMerchants() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
   const { data: allMerchants, error } = await supabase.from('merchants').select('*').order('created_at', { ascending: false });
 
   var merchants = allMerchants || [];
@@ -4361,7 +4937,7 @@ async function renderAdminMerchants() {
   var pendingCount = (allMerchants || []).filter(function(m) { return m.business_permit_url && !m.is_verified; }).length;
 
   var searchBar = '<input type="text" placeholder="Search store name..." value="' + adminMerchantSearch.replace(/"/g, '&quot;') + '" ' +
-    'oninput="adminMerchantSearch=this.value; renderAdminMerchants();" ' +
+    'oninput="adminMerchantSearch=this.value; abortAdminSilentRefresh(); renderAdminMerchants();" ' +
     'style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:10px;"/>';
 
   var typeOptions = ['all'].concat(Object.keys(CATEGORY_META)).map(function(t) {
@@ -4370,10 +4946,10 @@ async function renderAdminMerchants() {
   }).join('');
 
   var filterBar = '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;">' +
-    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminMerchantFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'all\'; renderAdminMerchants();">All (' + (allMerchants ? allMerchants.length : 0) + ')</button>' +
-    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminMerchantFilter === 'pending' ? '#B45309' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'pending\'; renderAdminMerchants();">Pending (' + pendingCount + ')</button>' +
-    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminMerchantFilter === 'suspended' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'suspended' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'suspended\'; renderAdminMerchants();">Suspended (' + suspendedCount + ')</button>' +
-    '<select onchange="adminMerchantTypeFilter=this.value; renderAdminMerchants();" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;">' + typeOptions + '</select>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminMerchantFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'all\'; abortAdminSilentRefresh(); renderAdminMerchants();">All (' + (allMerchants ? allMerchants.length : 0) + ')</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminMerchantFilter === 'pending' ? '#B45309' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'pending\'; abortAdminSilentRefresh(); renderAdminMerchants();">Pending (' + pendingCount + ')</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminMerchantFilter === 'suspended' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminMerchantFilter === 'suspended' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminMerchantFilter=\'suspended\'; abortAdminSilentRefresh(); renderAdminMerchants();">Suspended (' + suspendedCount + ')</button>' +
+    '<select onchange="adminMerchantTypeFilter=this.value; abortAdminSilentRefresh(); renderAdminMerchants();" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;">' + typeOptions + '</select>' +
     '</div>';
 
   var rows = (error || !merchants.length)
@@ -4430,7 +5006,7 @@ function openSuspensionPolicyModal() {
   body.innerHTML =
     '<div class="login-icon"><i class="fas fa-gavel"></i></div>' +
     '<h2>Grounds for Suspension</h2>' +
-    '<p class="login-sub">What justifies restricting a vendor or rider\'s access</p>' +
+    '<p class="login-sub">What justifies restricting a vendor, rider, or customer\'s access</p>' +
     '<div style="text-align:left;margin-top:14px;">' +
     sellerInfoSection('Vendor Violations', 'fa-store-slash', sellerBullets([
       '<b>Repeated order failure</b> \u2014 consistently not preparing or fulfilling accepted orders',
@@ -4450,8 +5026,23 @@ function openSuspensionPolicyModal() {
         '<b>Unsafe or reckless conduct</b> \u2014 behavior that puts orders, customers, or the platform\'s reputation at risk',
         '<b>Persistent unavailability</b> \u2014 marked online but consistently failing to respond to alerts'
       ])) +
+    // Panel item 10 \u2014 customers were the one account type with no written
+    // grounds, even though admin has always been able to suspend them.
+    // #ADMIN_CUSTOMER_SUSPENSION_GROUNDS
+    sellerInfoSection('Customer Violations', 'fa-user-slash',
+      '<p style="margin:0 0 6px;">The system tracks the first of these automatically \u2014 a customer\'s missed-pickup count, visible on their profile in the Customers tab. Pick-up is locked on its own after ' + PICKUP_NOSHOW_LIMIT + ' misses, before any suspension is needed.</p>' +
+      sellerBullets([
+        '<b>Repeated uncollected pick-ups</b> \u2014 placing Pick-up orders and never collecting them, forcing sellers to restock perishable goods. Tracked as the missed-pickup count.',
+        '<b>Repeated refusal to accept deliveries</b> \u2014 ordering on COD and consistently refusing the order on arrival, leaving the rider and seller out of pocket',
+        '<b>False non-delivery claims</b> \u2014 reporting orders as "not received" that proof of delivery and the rider\'s record show were in fact delivered',
+        '<b>Fake or malicious reviews</b> \u2014 review-bombing a store, posting reviews for orders never placed, or leaving reviews as leverage for refunds',
+        '<b>Abusive conduct</b> \u2014 harassment, threats, or abusive language toward sellers or riders in chat or in person',
+        '<b>Fraudulent ordering</b> \u2014 bulk orders with no intent to pay or collect, or using another person\'s account or payment details',
+        '<b>Unsafe or dishonest behavior at handover</b> \u2014 tampering with goods then claiming damage, or refusing to pay the agreed amount on COD'
+      ])) +
     sellerInfoSection('How This Is Applied', 'fa-scale-balanced',
-      'A single isolated incident is generally a warning, not a suspension \u2014 the "repeated" and "multiple" language above is deliberate. Suspension is for a pattern, or for a serious single violation (fraud, prohibited products, delivery fraud). Every suspension requires the admin to enter a reason, which is recorded in the Activity Log for accountability.') +
+      'A single isolated incident is generally a warning, not a suspension \u2014 the "repeated" and "multiple" language above is deliberate. Suspension is for a pattern, or for a serious single violation (fraud, prohibited products, delivery fraud, abuse). Every suspension requires the admin to enter a reason, which is recorded in the Activity Log for accountability. ' +
+      'A suspended customer keeps their order history and can still view past orders, but cannot place new ones. Suspensions are reversible \u2014 an admin can reinstate any account from its tab.') +
     '</div>';
 
   document.getElementById('sn-helpOverlay').classList.add('active');
@@ -4557,7 +5148,7 @@ async function adminReinstateCustomer(userId, customerName) {
 
 // #ADMIN_RIDERS_TAB
 async function renderAdminRiders() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
   const { data: riders, error } = await supabase.from('riders').select('*').order('created_at', { ascending: false });
 
   var riderUserIds = (riders || []).map(function(r) { return r.user_id; });
@@ -4579,7 +5170,7 @@ async function renderAdminRiders() {
   }
 
   var searchBar = '<input type="text" placeholder="Search by name, plate, or email..." value="' + adminRiderSearch.replace(/"/g, '&quot;') + '" ' +
-    'oninput="adminRiderSearch=this.value; renderAdminRiders();" ' +
+    'oninput="adminRiderSearch=this.value; abortAdminSilentRefresh(); renderAdminRiders();" ' +
     'style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:10px;"/>';
 
   var rows = (error || !shownRiders.length)
@@ -4651,7 +5242,7 @@ var ACTIVITY_ACTION_LABELS = {
 
 // #ADMIN_ACTIVITY_LOG
 async function renderAdminActivityLog() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
 
   var query = supabase.from('activity_log').select('*').order('created_at', { ascending: false }).limit(200);
@@ -4679,7 +5270,7 @@ async function renderAdminActivityLog() {
 
 // #ADMIN_REPORTS_TAB
 async function renderAdminReports() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
 
   const { data: allReports, error } = await supabase.from('reports').select('*').order('created_at', { ascending: false });
@@ -4696,8 +5287,8 @@ async function renderAdminReports() {
 
   var pendingCount = reports.filter(function(r) { return r.status === 'pending'; }).length;
   var filterBar = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
-    '<button class="co-btn" style="flex:1;background:' + (adminReportFilter === 'pending' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminReportFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminReportFilter=\'pending\'; renderAdminReports();">Pending (' + pendingCount + ')</button>' +
-    '<button class="co-btn" style="flex:1;background:' + (adminReportFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminReportFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminReportFilter=\'all\'; renderAdminReports();">All (' + reports.length + ')</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (adminReportFilter === 'pending' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminReportFilter === 'pending' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminReportFilter=\'pending\'; abortAdminSilentRefresh(); renderAdminReports();">Pending (' + pendingCount + ')</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (adminReportFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminReportFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminReportFilter=\'all\'; abortAdminSilentRefresh(); renderAdminReports();">All (' + reports.length + ')</button>' +
     '</div>';
 
   var typeIcon = { merchant: 'fa-store', rider: 'fa-motorcycle', customer: 'fa-user' };
@@ -4867,7 +5458,7 @@ let adminCustomerSearch = '';
 
 // #ADMIN_CUSTOMERS_TAB
 async function renderAdminCustomers() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
 
   const { data: customerRoles } = await supabase.from('user_roles').select('user_id').eq('role', 'customer');
@@ -4878,7 +5469,7 @@ async function renderAdminCustomers() {
     return;
   }
 
-  const { data: profiles } = await supabase.from('profiles').select('id, full_name, email, phone, created_at, is_suspended, suspended_reason').in('id', userIds);
+  const { data: profiles } = await supabase.from('profiles').select('id, full_name, email, phone, created_at, is_suspended, suspended_reason, pickup_no_show_count').in('id', userIds);
   const { data: orders } = await supabase.from('orders').select('user_id, total, status').in('user_id', userIds);
 
   var statsById = {};
@@ -4897,7 +5488,7 @@ async function renderAdminCustomers() {
   }
 
   var searchBar = '<input type="text" placeholder="Search by name or email..." value="' + adminCustomerSearch.replace(/"/g, '&quot;') + '" ' +
-    'oninput="adminCustomerSearch=this.value; renderAdminCustomers();" ' +
+    'oninput="adminCustomerSearch=this.value; abortAdminSilentRefresh(); renderAdminCustomers();" ' +
     'style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:10px;"/>';
 
   var rows = shownProfiles.length ? shownProfiles
@@ -4911,6 +5502,13 @@ async function renderAdminCustomers() {
         '<p style="margin:0;font-weight:700;font-size:13px;">' + (p.full_name || 'Unnamed Customer') + (p.is_suspended ? ' <span style="color:#DC2626;font-size:10.5px;font-weight:700;">SUSPENDED</span>' : '') + '</p>' +
         '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.email || 'No email on file') + '</p>' +
         '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + (p.phone || 'No phone on file') + ' \u2022 Joined ' + formatDate(p.created_at) + '</p>' +
+        // Missed pick-ups are the one customer violation the system counts
+        // on its own, so admin can see it without digging. Panel item 10. //
+        ((p.pickup_no_show_count || 0) > 0
+          ? '<p style="margin:3px 0 0;font-size:11.5px;color:' + ((p.pickup_no_show_count >= PICKUP_NOSHOW_LIMIT) ? '#DC2626' : '#B45309') + ';"><i class="fas fa-store-slash"></i> ' +
+            p.pickup_no_show_count + ' missed pick-up' + (p.pickup_no_show_count === 1 ? '' : 's') +
+            (p.pickup_no_show_count >= PICKUP_NOSHOW_LIMIT ? ' \u2014 Pick-up locked' : '') + '</p>'
+          : '') +
         (p.is_suspended && p.suspended_reason ? '<p style="margin:4px 0 0;font-size:11px;color:#DC2626;">' + p.suspended_reason + '</p>' : '') +
         '</div>' +
         '<div style="text-align:right;">' +
@@ -4926,7 +5524,10 @@ async function renderAdminCustomers() {
   body.innerHTML = header +
     '<h3 style="margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;align-items:center;">' +
     '<span>Customers (' + (profiles || []).length + ')</span>' +
+    '<span style="display:flex;gap:6px;">' +
+    '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openSuspensionPolicyModal()"><i class="fas fa-gavel"></i> Suspension Policy</button>' +
     '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="openActivityLogFor(\'customer\')"><i class="fas fa-clock-rotate-left"></i> View Log</button>' +
+    '</span>' +
     '</h3>' +
     searchBar + rows;
 }
@@ -4962,7 +5563,7 @@ function orderMatchesDateFilter(order, filter, specificDate) {
 
 // #ADMIN_ORDERS_TAB
 async function renderAdminOrders() {
-  var body = document.getElementById('sn-admin-body');
+  var body = adminBodyEl();
   var header = '<h2 style="margin:0 0 4px;"><i class="fas fa-user-shield"></i> Admin</h2>' + adminTabsHtml();
 
   const { data: allOrders, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false }).limit(150);
@@ -4988,9 +5589,9 @@ async function renderAdminOrders() {
   ].map(function(d) { return '<option value="' + d[0] + '"' + (adminOrderDateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('');
 
   var filterBar = '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">' +
-    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminOrderFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminOrderFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminOrderFilter=\'all\'; renderAdminOrders();">All (' + orders.length + ')</button>' +
-    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminOrderFilter === 'disputed' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminOrderFilter === 'disputed' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminOrderFilter=\'disputed\'; renderAdminOrders();">Disputed (' + disputedCount + ')</button>' +
-    '<select onchange="adminOrderDateFilter=this.value; renderAdminOrders();" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;">' + dateOptions + '</select>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminOrderFilter === 'all' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (adminOrderFilter === 'all' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminOrderFilter=\'all\'; abortAdminSilentRefresh(); renderAdminOrders();">All (' + orders.length + ')</button>' +
+    '<button class="co-btn" style="flex:1;min-width:80px;background:' + (adminOrderFilter === 'disputed' ? '#DC2626' : '#F3F4F6') + ';color:' + (adminOrderFilter === 'disputed' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="adminOrderFilter=\'disputed\'; abortAdminSilentRefresh(); renderAdminOrders();">Disputed (' + disputedCount + ')</button>' +
+    '<select onchange="adminOrderDateFilter=this.value; abortAdminSilentRefresh(); renderAdminOrders();" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;">' + dateOptions + '</select>' +
     '</div>';
 
   var rows = shown.length
@@ -5008,6 +5609,22 @@ async function renderAdminOrders() {
               (o.proof_of_delivery_url
                 ? '<a href="' + o.proof_of_delivery_url + '" target="_blank" class="co-btn" style="display:inline-block;background:#F3F4F6;color:#333;font-size:12px;padding:6px 12px;margin-top:8px;text-decoration:none;"><i class="fas fa-camera"></i> View Delivery Photo</a>'
                 : '<p style="margin:6px 0 0;font-size:11px;color:#999;">No delivery photo on file for this order.</p>') +
+              // The evidence that decides a "was it really delivered"
+              // dispute — PIN verification and where the photo was taken.
+              // Panel item 7. //
+              '<div style="margin-top:8px;padding:8px 10px;background:#fff;border:1px solid #eee;border-radius:8px;">' +
+              '<p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#666;text-transform:uppercase;">Delivery evidence</p>' +
+              (o.pin_verified_at
+                ? '<p style="margin:0;font-size:11.5px;color:#15803D;"><i class="fas fa-shield-check"></i> PIN verified ' + timeAgo(o.pin_verified_at) + ' — the recipient gave the rider their code.</p>'
+                : '<p style="margin:0;font-size:11.5px;color:#B45309;"><i class="fas fa-shield-halved"></i> No PIN verification on this order.</p>') +
+              (o.proof_latitude != null && o.proof_longitude != null
+                ? '<p style="margin:3px 0 0;font-size:11.5px;color:#666;"><i class="fas fa-location-dot"></i> Photo taken at <a href="https://www.google.com/maps?q=' + o.proof_latitude + ',' + o.proof_longitude + '" target="_blank" rel="noopener" style="color:#3B82F6;">' + Number(o.proof_latitude).toFixed(5) + ', ' + Number(o.proof_longitude).toFixed(5) + '</a>' + (o.proof_accuracy_m ? ' (±' + Math.round(o.proof_accuracy_m) + 'm)' : '') + '</p>' +
+                  '<p style="margin:3px 0 0;font-size:11px;color:#999;">Delivery address on file: ' + ((o.shipping_street || '') + ', ' + (o.shipping_barangay || '') + ', ' + (o.shipping_city || '')).replace(/^,\s*|,\s*,/g, '') + '</p>'
+                : '<p style="margin:3px 0 0;font-size:11.5px;color:#999;"><i class="fas fa-location-dot"></i> No GPS recorded with the photo.</p>') +
+              (o.failed_attempt_reason
+                ? '<p style="margin:3px 0 0;font-size:11.5px;color:#991B1B;"><i class="fas fa-triangle-exclamation"></i> Logged failed attempt: ' + o.failed_attempt_reason + '</p>'
+                : '') +
+              '</div>' +
               '<button class="co-btn" style="background:#F0FFF4;color:#15803D;font-size:12px;padding:6px 12px;margin-top:8px;" onclick="adminResolveDispute(\'' + o.id + '\', \'' + o.order_code + '\')">Mark Resolved \u2014 Delivered</button>'
             : '') +
           '</div>';
@@ -5698,6 +6315,14 @@ function injectModals() {
     '<div class="login-body" id="sn-rider-alert-body"></div>' +
     '</div>' +
 
+    // Delivery PIN entry (rider). Deliberately NOT the rider-alert modal —
+    // that one is overwritten every 8s by incoming order alerts, which
+    // would wipe a half-typed PIN while the rider stands at the door.
+    '<div id="sn-deliveryPinOverlay" class="sn-overlay" onclick="closeDeliveryPinModal()"></div>' +
+    '<div id="sn-deliveryPinModal" class="sn-login-modal">' +
+    '<div class="login-body" id="sn-delivery-pin-body"></div>' +
+    '</div>' +
+
     // Report overlay + modal (reusable across contexts - reporting a store, rider, or customer)
     '<div id="sn-reportOverlay" class="sn-overlay" onclick="closeReportModal()"></div>' +
     '<div id="sn-reportModal" class="sn-login-modal">' +
@@ -5799,7 +6424,11 @@ var NOTIF_ICON_MAP = {
   'awaiting_confirmation':   'fa-clock',
   'ready_for_pickup':       'fa-store',
   'delivered':              'fa-check-circle',
-  'low_stock':              'fa-triangle-exclamation'
+  'low_stock':              'fa-triangle-exclamation',
+  'cancelled':              'fa-ban',
+  // Account-standing notifications — panel item 3
+  'account_suspended':      'fa-ban',
+  'account_reported':       'fa-flag'
 };
 
 var CONFIRMATION_GRACE_PERIOD_MS = 60000; // 1 minute grace period before nudging the customer
@@ -5932,6 +6561,11 @@ async function fetchMerchantNotifications() {
     });
   });
 
+  // Panel item 3 (applied to sellers too) — suspensions and customer
+  // reports against this store show up in its own notification feed. //
+  var merchantAccountNotifs = await fetchAccountStandingNotifications('merchant');
+  notifs = notifs.concat(merchantAccountNotifs);
+
   notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
   return notifs;
 }
@@ -5978,8 +6612,97 @@ async function fetchRiderNotifications() {
     });
   });
 
+  // Panel item 3 — the rider has to hear about it when their own account
+  // is acted on, not just about the orders they're carrying. //
+  var accountNotifs = await fetchAccountStandingNotifications('rider');
+  notifs = notifs.concat(accountNotifs);
+
   notifs.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
   return notifs;
+}
+
+// Account-standing notifications: suspensions and customer reports.
+// Written generically so the seller and customer notification feeds can
+// use the same source. The reporter is never named — get_reports_against_me()
+// deliberately withholds reporter_id so complaints stay anonymous.
+// #ACCOUNT_STANDING_NOTIFICATIONS
+async function fetchAccountStandingNotifications(roleKey) {
+  var out = [];
+  if (!currentUser) return out;
+
+  // 1. Suspension of this specific role's account //
+  try {
+    if (roleKey === 'rider') {
+      const { data: r } = await supabase
+        .from('riders').select('is_suspended, suspended_reason, suspended_at')
+        .eq('user_id', currentUser.id).single();
+      if (r && r.is_suspended) {
+        out.push({
+          order_id: null,
+          status: 'account_suspended',
+          label: 'Your Rider Account Is Suspended',
+          description: 'You cannot accept deliveries while suspended. Reason: ' +
+            (r.suspended_reason || 'No reason was given.') + ' Contact HomeWeb support if you believe this is a mistake.',
+          created_at: r.suspended_at || new Date().toISOString(),
+          orders: null,
+          isRiderNotif: roleKey === 'rider',
+          isAccountNotif: true
+        });
+      }
+    } else if (roleKey === 'merchant') {
+      const { data: m } = await supabase
+        .from('merchants').select('is_suspended, suspended_reason, suspended_at')
+        .eq('user_id', currentUser.id).single();
+      if (m && m.is_suspended) {
+        out.push({
+          order_id: null,
+          status: 'account_suspended',
+          label: 'Your Store Is Suspended',
+          description: 'Your listings are hidden and you cannot add or edit products. Reason: ' +
+            (m.suspended_reason || 'No reason was given.') + ' Contact HomeWeb support if you believe this is a mistake.',
+          created_at: m.suspended_at || new Date().toISOString(),
+          orders: null,
+          isMerchantNotif: true,
+          isAccountNotif: true
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[account-standing] suspension lookup failed', e);
+  }
+
+  // 2. Reports filed against this account by customers //
+  try {
+    const { data: reports, error } = await supabase.rpc('get_reports_against_me');
+    if (!error && reports) {
+      reports
+        .filter(function(r) { return r.reported_type === roleKey; })
+        .forEach(function(r) {
+          var resolved = r.status === 'resolved' || r.status === 'dismissed';
+          out.push({
+            order_id: null,
+            status: 'account_reported',
+            label: resolved
+              ? 'Report Against You — ' + (r.status === 'dismissed' ? 'Dismissed' : 'Resolved')
+              : 'A Customer Reported You',
+            description: (r.order_code ? 'Order #' + r.order_code + ': ' : '') +
+              'Reason given — "' + (r.reason || 'Not specified') + '". ' +
+              (resolved
+                ? 'HomeWeb has finished reviewing this report.'
+                : 'HomeWeb is reviewing this. Repeated valid reports can lead to suspension.'),
+            created_at: r.created_at,
+            orders: r.order_code ? { order_code: r.order_code } : null,
+            isRiderNotif: roleKey === 'rider',
+            isMerchantNotif: roleKey === 'merchant',
+            isAccountNotif: true
+          });
+        });
+    }
+  } catch (e) {
+    console.error('[account-standing] report lookup failed', e);
+  }
+
+  return out;
 }
 
 // Reword customer-facing status copy from the seller's point of view //
@@ -6124,6 +6847,33 @@ function notifItemHtml(n) {
     return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;cursor:pointer;" ' +
       'onclick="closeNotificationsModal(); merchantDashboardView=\'inventory\'; openMerchantDashboard();">' +
       '<div style="flex-shrink:0;width:36px;height:36px;border-radius:50%;background:#FFFBEB;color:#B45309;display:flex;align-items:center;justify-content:center;"><i class="fas ' + icon + '"></i></div>' +
+      '<div style="flex:1;">' +
+      '<p style="margin:0;font-weight:600;font-size:13.5px;">' + n.label + '</p>' +
+      '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + n.description + '</p>' +
+      '<p style="margin:4px 0 0;color:#aaa;font-size:11.5px;">' + timeAgo(n.created_at) + '</p>' +
+      '</div></div>';
+  }
+
+  // Account-standing alerts (suspension / reported by a customer) aren't
+  // tied to an order, so they get their own red styling and don't try to
+  // deep-link into order tracking. Panel item 3. //
+  if (n.isAccountNotif) {
+    var isSuspension = n.status === 'account_suspended';
+    var tone = isSuspension ? { bg: '#FEE2E2', fg: '#DC2626' } : { bg: '#FFFBEB', fg: '#B45309' };
+    return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<div style="flex-shrink:0;width:36px;height:36px;border-radius:50%;background:' + tone.bg + ';color:' + tone.fg + ';display:flex;align-items:center;justify-content:center;"><i class="fas ' + icon + '"></i></div>' +
+      '<div style="flex:1;">' +
+      '<p style="margin:0;font-weight:700;font-size:13.5px;color:' + tone.fg + ';">' + n.label + '</p>' +
+      '<p style="margin:2px 0 0;color:#555;font-size:12.5px;line-height:1.6;">' + n.description + '</p>' +
+      '<p style="margin:4px 0 0;color:#aaa;font-size:11.5px;">' + timeAgo(n.created_at) + '</p>' +
+      '</div></div>';
+  }
+
+  // Anything else without an order attached — render it plainly rather
+  // than dereferencing an order code that isn't there. //
+  if (!n.order_id || !n.orders || !n.orders.order_code) {
+    return '<div class="notif-item" style="display:flex;gap:12px;padding:12px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<div style="flex-shrink:0;width:36px;height:36px;border-radius:50%;background:#F3F4F6;color:#666;display:flex;align-items:center;justify-content:center;"><i class="fas ' + icon + '"></i></div>' +
       '<div style="flex:1;">' +
       '<p style="margin:0;font-weight:600;font-size:13.5px;">' + n.label + '</p>' +
       '<p style="margin:2px 0 0;color:#777;font-size:12.5px;">' + n.description + '</p>' +
@@ -6465,18 +7215,71 @@ function showMoreMerchantReviews(count) {
 }
 let merchantSalesSpecificDate = ''; // '' = not set; otherwise 'YYYY-MM-DD'
 
+// Panel item 12 — the Sales Report had a date filter and the Inventory and
+// Orders tabs didn't, so a seller could narrow their revenue to one day but
+// not the orders or stock movements behind it. Each tab keeps its own
+// selection so switching tabs doesn't silently reset the others.
+// #VENDOR_TAB_DATE_FILTERS
+let merchantInventoryDateFilter = 'all';
+let merchantInventorySpecificDate = '';
+
+var MERCHANT_DATE_PRESETS = [
+  ['all', 'All Time'], ['today', 'Today'], ['yesterday', 'Yesterday'],
+  ['week', 'Within a Week'], ['month', 'Within a Month'], ['year', 'Within a Year']
+];
+
+// Shared markup for the preset dropdown + exact-date picker pair, so all
+// three tabs get an identical control instead of three hand-rolled ones. //
+function merchantDateFilterHtml(opts) {
+  return '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">' +
+    '<select onchange="' + opts.onPreset + '(this.value)" style="padding:7px 12px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;"' + (opts.specificDate ? ' disabled' : '') + '>' +
+    MERCHANT_DATE_PRESETS.map(function(d) {
+      return '<option value="' + d[0] + '"' + (opts.dateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>';
+    }).join('') +
+    '</select>' +
+    '<span style="font-size:11.5px;color:#aaa;">or</span>' +
+    '<input type="date" onchange="' + opts.onExact + '(this.value)" value="' + (opts.specificDate || '') + '" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;" title="Pick an exact date"/>' +
+    (opts.specificDate
+      ? '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="' + opts.onClear + '()"><i class="fas fa-times"></i> Clear date</button>'
+      : '') +
+    (opts.countLabel ? '<span style="font-size:11.5px;color:#999;margin-left:auto;">' + opts.countLabel + '</span>' : '') +
+    '</div>';
+}
+
+function changeMerchantInventoryDateFilter(value) {
+  abortMerchantSilentRefresh();
+  merchantInventoryDateFilter = value;
+  merchantInventorySpecificDate = '';
+  fetchMerchantInventory().then(renderMerchantInventoryView);
+}
+
+function changeMerchantInventorySpecificDate(value) {
+  abortMerchantSilentRefresh();
+  merchantInventorySpecificDate = value;
+  fetchMerchantInventory().then(renderMerchantInventoryView);
+}
+
+function clearMerchantInventorySpecificDate() {
+  abortMerchantSilentRefresh();
+  merchantInventorySpecificDate = '';
+  fetchMerchantInventory().then(renderMerchantInventoryView);
+}
+
 function changeMerchantSalesDateFilter(value) {
+  abortMerchantSilentRefresh();
   merchantSalesDateFilter = value;
   merchantSalesSpecificDate = ''; // choosing a preset range clears any exact date
   fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
 }
 
 function changeMerchantSalesSpecificDate(value) {
+  abortMerchantSilentRefresh();
   merchantSalesSpecificDate = value;
   fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
 }
 
 function clearMerchantSalesSpecificDate() {
+  abortMerchantSilentRefresh();
   merchantSalesSpecificDate = '';
   fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
 }
@@ -6503,7 +7306,7 @@ async function openMerchantDashboard(e) {
   document.getElementById('sn-merchantModal').classList.add('active');
   document.body.style.overflow = 'hidden';
 
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   body.innerHTML = '<div class="track-empty"><p>Loading your store...</p></div>';
 
   if (!myMerchantId) {
@@ -6528,12 +7331,97 @@ async function openMerchantDashboard(e) {
 
   await loadMyMerchantProducts();
   renderMerchantDashboard();
+  startMerchantPolling();
+}
+
+// Panel item 11 — the store dashboard never refreshed itself, so a seller
+// sat on a stale screen while new orders came in. Same silent technique
+// as the admin panel: rebuild off-screen, only touch the page when the
+// markup actually changed, and keep the scroll position across the swap.
+// #MERCHANT_SILENT_REFRESH
+let merchantPollIntervalId = null;
+var MERCHANT_POLL_MS = 8000;
+
+function startMerchantPolling() {
+  if (merchantPollIntervalId) clearInterval(merchantPollIntervalId);
+  merchantPollIntervalId = setInterval(async function() {
+    var modal = document.getElementById('sn-merchantModal');
+    if (!modal || !modal.classList.contains('active')) {
+      clearInterval(merchantPollIntervalId);
+      merchantPollIntervalId = null;
+      return;
+    }
+
+    // Never re-render out from under a seller who's typing, or while
+    // the product form / any other modal is stacked on top. //
+    var active = document.activeElement;
+    var body = merchantBodyEl();
+    if (active && body && body.contains(active) &&
+        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT')) return;
+
+    var blockingModals = ['sn-productFormModal', 'sn-stockModal', 'sn-productModal', 'sn-chatModal'];
+    var blocked = blockingModals.some(function(id) {
+      var el = document.getElementById(id);
+      return el && el.classList.contains('active');
+    });
+    if (blocked) return;
+
+    await refreshMerchantDashboardSilently();
+  }, MERCHANT_POLL_MS);
+}
+
+var merchantSilentRefreshInFlight = false;
+var merchantSilentRefreshStale = false;
+
+// Same mechanism as the admin panel — see adminBodyEl(). //
+var merchantRenderTarget = null;
+function merchantBodyEl() {
+  return merchantRenderTarget || document.getElementById('sn-merchant-body');
+}
+
+function abortMerchantSilentRefresh() {
+  if (!merchantSilentRefreshInFlight) return;
+  merchantSilentRefreshStale = true;
+  merchantRenderTarget = null;
+}
+
+async function refreshMerchantDashboardSilently() {
+  if (merchantSilentRefreshInFlight) return;
+  var live = document.getElementById('sn-merchant-body');
+  if (!live) return;
+
+  merchantSilentRefreshInFlight = true;
+  merchantSilentRefreshStale = false;
+  var staging = document.createElement('div');
+  var newHtml = '';
+
+  try {
+    // Inside the try so a failed product fetch can't strand the flag. //
+    await loadMyMerchantProducts();
+    merchantRenderTarget = staging;
+    await renderMerchantDashboard();
+    newHtml = staging.innerHTML;
+  } catch (e) {
+    console.error('[store-refresh] silent render failed', e);
+  } finally {
+    if (merchantRenderTarget === staging) merchantRenderTarget = null;
+    merchantSilentRefreshInFlight = false;
+  }
+
+  if (merchantSilentRefreshStale) { merchantSilentRefreshStale = false; return; }
+  if (!newHtml || newHtml === live.innerHTML) return;
+
+  var scroller = document.getElementById('sn-merchantModal');
+  var savedScroll = scroller ? scroller.scrollTop : 0;
+  live.innerHTML = newHtml;
+  if (scroller) scroller.scrollTop = savedScroll;
 }
 
 function closeMerchantDashboard() {
   document.getElementById('sn-merchantOverlay').classList.remove('active');
   document.getElementById('sn-merchantModal').classList.remove('active');
   document.body.style.overflow = '';
+  if (merchantPollIntervalId) { clearInterval(merchantPollIntervalId); merchantPollIntervalId = null; }
 }
 
 async function loadMyMerchantProducts() {
@@ -6614,7 +7502,8 @@ async function fetchMerchantSales(dateFilter, specificDate) {
     }
   });
 
-  var topProducts = Object.values(byProduct).sort(function(a, b) { return b.revenue - a.revenue; }).slice(0, 5);
+  var allProductSales = Object.values(byProduct).sort(function(a, b) { return b.revenue - a.revenue; });
+  var topProducts = allProductSales.slice(0, 5);
   var productProfits = Object.values(byProduct).sort(function(a, b) { return b.profit - a.profit; });
   var orderIds = Object.keys(orderIdSet);
 
@@ -6655,6 +7544,9 @@ async function fetchMerchantSales(dateFilter, specificDate) {
     totalItems: totalItems,
     orderCount: orderIds.length,
     topProducts: topProducts,
+    // Panel item 13 — every product sold in the period, not just the top 5,
+    // so the report can total them up. //
+    allProductSales: allProductSales,
     productProfits: productProfits,
     dateFilter: dateFilter,
     specificDate: specificDate,
@@ -6704,7 +7596,7 @@ async function fetchMerchantReviews() {
 
 // #VENDOR_REVIEWS_TAB
 function renderMerchantReviewsView(data) {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
@@ -6771,14 +7663,30 @@ function renderMerchantReviewsView(data) {
 
 let merchantOrdersGroupBy = 'date'; // 'date' | 'product'
 let merchantOrdersDateFilter = 'all';
+let merchantOrdersSpecificDate = ''; // '' = not set; otherwise 'YYYY-MM-DD'
 let merchantOrdersProductFilter = 'all';
 
+function changeMerchantOrdersSpecificDate(value) {
+  abortMerchantSilentRefresh();
+  merchantOrdersSpecificDate = value;
+  renderMerchantOrdersView({ orders: window.__lastMerchantOrders });
+}
+
+function clearMerchantOrdersSpecificDate() {
+  abortMerchantSilentRefresh();
+  merchantOrdersSpecificDate = '';
+  renderMerchantOrdersView({ orders: window.__lastMerchantOrders });
+}
+
 function changeMerchantOrdersDateFilter(value) {
+  abortMerchantSilentRefresh();
   merchantOrdersDateFilter = value;
+  merchantOrdersSpecificDate = ''; // a preset range and an exact date are mutually exclusive
   renderMerchantOrdersView({ orders: window.__lastMerchantOrders });
 }
 
 function changeMerchantOrdersProductFilter(value) {
+  abortMerchantSilentRefresh();
   merchantOrdersProductFilter = value;
   renderMerchantOrdersView({ orders: window.__lastMerchantOrders });
 }
@@ -6786,7 +7694,7 @@ function changeMerchantOrdersProductFilter(value) {
 async function fetchMerchantOrdersFull() {
   const { data, error } = await supabase
     .from('order_items')
-    .select('qty, price, product_id, product_name, products!inner(name, merchant_id), orders(id, order_code, status, created_at, payment_method, user_id, delivery_option)')
+    .select('qty, price, product_id, product_name, products!inner(name, merchant_id), orders(id, order_code, status, created_at, payment_method, user_id, delivery_option, recipient_name, proof_of_delivery_url, pin_verified_at, proof_latitude, proof_longitude)')
     .eq('products.merchant_id', myMerchantId)
     .order('orders(created_at)', { ascending: false });
 
@@ -6798,7 +7706,7 @@ async function fetchMerchantOrdersFull() {
     if (!r.orders) return;
     var oid = r.orders.id;
     if (!byOrder[oid]) {
-      byOrder[oid] = { orderId: oid, orderCode: r.orders.order_code, status: r.orders.status, deliveryOption: r.orders.delivery_option, createdAt: r.orders.created_at, paymentMethod: r.orders.payment_method, items: [], total: 0 };
+      byOrder[oid] = { orderId: oid, orderCode: r.orders.order_code, status: r.orders.status, deliveryOption: r.orders.delivery_option, createdAt: r.orders.created_at, paymentMethod: r.orders.payment_method, recipientName: r.orders.recipient_name, proofUrl: r.orders.proof_of_delivery_url, pinVerifiedAt: r.orders.pin_verified_at, proofLat: r.orders.proof_latitude, proofLng: r.orders.proof_longitude, items: [], total: 0 };
       order.push(oid);
     }
     byOrder[oid].items.push({ name: r.product_name || (r.products ? r.products.name : 'Item'), qty: r.qty, price: r.price });
@@ -6821,7 +7729,7 @@ function dateGroupLabel(iso) {
 
 // #VENDOR_ORDERS_TAB
 function renderMerchantOrdersView(data) {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
@@ -6837,18 +7745,22 @@ function renderMerchantOrdersView(data) {
   }
 
   var groupToggle = '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
-    '<button class="co-btn" style="flex:1;background:' + (merchantOrdersGroupBy === 'date' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantOrdersGroupBy === 'date' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="merchantOrdersGroupBy=\'date\'; renderMerchantOrdersView({orders:' + 'window.__lastMerchantOrders' + '});">Group by Date</button>' +
-    '<button class="co-btn" style="flex:1;background:' + (merchantOrdersGroupBy === 'product' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantOrdersGroupBy === 'product' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="merchantOrdersGroupBy=\'product\'; renderMerchantOrdersView({orders:' + 'window.__lastMerchantOrders' + '});">Group by Product</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (merchantOrdersGroupBy === 'date' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantOrdersGroupBy === 'date' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="merchantOrdersGroupBy=\'date\'; abortMerchantSilentRefresh(); renderMerchantOrdersView({orders:' + 'window.__lastMerchantOrders' + '});">Group by Date</button>' +
+    '<button class="co-btn" style="flex:1;background:' + (merchantOrdersGroupBy === 'product' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantOrdersGroupBy === 'product' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="merchantOrdersGroupBy=\'product\'; abortMerchantSilentRefresh(); renderMerchantOrdersView({orders:' + 'window.__lastMerchantOrders' + '});">Group by Product</button>' +
     '</div>';
   window.__lastMerchantOrders = data.orders;
 
   // second filter changes depending on the grouping mode //
   var subFilter;
   if (merchantOrdersGroupBy === 'date') {
-    subFilter = '<select onchange="changeMerchantOrdersDateFilter(this.value)" style="width:100%;padding:9px 14px;border:1px solid #e5e5e5;border-radius:8px;font-size:13px;margin-bottom:14px;">' +
-      [['all', 'All Time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Within a Week'], ['month', 'Within a Month'], ['year', 'Within a Year']]
-        .map(function(d) { return '<option value="' + d[0] + '"' + (merchantOrdersDateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('') +
-      '</select>';
+    // Panel item 12 — same preset + exact-date pair the Sales Report has. //
+    subFilter = merchantDateFilterHtml({
+      dateFilter: merchantOrdersDateFilter,
+      specificDate: merchantOrdersSpecificDate,
+      onPreset: 'changeMerchantOrdersDateFilter',
+      onExact: 'changeMerchantOrdersSpecificDate',
+      onClear: 'clearMerchantOrdersSpecificDate'
+    });
   } else {
     var allProductNames = {};
     data.orders.forEach(function(o) { o.items.forEach(function(it) { allProductNames[it.name] = true; }); });
@@ -6863,7 +7775,7 @@ function renderMerchantOrdersView(data) {
   if (!data.orders.length) {
     content = '<p style="color:#999;font-size:13px;">No orders yet.</p>';
   } else if (merchantOrdersGroupBy === 'date') {
-    var dateFiltered = data.orders.filter(function(o) { return orderMatchesDateFilter({ created_at: o.createdAt }, merchantOrdersDateFilter); });
+    var dateFiltered = data.orders.filter(function(o) { return orderMatchesDateFilter({ created_at: o.createdAt }, merchantOrdersDateFilter, merchantOrdersSpecificDate); });
     if (!dateFiltered.length) {
       content = '<p style="color:#999;font-size:13px;">No orders in this period.</p>';
     } else {
@@ -6916,6 +7828,19 @@ function orderRowHtml(o) {
     '<span style="font-weight:700;font-size:13px;">' + fmt(o.total) + '</span></div>' +
     '<p style="margin:2px 0 0;font-size:12px;color:#777;">' + itemsSummary + '</p>' +
     '<p style="margin:2px 0 0;font-size:11.5px;color:#999;">' + statusInfo.label + ' \u2022 ' + (o.paymentMethod === 'cod' ? 'COD' : 'GCash') + (o.deliveryOption === 'pickup' ? ' \u2022 <i class="fas fa-store"></i> Pick-up' : '') + '</p>' +
+    // Panel item 1 — the seller packs for a named recipient. //
+    (o.recipientName ? '<p style="margin:2px 0 0;font-size:11.5px;color:#777;"><i class="fas fa-user"></i> For: <b>' + o.recipientName + '</b></p>' : '') +
+    // Panel item 2 — the seller can see the delivery was actually proven,
+    // not just take the status word for it. //
+    (o.proofUrl
+      ? '<p style="margin:5px 0 0;font-size:11.5px;">' +
+        '<a href="' + o.proofUrl + '" target="_blank" rel="noopener" style="color:#3B82F6;text-decoration:underline;"><i class="fas fa-camera"></i> View proof of delivery</a>' +
+        (o.pinVerifiedAt ? ' <span style="color:#15803D;"><i class="fas fa-shield-check"></i> PIN verified</span>' : '') +
+        (o.proofLat != null && o.proofLng != null
+          ? ' <a href="https://www.google.com/maps?q=' + o.proofLat + ',' + o.proofLng + '" target="_blank" rel="noopener" style="color:#3B82F6;"><i class="fas fa-location-dot"></i> location</a>'
+          : '') +
+        '</p>'
+      : '') +
     merchantPickupActionsHtml(o) +
     '</div>';
 }
@@ -6971,11 +7896,13 @@ let merchantInventoryProductFilter = 'all';
 let merchantInventoryTypeFilter = 'all'; // 'all' | 'in' | 'out'
 
 function changeInventoryProductFilter(value) {
+  abortMerchantSilentRefresh();
   merchantInventoryProductFilter = value;
   renderMerchantDashboard();
 }
 
 function changeInventoryTypeFilter(value) {
+  abortMerchantSilentRefresh();
   merchantInventoryTypeFilter = value;
   renderMerchantDashboard();
 }
@@ -7007,7 +7934,7 @@ let myMerchantInventoryData = null;
 
 function renderMerchantInventoryView(data) {
   myMerchantInventoryData = data;
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:var(--primary,#22C55E);color:#fff;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
@@ -7048,10 +7975,15 @@ function renderMerchantInventoryView(data) {
       '</tbody></table></div>'
     : '<p style="color:#999;font-size:13px;">No products yet.</p>';
 
-  // same dropdown pattern as the Sales Report date filter //
+  // Panel item 12 — the ledger gets the same date filtering the Sales
+  // Report has, so "what moved on the 14th" is answerable here too. //
+  var dateFilteredMovements = data.movements.filter(function(m) {
+    return orderMatchesDateFilter({ created_at: m.created_at }, merchantInventoryDateFilter, merchantInventorySpecificDate);
+  });
+
   var byProduct = {};
   var productOrder = [];
-  data.movements.forEach(function(m) {
+  dateFilteredMovements.forEach(function(m) {
     var pname = m.products ? m.products.name : 'Unknown product';
     if (!byProduct[pname]) { byProduct[pname] = []; productOrder.push(pname); }
     byProduct[pname].push(m);
@@ -7070,7 +8002,17 @@ function renderMerchantInventoryView(data) {
       .map(function(t) { return '<option value="' + t[0] + '"' + (merchantInventoryTypeFilter === t[0] ? ' selected' : '') + '>' + t[1] + '</option>'; }).join('') +
     '</select>';
 
-  var inventoryFilters = '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">' + productFilterDropdown + typeFilterDropdown + '</div>';
+  var inventoryDateFilter = merchantDateFilterHtml({
+    dateFilter: merchantInventoryDateFilter,
+    specificDate: merchantInventorySpecificDate,
+    onPreset: 'changeMerchantInventoryDateFilter',
+    onExact: 'changeMerchantInventorySpecificDate',
+    onClear: 'clearMerchantInventorySpecificDate',
+    countLabel: dateFilteredMovements.length + ' movement' + (dateFilteredMovements.length === 1 ? '' : 's')
+  });
+
+  var inventoryFilters = inventoryDateFilter +
+    '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">' + productFilterDropdown + typeFilterDropdown + '</div>';
 
   var shownProducts = merchantInventoryProductFilter === 'all' ? productOrder : productOrder.filter(function(p) { return p === merchantInventoryProductFilter; });
 
@@ -7109,8 +8051,12 @@ function renderMerchantInventoryView(data) {
   // If the type filter left nothing to show, say so explicitly. //
   if (!ledgerHtml) {
     var typeLabel = merchantInventoryTypeFilter === 'in' ? 'stock in' : (merchantInventoryTypeFilter === 'out' ? 'stock out' : 'stock movements');
+    var periodLabel = merchantInventorySpecificDate
+      ? ' on ' + merchantInventorySpecificDate
+      : (merchantInventoryDateFilter !== 'all' ? ' in this period' : '');
     ledgerHtml = '<p style="color:#999;font-size:13px;">No ' + typeLabel +
-      (merchantInventoryProductFilter !== 'all' ? ' for ' + merchantInventoryProductFilter : '') + ' yet.</p>';
+      (merchantInventoryProductFilter !== 'all' ? ' for ' + merchantInventoryProductFilter : '') +
+      (periodLabel || ' yet') + '.</p>';
   }
 
   body.innerHTML =
@@ -7142,7 +8088,7 @@ function gaugeSvg(pct, color, size) {
 
 // #VENDOR_SALES_REPORT
 function renderMerchantSalesView() {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:#F3F4F6;color:#333;font-size:12.5px;" onclick="switchMerchantView(\'inventory\')">Inventory</button>' +
@@ -7232,18 +8178,25 @@ function renderMerchantSalesView() {
           '<td style="padding:8px 4px;text-align:right;color:#B45309;">' + fmt(p.cost) + '</td>' +
           '<td style="padding:8px 4px;text-align:right;font-weight:700;color:' + (p.profit >= 0 ? '#15803D' : '#DC2626') + ';">' + fmt(p.profit) + '</td>' +
           '</tr>';
-      }).join('') + '</tbody></table></div>'
+      }).join('') +
+      // Totals row — panel item 13 //
+      '</tbody><tfoot><tr style="border-top:2px solid #333;background:#F9FAFB;">' +
+      '<td style="padding:10px 4px;font-weight:700;">TOTAL</td>' +
+      '<td style="padding:10px 4px;text-align:right;font-weight:700;">' + productsWithCost.reduce(function(a, p) { return a + p.qty; }, 0) + '</td>' +
+      '<td style="padding:10px 4px;text-align:right;font-weight:700;">' + fmt(productsWithCost.reduce(function(a, p) { return a + p.revenue; }, 0)) + '</td>' +
+      '<td style="padding:10px 4px;text-align:right;font-weight:700;color:#B45309;">' + fmt(productsWithCost.reduce(function(a, p) { return a + p.cost; }, 0)) + '</td>' +
+      '<td style="padding:10px 4px;text-align:right;font-weight:700;color:' + (productsWithCost.reduce(function(a, p) { return a + p.profit; }, 0) >= 0 ? '#15803D' : '#DC2626') + ';">' + fmt(productsWithCost.reduce(function(a, p) { return a + p.profit; }, 0)) + '</td>' +
+      '</tr></tfoot></table></div>'
     : '';
 
-  var dateFilterDropdown = '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">' +
-    '<select onchange="changeMerchantSalesDateFilter(this.value)" style="padding:7px 12px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;"' + (s.specificDate ? ' disabled' : '') + '>' +
-    [['all', 'All Time'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Within a Week'], ['month', 'Within a Month'], ['year', 'Within a Year']]
-      .map(function(d) { return '<option value="' + d[0] + '"' + (s.dateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('') +
-    '</select>' +
-    '<span style="font-size:11.5px;color:#aaa;">or</span>' +
-    '<input type="date" onchange="changeMerchantSalesSpecificDate(this.value)" value="' + (s.specificDate || '') + '" style="padding:6px 10px;border-radius:8px;border:1px solid #e5e5e5;font-size:12.5px;" title="Pick an exact date"/>' +
-    (s.specificDate ? '<button class="co-btn" style="padding:5px 10px;background:#F3F4F6;color:#333;font-size:11.5px;" onclick="clearMerchantSalesSpecificDate()"><i class="fas fa-times"></i> Clear date</button>' : '') +
-    '</div>';
+  // Shared control, identical to the Inventory and Orders tabs. //
+  var dateFilterDropdown = merchantDateFilterHtml({
+    dateFilter: s.dateFilter,
+    specificDate: s.specificDate,
+    onPreset: 'changeMerchantSalesDateFilter',
+    onExact: 'changeMerchantSalesSpecificDate',
+    onClear: 'clearMerchantSalesSpecificDate'
+  });
 
   // real week-over-week, no fabricated year comparison //
   var wowHtml;
@@ -7264,6 +8217,47 @@ function renderMerchantSalesView() {
           '<span style="font-size:13px;color:#777;">' + p.qty + ' sold \u2022 ' + fmt(p.revenue) + '</span></div>';
       }).join('')
     : '<p style="color:#999;font-size:13px;">No sales yet.</p>';
+
+  // Panel item 13 — "Total Product Sales": every product sold in the
+  // selected period with its own total, footed by a grand total so the
+  // figures on this page visibly add up to the Total Revenue card above.
+  // #VENDOR_TOTAL_PRODUCT_SALES
+  var allSales = s.allProductSales || [];
+  var salesQtyTotal = allSales.reduce(function(a, p) { return a + p.qty; }, 0);
+  var salesRevenueTotal = allSales.reduce(function(a, p) { return a + p.revenue; }, 0);
+
+  var totalProductSalesHtml = allSales.length
+    ? '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12.5px;">' +
+      '<thead><tr style="border-bottom:2px solid #eee;text-align:left;color:#999;font-size:11px;text-transform:uppercase;">' +
+      '<th style="padding:6px 4px;">Product</th>' +
+      '<th style="padding:6px 4px;text-align:right;">Qty Sold</th>' +
+      '<th style="padding:6px 4px;text-align:right;">Avg Price</th>' +
+      '<th style="padding:6px 4px;text-align:right;">Total Sales</th></tr></thead><tbody>' +
+      allSales.map(function(p) {
+        return '<tr style="border-bottom:1px solid #f5f5f5;">' +
+          '<td style="padding:8px 4px;">' + p.name + '</td>' +
+          '<td style="padding:8px 4px;text-align:right;">' + p.qty + '</td>' +
+          '<td style="padding:8px 4px;text-align:right;color:#777;">' + fmt(p.qty > 0 ? p.revenue / p.qty : 0) + '</td>' +
+          '<td style="padding:8px 4px;text-align:right;font-weight:600;">' + fmt(p.revenue) + '</td></tr>';
+      }).join('') +
+      '</tbody><tfoot><tr style="border-top:2px solid #333;background:#F0FFF4;">' +
+      '<td style="padding:10px 4px;font-weight:700;">TOTAL (' + allSales.length + ' product' + (allSales.length === 1 ? '' : 's') + ')</td>' +
+      '<td style="padding:10px 4px;text-align:right;font-weight:700;">' + salesQtyTotal + '</td>' +
+      '<td style="padding:10px 4px;"></td>' +
+      '<td style="padding:10px 4px;text-align:right;font-weight:700;color:var(--primary,#22C55E);">' + fmt(salesRevenueTotal) + '</td>' +
+      '</tr></tfoot></table></div>'
+    : '<p style="color:#999;font-size:13px;">No product sales in this period.</p>';
+
+  // The single bottom-line figure the panel asked for. //
+  var grandTotalHtml = '<div style="background:var(--primary,#22C55E);border-radius:10px;padding:16px;margin-bottom:4px;color:#fff;">' +
+    '<div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+    '<span style="font-size:12.5px;opacity:0.9;">TOTAL SALES' + (s.specificDate ? ' \u2014 ' + s.specificDate : (s.dateFilter && s.dateFilter !== 'all' ? ' \u2014 ' + s.dateFilter : ' \u2014 all time')) + '</span>' +
+    '<span style="font-size:22px;font-weight:700;">' + fmt(s.totalRevenue) + '</span>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:space-between;margin-top:6px;font-size:11.5px;opacity:0.9;">' +
+    '<span>' + s.orderCount + ' order' + (s.orderCount === 1 ? '' : 's') + ' \u2022 ' + s.totalItems + ' item' + (s.totalItems === 1 ? '' : 's') + ' \u2022 ' + allSales.length + ' product' + (allSales.length === 1 ? '' : 's') + '</span>' +
+    '<span>Avg order ' + fmt(s.orderCount > 0 ? s.totalRevenue / s.orderCount : 0) + '</span>' +
+    '</div></div>';
 
   var recentOrdersHtml = (s.recentOrders && s.recentOrders.length)
     ? s.recentOrders.map(function(o) {
@@ -7294,11 +8288,13 @@ function renderMerchantSalesView() {
     dateFilterDropdown +
     summaryCards +
     gaugesHtml +
-    '<h3 style="margin:0 0 8px;font-size:14px;">This Week vs Last Week</h3>' + wowHtml +
+    grandTotalHtml +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">This Week vs Last Week</h3>' + wowHtml +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Revenue by Category</h3>' + categoryChartHtml +
     '<h3 style="margin:18px 0 8px;font-size:14px;">Net Profit</h3>' + profitHtml +
     (productProfitHtml ? '<h3 style="margin:18px 0 8px;font-size:14px;">Profit by Product</h3>' + productProfitHtml : '') +
-    '<h3 style="margin:18px 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml;
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Top Products</h3>' + topProductsHtml +
+    '<h3 style="margin:18px 0 8px;font-size:14px;">Total Product Sales</h3>' + totalProductSalesHtml;
 }
 
 // Builds the PDF from real data instead of screenshotting the dashboard —
@@ -7384,10 +8380,12 @@ function buildSalesReportPDF() {
     theme: 'plain',
     styles: { fontSize: 10, cellPadding: 4 },
     body: [
-      ['Total Revenue', fmtPlain(s.totalRevenue)],
+      ['TOTAL SALES', fmtPlain(s.totalRevenue)],
       ['Net Profit', fmtPlain(s.knownProfit)],
-      ['Items Sold', String(s.totalItems)],
+      ['Total Items Sold', String(s.totalItems)],
       ['Total Orders', String(s.orderCount)],
+      ['Products Sold', String((s.allProductSales || []).length)],
+      ['Average Order Value', fmtPlain(s.orderCount > 0 ? s.totalRevenue / s.orderCount : 0)],
       ['Completion Rate', (s.completionRate != null ? s.completionRate + '%' : 'N/A')],
       ['Sell-through Rate', (s.sellThroughRate != null ? s.sellThroughRate + '%' : 'N/A')]
     ],
@@ -7410,16 +8408,28 @@ function buildSalesReportPDF() {
       head: [['Product', 'Units', 'Revenue', 'Supplier Cost', 'Profit']],
       body: productsWithCost.map(function(p) {
         return [p.name, String(p.qty), fmtPlain(p.revenue), fmtPlain(p.cost), fmtPlain(p.profit)];
-      })
+      }),
+      // Panel item 13 — the exported table has to add up on the page. //
+      foot: [[
+        'TOTAL',
+        String(productsWithCost.reduce(function(a, p) { return a + p.qty; }, 0)),
+        fmtPlain(productsWithCost.reduce(function(a, p) { return a + p.revenue; }, 0)),
+        fmtPlain(productsWithCost.reduce(function(a, p) { return a + p.cost; }, 0)),
+        fmtPlain(productsWithCost.reduce(function(a, p) { return a + p.profit; }, 0))
+      ]],
+      footStyles: { fillColor: [240, 255, 244], textColor: [20, 20, 20], fontStyle: 'bold' }
     });
     y = doc.lastAutoTable.finalY + 24;
   }
 
-  // Top Products table
-  if (s.topProducts && s.topProducts.length) {
+  // Total Product Sales — every product sold in the period, with a totals
+  // row. Replaces the old top-5-only table, which couldn't be reconciled
+  // against Total Revenue. Panel item 13. //
+  var allSales = s.allProductSales || [];
+  if (allSales.length) {
     if (y > doc.internal.pageSize.getHeight() - 120) { doc.addPage(); y = margin; }
     doc.setFontSize(12);
-    doc.text('Top Products', margin, y);
+    doc.text('Total Product Sales', margin, y);
     y += 6;
     doc.autoTable({
       startY: y,
@@ -7427,11 +8437,19 @@ function buildSalesReportPDF() {
       theme: 'striped',
       headStyles: { fillColor: [34, 197, 94] },
       styles: { fontSize: 9, cellPadding: 4 },
-      head: [['Product', 'Units Sold', 'Revenue']],
-      body: s.topProducts.map(function(p) {
-        return [p.name, String(p.qty), fmtPlain(p.revenue)];
-      })
+      head: [['Product', 'Qty Sold', 'Avg Price', 'Total Sales']],
+      body: allSales.map(function(p) {
+        return [p.name, String(p.qty), fmtPlain(p.qty > 0 ? p.revenue / p.qty : 0), fmtPlain(p.revenue)];
+      }),
+      foot: [[
+        'TOTAL (' + allSales.length + ' product' + (allSales.length === 1 ? '' : 's') + ')',
+        String(allSales.reduce(function(a, p) { return a + p.qty; }, 0)),
+        '',
+        fmtPlain(allSales.reduce(function(a, p) { return a + p.revenue; }, 0))
+      ]],
+      footStyles: { fillColor: [240, 255, 244], textColor: [20, 20, 20], fontStyle: 'bold' }
     });
+    y = doc.lastAutoTable.finalY + 24;
   }
 
   doc.save('HomeWeb_Sales_Report_' + new Date().toISOString().slice(0, 10) + '.pdf');
@@ -7547,7 +8565,7 @@ function downloadSalesReportImage() {
 }
 
 function captureSalesReportImage() {
-  var target = document.getElementById('sn-merchant-body');
+  var target = merchantBodyEl();
   if (!target) return;
 
   // Temporarily hide the export/tab buttons so they don't appear in the image //
@@ -7570,7 +8588,7 @@ function captureSalesReportImage() {
 
 // #VENDOR_DASHBOARD_TABS
 function renderMerchantDashboard() {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
 
   var tabs = '<div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">' +
     '<button class="co-btn" style="flex:1;min-width:80px;background:' + (merchantDashboardView === 'products' ? 'var(--primary,#22C55E)' : '#F3F4F6') + ';color:' + (merchantDashboardView === 'products' ? '#fff' : '#333') + ';font-size:12.5px;" onclick="switchMerchantView(\'products\')">Products</button>' +
@@ -7583,44 +8601,40 @@ function renderMerchantDashboard() {
 
   if (merchantDashboardView === 'orders') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading orders...</p></div>';
-    fetchMerchantOrdersFull().then(renderMerchantOrdersView);
-    return;
+    return fetchMerchantOrdersFull().then(renderMerchantOrdersView);
   }
 
   if (merchantDashboardView === 'sales') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading sales report...</p></div>';
-    fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
-    return;
+    return fetchMerchantSales(merchantSalesDateFilter, merchantSalesSpecificDate).then(renderMerchantSalesView);
   }
 
   if (merchantDashboardView === 'reviews') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading reviews...</p></div>';
-    fetchMerchantReviews().then(renderMerchantReviewsView);
-    return;
+    return fetchMerchantReviews().then(renderMerchantReviewsView);
   }
 
   if (merchantDashboardView === 'inventory') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading inventory...</p></div>';
-    fetchMerchantInventory().then(renderMerchantInventoryView);
-    return;
+    return fetchMerchantInventory().then(renderMerchantInventoryView);
   }
 
   if (merchantDashboardView === 'verify') {
     body.innerHTML = '<h2 style="margin:0 0 4px;">My Store</h2>' + tabs + '<div class="track-empty"><p>Loading...</p></div>';
-    renderMerchantVerificationView(tabs);
-    return;
+    return renderMerchantVerificationView(tabs);
   }
 
-  renderMerchantProductsView(tabs);
+  return renderMerchantProductsView(tabs);
 }
 
 async function switchMerchantView(view) {
+  abortMerchantSilentRefresh();
   merchantDashboardView = view;
-  renderMerchantDashboard();
+  return renderMerchantDashboard();
 }
 
 async function renderMerchantVerificationView(tabs) {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
 
   const { data: merchant, error } = await supabase.from('merchants').select('*').eq('id', myMerchantId).single();
   if (error || !merchant) {
@@ -7761,7 +8775,7 @@ async function removeStoreLogo() {
 }
 
 async function viewProductReviews(productId, productName) {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   body.innerHTML = '<div class="track-empty"><p>Loading reviews...</p></div>';
 
   const { data, error } = await supabase
@@ -7781,7 +8795,7 @@ async function viewProductReviews(productId, productName) {
 }
 
 function renderMerchantProductsView(tabs) {
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
 
   var rows = myMerchantProducts.map(function(p) {
     var meta = CATEGORY_META[p.category] || DEFAULT_CATEGORY_META;
@@ -7816,7 +8830,7 @@ function renderMerchantProductsView(tabs) {
 function openProductForm(productId) {
   editingProductId = productId;
   pendingProductImageFile = null;
-  var body = document.getElementById('sn-merchant-body');
+  var body = merchantBodyEl();
   var p = productId ? myMerchantProducts.find(function(x) { return x.id === productId; }) : null;
 
   // A store's category is set once at signup (Products Sold) and every
@@ -8159,6 +9173,10 @@ function stopRiderAlertPolling() {
 
 // #RIDER_ORDER_ALERT_POPUP
 async function checkForRiderOrderAlert() {
+  // Never interrupt a delivery being completed — the rider is standing at
+  // the customer's door mid-PIN. The alert will fire on the next tick. //
+  if (deliveryPinModalOpen) return;
+
   if (!currentUser || userRoles.indexOf('rider') === -1) {
     console.log('[rider-alert] skipped: not logged in as a rider on this device', { hasUser: !!currentUser, roles: userRoles });
     return;
@@ -8250,7 +9268,7 @@ async function showRiderOrderAlert(orders) {
     .eq('rider_user_id', currentUser.id)
     .gte('created_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
 
-  var rejectionsLeft = Math.max(0, 3 - (rejectionsToday || 0));
+  var rejectionsLeft = Math.max(0, RIDER_DAILY_REJECTION_LIMIT - (rejectionsToday || 0));
 
   body.innerHTML =
     '<div style="text-align:center;">' +
@@ -8260,6 +9278,7 @@ async function showRiderOrderAlert(orders) {
     '</div>' +
     ordersHtml +
     '<p style="margin:6px 0 0;font-size:12.5px;color:#666;"><i class="fas fa-map-marker-alt"></i> ' + (primary.shipping_street || '') + ', ' + (primary.shipping_city || '') + '</p>' +
+    (primary.recipient_name ? '<p style="margin:3px 0 0;font-size:12.5px;color:#666;"><i class="fas fa-user"></i> Hand to: <b>' + primary.recipient_name + '</b></p>' : '') +
     (isBatch ? '<p style="margin:10px 0;font-weight:700;text-align:center;">Combined Total: ' + fmt(grandTotal) + '</p>' : '') +
     '<button class="co-btn co-btn--next" style="width:100%;margin-top:10px;margin-bottom:10px;" onclick="acceptOrderFromAlert(\'' + allIds + '\')">' + (isBatch ? 'Accept All (' + orders.length + ')' : 'Accept Delivery') + '</button>' +
     (rejectionsLeft > 0
@@ -8276,6 +9295,9 @@ function dismissRiderAlert(orderIdsStr) {
   riderAlertCurrentOrderId = null;
   document.getElementById('sn-riderAlertOverlay').classList.remove('active');
   document.getElementById('sn-riderAlertModal').classList.remove('active');
+  // This modal sets body overflow to hidden when it opens; without this the
+  // page stays unscrollable after the alert is dismissed. //
+  document.body.style.overflow = '';
 }
 
 // closes the popup automatically if the order stops being valid
@@ -8285,6 +9307,7 @@ function closeRiderAlertPopup(reasonMessage) {
   riderAlertCurrentOrderId = null;
   document.getElementById('sn-riderAlertOverlay').classList.remove('active');
   document.getElementById('sn-riderAlertModal').classList.remove('active');
+  document.body.style.overflow = '';
   if (reasonMessage) showToast(reasonMessage, 'info');
 }
 
@@ -8316,8 +9339,8 @@ async function rejectOrderAlert(orderIdsStr) {
     .eq('rider_user_id', currentUser.id)
     .gte('created_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
 
-  if ((rejectionsToday || 0) >= 3) {
-    showToast('Daily rejection limit reached (3/3)', 'error');
+  if ((rejectionsToday || 0) >= RIDER_DAILY_REJECTION_LIMIT) {
+    showToast('Daily rejection limit reached (' + RIDER_DAILY_REJECTION_LIMIT + '/' + RIDER_DAILY_REJECTION_LIMIT + ')', 'error');
     dismissRiderAlert(orderIdsStr);
     return;
   }
@@ -8332,7 +9355,7 @@ async function rejectOrderAlert(orderIdsStr) {
     return;
   }
 
-  showToast('Order rejected. This affects your rating slightly \u2014 ' + (2 - (rejectionsToday || 0)) + ' rejections left today.', 'info');
+  showToast('Order rejected. This affects your rating slightly \u2014 ' + Math.max(0, RIDER_DAILY_REJECTION_LIMIT - 1 - (rejectionsToday || 0)) + ' rejections left today.', 'info');
   dismissRiderAlert(orderIdsStr);
 }
 
@@ -8478,6 +9501,8 @@ async function acceptOrder(orderId) {
         rider_plate: myRiderProfile ? myRiderProfile.plate_number : '',
         rider_rating: (myRiderProfile && myRiderProfile.rating_count > 0) ? Math.max(0, myRiderProfile.rating_avg - (myRiderProfile.rejection_penalty || 0)).toFixed(1) : null,
         rider_license_path: myRiderProfile ? (myRiderProfile.license_path || null) : null,
+        // Claimed — the 24h unclaimed window no longer applies. //
+        auto_cancel_at: null,
         updated_at: new Date().toISOString()
       })
       .eq('id', orderId)
@@ -8561,6 +9586,12 @@ async function viewMyLicense() {
   window.open(data.signedUrl, '_blank');
 }
 
+// How many deliveries a rider may decline in one day before the system
+// stops sending them alerts. Referenced by the conduct rules the rider
+// can read (RIDER_VIOLATION_RULES) so the number shown always matches
+// the number actually enforced. Panel item 9. //
+var RIDER_DAILY_REJECTION_LIMIT = 3;
+
 let riderHistoryDateFilter = 'all';
 
 function changeRiderHistoryDateFilter(value) {
@@ -8582,6 +9613,100 @@ async function toggleMyAvailability(newState) {
   renderRiderDashboard();
 }
 
+// Panel item 9 — the rules were enforced in code (3 rejections a day, a
+// rating penalty per rejection) but never written down anywhere a rider
+// could read them. Suspension shouldn't be the first time someone learns
+// what the limit was. Collapsed by default so it doesn't crowd the
+// dashboard, but always one tap away.
+// #RIDER_VIOLATION_RULES
+var RIDER_VIOLATION_RULES = [
+  {
+    title: 'Excessive delivery rejections',
+    limit: 'Maximum ' + RIDER_DAILY_REJECTION_LIMIT + ' rejections per day',
+    detail: 'Declining an assigned delivery is allowed — you may need to. But each rejection adds a small penalty to your ' +
+            'displayed rating, and once you hit ' + RIDER_DAILY_REJECTION_LIMIT + ' in a single day you stop receiving new order alerts until the next day. ' +
+            'A pattern of hitting that limit day after day is treated as excessive rejection and is grounds for suspension.'
+  },
+  {
+    title: 'Non-delivery disputes',
+    limit: 'Any confirmed case',
+    detail: 'If a customer reports that an order marked "delivered" never arrived, and the report is upheld after review, ' +
+            'that is a serious violation. Always take a clear proof-of-delivery photo and confirm the recipient’s name.'
+  },
+  {
+    title: 'Repeated customer reports',
+    limit: '3 upheld reports',
+    detail: 'Customers can report a rider for rudeness, unsafe handling, asking for extra payment, or not following delivery ' +
+            'instructions. Three upheld reports is grounds for suspension.'
+  },
+  {
+    title: 'Abandoning an accepted delivery',
+    limit: 'Any occurrence',
+    detail: 'Once you accept an order you are responsible for it. Leaving an accepted delivery unfulfilled without contacting ' +
+            'the customer or support is grounds for immediate suspension.'
+  },
+  {
+    title: 'Invalid or missing licence',
+    limit: 'Required at all times',
+    detail: 'A valid driver’s licence must stay on file. Riding for HomeWeb without one — or with an expired or falsified ' +
+            'licence — results in suspension until it is corrected.'
+  }
+];
+
+function riderViolationRulesHtml() {
+  var rows = RIDER_VIOLATION_RULES.map(function(r) {
+    return '<div style="padding:10px 0;border-bottom:1px solid #f0f0f0;">' +
+      '<div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;">' +
+      '<span style="font-weight:700;font-size:12.5px;">' + r.title + '</span>' +
+      '<span style="flex-shrink:0;font-size:11px;color:#B45309;background:#FFFBEB;border-radius:20px;padding:2px 9px;white-space:nowrap;">' + r.limit + '</span>' +
+      '</div>' +
+      '<p style="margin:5px 0 0;font-size:11.5px;color:#666;line-height:1.6;">' + r.detail + '</p>' +
+      '</div>';
+  }).join('');
+
+  return '<details style="background:#fff;border:1px solid #eee;border-radius:10px;padding:0 14px;margin-bottom:12px;">' +
+    '<summary style="cursor:pointer;padding:12px 0;font-weight:700;font-size:13px;list-style:none;">' +
+    '<i class="fas fa-scale-balanced" style="color:#B45309;"></i> Rider Conduct Rules & Violations' +
+    '<span style="float:right;color:#999;font-weight:400;font-size:11.5px;">tap to read</span></summary>' +
+    '<p style="margin:0 0 4px;font-size:11.5px;color:#666;line-height:1.6;">' +
+    'These are the specific grounds on which a rider account can be suspended. The first two are tracked automatically by the system.</p>' +
+    rows +
+    '<p style="margin:10px 0 12px;font-size:11.5px;color:#666;">Suspended by mistake? Contact HomeWeb support — an admin can reinstate your account.</p>' +
+    '</details>';
+}
+
+// Fills #rider-reports-banner once the report lookup comes back. Kept out
+// of the main render so a slow query never delays the dashboard. //
+async function refreshRiderReportsBanner() {
+  var el = document.getElementById('rider-reports-banner');
+  if (!el) return;
+
+  const { data: reports, error } = await supabase.rpc('get_reports_against_me');
+  if (error || !reports) { el.innerHTML = ''; return; }
+
+  var mine = reports.filter(function(r) { return r.reported_type === 'rider'; });
+  var open = mine.filter(function(r) { return r.status !== 'resolved' && r.status !== 'dismissed'; });
+  if (!mine.length) { el.innerHTML = ''; return; }
+
+  if (!open.length) {
+    el.innerHTML = '<div style="background:#F0FFF4;border-radius:10px;padding:12px 14px;margin-bottom:12px;">' +
+      '<p style="margin:0;font-size:12.5px;color:#15803D;"><i class="fas fa-circle-check"></i> ' +
+      'You have ' + mine.length + ' past report' + (mine.length === 1 ? '' : 's') + ', all reviewed and closed. Nothing outstanding.</p></div>';
+    return;
+  }
+
+  el.innerHTML = '<div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:14px;margin-bottom:12px;">' +
+    '<p style="margin:0 0 6px;font-weight:700;color:#B45309;font-size:13px;"><i class="fas fa-flag"></i> ' +
+    open.length + ' customer report' + (open.length === 1 ? '' : 's') + ' under review</p>' +
+    open.slice(0, 3).map(function(r) {
+      return '<p style="margin:4px 0 0;font-size:12px;color:#92400E;">• ' +
+        (r.order_code ? 'Order #' + r.order_code + ' — ' : '') + '"' + (r.reason || 'Not specified') + '" ' +
+        '<span style="color:#aaa;">(' + timeAgo(r.created_at) + ')</span></p>';
+    }).join('') +
+    '<p style="margin:8px 0 0;font-size:11.5px;color:#92400E;">HomeWeb is reviewing these. Repeated upheld reports are grounds for suspension — see the conduct rules below.</p>' +
+    '</div>';
+}
+
 // #RIDER_DASHBOARD
 function renderRiderDashboard() {
   var body = document.getElementById('sn-rider-dash-body');
@@ -8594,6 +9719,11 @@ function renderRiderDashboard() {
       '<p style="margin:8px 0 0;font-size:12.5px;color:#7F1D1D;">You can\'t go online or accept new deliveries while suspended. Any delivery already in progress can still be completed. Contact HomeWeb support if you believe this is a mistake.</p>' +
       '</div>'
     : '';
+
+  // Panel item 3 — open customer reports, shown right on the dashboard
+  // rather than only in the notification bell. Filled in asynchronously
+  // by refreshRiderReportsBanner() once the RPC returns. //
+  var reportsBanner = '<div id="rider-reports-banner"></div>';
 
   var licenseHtml = myRiderProfile && myRiderProfile.license_path
     ? '<div style="display:flex;align-items:center;justify-content:space-between;background:#F0FFF4;border-radius:10px;padding:12px 16px;margin-bottom:12px;">' +
@@ -8626,7 +9756,12 @@ function renderRiderDashboard() {
       actionBtn = '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="riderAdvanceOrder(\'' + o.id + '\', \'out_for_delivery\')">Mark Picked Up</button>';
     } else if (o.status === 'out_for_delivery') {
       actionBtn = '<input type="file" id="pod-input-' + o.id + '" accept="image/*" capture="environment" style="display:none;" onchange="submitProofOfDelivery(\'' + o.id + '\', this.files[0])"/>' +
-        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="document.getElementById(\'pod-input-' + o.id + '\').click()"><i class="fas fa-camera"></i> Take Proof of Delivery Photo</button>';
+        (o.failed_attempt_reason
+          ? '<p style="margin:8px 0 0;background:#FEE2E2;color:#991B1B;padding:8px;border-radius:6px;font-size:11.5px;"><i class="fas fa-triangle-exclamation"></i> Previous attempt failed: ' + o.failed_attempt_reason + ' (' + timeAgo(o.failed_attempt_at) + ')</p>'
+          : '') +
+        '<button class="co-btn co-btn--next" style="width:100%;margin-top:8px;" onclick="document.getElementById(\'pod-input-' + o.id + '\').click()"><i class="fas fa-camera"></i> Complete Delivery (Photo + PIN)</button>' +
+        '<p style="margin:5px 0 0;font-size:11px;color:#999;text-align:center;">You’ll need the customer’s 4-digit Delivery PIN to finish.</p>' +
+        '<button class="co-btn" style="width:100%;margin-top:6px;background:#FEE2E2;color:#DC2626;font-size:12px;padding:6px;" onclick="reportFailedDelivery(\'' + o.id + '\')">Couldn’t deliver</button>';
     } else if (o.status === 'awaiting_confirmation') {
       actionBtn = '<p style="margin:8px 0 0;color:#F59E0B;font-size:12px;"><i class="fas fa-clock"></i> Waiting for customer to confirm receipt</p>';
     }
@@ -8636,6 +9771,7 @@ function renderRiderDashboard() {
       '<p style="margin:2px 0 0;color:#999;font-size:11.5px;"><i class="fas fa-clock"></i> ' + formatDate(o.created_at) + ' \u2022 ' + new Date(o.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + '</p>' +
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;">' + itemsSummary + '</p>' +
       '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-map-marker-alt"></i> ' + (o.shipping_street || '') + ', ' + (o.shipping_city || '') + '</p>' +
+      (o.recipient_name ? '<p style="margin:4px 0 0;color:#777;font-size:12.5px;"><i class="fas fa-user"></i> Hand to: <b>' + o.recipient_name + '</b></p>' : '') +
       (o.not_arrived_reported_at ? '<p style="margin:8px 0 0;background:#FEE2E2;color:#DC2626;padding:8px;border-radius:6px;font-size:12px;font-weight:600;"><i class="fas fa-exclamation-triangle"></i> Customer reports this was NOT received. Please follow up.</p>' : '') +
       actionBtn +
       '<div style="display:flex;gap:6px;margin-top:8px;">' +
@@ -8680,6 +9816,8 @@ function renderRiderDashboard() {
   body.innerHTML =
     '<h2 style="margin:0 0 4px;">My Deliveries</h2>' +
     suspensionBanner +
+    reportsBanner +
+    riderViolationRulesHtml() +
     '<p class="login-sub" style="margin:0 0 16px;">' + activeOrders.length + ' active \u2022 ' + pastOrders.length + ' completed' +
     (myRiderProfile && myRiderProfile.rating_count > 0
       ? ' \u2022 <span style="color:#F59E0B;">' + stars(myEffectiveRating) + '</span> ' + myEffectiveRating.toFixed(1) + ' (' + myRiderProfile.rating_count + ')'
@@ -8698,36 +9836,188 @@ function renderRiderDashboard() {
       .map(function(d) { return '<option value="' + d[0] + '"' + (riderHistoryDateFilter === d[0] ? ' selected' : '') + '>' + d[1] + '</option>'; }).join('') +
     '</select></h3>' +
     (pastOrders.length ? pastOrders.map(orderCardHtml).join('') : '<p style="color:#999;font-size:13px;">No completed deliveries' + (riderHistoryDateFilter !== 'all' ? ' in this period' : ' yet') + '.</p>');
+
+  // Fills the reports placeholder above once its lookup returns. //
+  refreshRiderReportsBanner();
 }
 
+// Only moves an order to "out for delivery" (the rider collecting from the
+// stall). Completing a delivery deliberately does NOT go through here \u2014 it
+// must go through complete_delivery_with_pin(), which checks the customer's
+// PIN. The old 'delivered' branch was a way to close an order with no PIN,
+// no photo and no GPS, so it's gone; the database enforces the same rule
+// via trg_enforce_delivery_pin. //
 async function riderAdvanceOrder(orderId, newStatus) {
+  if (newStatus !== 'out_for_delivery') {
+    console.warn('riderAdvanceOrder refused status:', newStatus, '\u2014 use confirmDeliveryWithPin()');
+    showToast('Deliveries are completed with the customer\u2019s PIN.', 'info');
+    return;
+  }
   await advanceOrderStatus(orderId, newStatus);
-  showToast(newStatus === 'delivered' ? 'Order marked delivered \u2705' : 'Order marked picked up \uD83D\uDEF5');
+  showToast('Order marked picked up \uD83D\uDEF5');
   await loadMyAssignedOrders();
   renderRiderDashboard();
 }
 
-// photo required before marking delivered — protects against false
-// non-delivery claims later //
+// Panel item 7 — completing a delivery now takes three things, not one:
+// the photo (what was handed over), the customer's PIN (who received it)
+// and the device's coordinates (where it happened). A photo on its own
+// can't show the rider was at the right address, which is exactly the
+// objection the panel raised.
 // #RIDER_PROOF_OF_DELIVERY
+var deliveryPinModalOpen = false; // suppresses new-order alerts mid-handover
+var pendingProofFile = {};   // orderId -> File, held between photo and PIN
+var pendingProofCoords = {}; // orderId -> { lat, lng, accuracy }
+
+// Asks the browser for a position. Always resolves — a rider who blocks
+// location, or whose phone can't get a fix, must still be able to finish
+// the delivery; the order just records that no location was captured. //
+function captureRiderPosition() {
+  return new Promise(function(resolve) {
+    if (!navigator.geolocation) return resolve(null);
+    var settled = false;
+    var done = function(v) { if (!settled) { settled = true; resolve(v); } };
+    setTimeout(function() { done(null); }, 8000); // never hang the flow
+    navigator.geolocation.getCurrentPosition(
+      function(pos) {
+        done({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy });
+      },
+      function() { done(null); },
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 0 }
+    );
+  });
+}
+
+// Step 1: photo chosen. Grab coordinates now (while the rider is standing
+// at the door) and then ask for the PIN. //
 async function submitProofOfDelivery(orderId, file) {
   if (!file) return;
   if (!file.type.startsWith('image/')) { showToast('Please choose a photo', 'error'); return; }
   if (file.size > 8 * 1024 * 1024) { showToast('Photo must be under 8MB', 'error'); return; }
 
-  showToast('Uploading proof of delivery...', 'info');
-  var ext = file.name.split('.').pop();
+  pendingProofFile[orderId] = file;
+  showToast('Getting your location...', 'info');
+  pendingProofCoords[orderId] = await captureRiderPosition();
+  openDeliveryPinModal(orderId);
+}
+
+function openDeliveryPinModal(orderId) {
+  var coords = pendingProofCoords[orderId];
+  var body = document.getElementById('sn-delivery-pin-body');
+  if (!body) return;
+
+  body.innerHTML =
+    '<div style="text-align:center;">' +
+    '<div class="login-icon" style="color:var(--primary,#22C55E);"><i class="fas fa-shield-halved"></i></div>' +
+    '<h2 style="margin:6px 0;">Confirm Delivery</h2>' +
+    '<p class="login-sub">Ask the customer for their 4-digit Delivery PIN. It’s shown in their order tracking screen.</p>' +
+    '</div>' +
+    '<div class="co-field" style="margin-top:14px;">' +
+    '<label>Delivery PIN <span class="co-required">*</span></label>' +
+    '<input type="tel" id="delivery-pin-input" maxlength="4" inputmode="numeric" autocomplete="off" placeholder="4-digit PIN" ' +
+    'style="text-align:center;font-size:26px;letter-spacing:10px;font-family:monospace;padding:12px;"/>' +
+    '<p id="delivery-pin-error" style="margin:6px 0 0;font-size:12px;color:#DC2626;display:none;"></p>' +
+    '</div>' +
+    '<p style="margin:6px 0 12px;font-size:11.5px;color:' + (coords ? '#15803D' : '#B45309') + ';">' +
+    '<i class="fas fa-location-dot"></i> ' +
+    (coords
+      ? 'Location captured (±' + Math.round(coords.accuracy) + 'm) — it will be attached to the photo.'
+      : 'Location unavailable — the delivery will be recorded without GPS. Turn on location to strengthen your proof.') +
+    '</p>' +
+    '<button class="co-btn co-btn--next" id="delivery-pin-submit" style="width:100%;" onclick="confirmDeliveryWithPin(\'' + orderId + '\')">' +
+    '<i class="fas fa-check-circle"></i> Confirm Delivery</button>' +
+    '<button class="co-btn" style="background:#FEE2E2;color:#DC2626;width:100%;margin-top:10px;" onclick="reportFailedDelivery(\'' + orderId + '\')">' +
+    '<i class="fas fa-triangle-exclamation"></i> Couldn’t deliver this</button>' +
+    '<button class="co-btn" style="background:none;color:#999;width:100%;margin-top:6px;font-size:12.5px;" onclick="closeDeliveryPinModal()">Cancel</button>';
+
+  deliveryPinModalOpen = true; // blocks new-order alerts from stealing the screen
+  document.getElementById('sn-deliveryPinOverlay').classList.add('active');
+  document.getElementById('sn-deliveryPinModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+
+  var input = document.getElementById('delivery-pin-input');
+  if (input) input.focus();
+}
+
+function closeDeliveryPinModal() {
+  deliveryPinModalOpen = false;
+  var ov = document.getElementById('sn-deliveryPinOverlay');
+  var md = document.getElementById('sn-deliveryPinModal');
+  if (ov) ov.classList.remove('active');
+  if (md) md.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+// Step 2: PIN entered. Upload the photo, then let the server check the
+// PIN and flip the status — the rider's client never sees the real PIN. //
+async function confirmDeliveryWithPin(orderId) {
+  var input = document.getElementById('delivery-pin-input');
+  var errEl = document.getElementById('delivery-pin-error');
+  var btn = document.getElementById('delivery-pin-submit');
+  var pin = input ? input.value.trim() : '';
+
+  function fail(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check-circle"></i> Confirm Delivery'; }
+  }
+
+  if (!/^[0-9]{4}$/.test(pin)) return fail('Enter the 4-digit PIN from the customer.');
+  if (errEl) errEl.style.display = 'none';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Confirming...'; }
+
+  var file = pendingProofFile[orderId];
+  if (!file) return fail('The photo was lost — please take it again.');
+
+  var ext = (file.name.split('.').pop() || 'jpg');
   var path = 'delivery-proof/' + orderId + '/' + Date.now() + '.' + ext;
 
   const { error: uploadErr } = await supabase.storage.from('uploads').upload(path, file, { upsert: true });
-  if (uploadErr) { showToast('Could not upload photo: ' + uploadErr.message, 'error'); return; }
+  if (uploadErr) return fail('Could not upload photo: ' + uploadErr.message);
 
   const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(path);
+  var coords = pendingProofCoords[orderId] || {};
 
-  const { error: updateErr } = await supabase.from('orders').update({ proof_of_delivery_url: urlData.publicUrl }).eq('id', orderId);
-  if (updateErr) { showToast('Could not save photo: ' + updateErr.message, 'error'); return; }
+  const { data, error } = await supabase.rpc('complete_delivery_with_pin', {
+    order_id_input: orderId,
+    pin_input: pin,
+    proof_url_input: urlData.publicUrl,
+    lat_input: coords.lat != null ? coords.lat : null,
+    lng_input: coords.lng != null ? coords.lng : null,
+    accuracy_input: coords.accuracy != null ? coords.accuracy : null
+  });
 
-  await riderAdvanceOrder(orderId, 'awaiting_confirmation');
+  if (error) return fail('Could not confirm: ' + error.message);
+  if (!data || !data.ok) return fail(data && data.error ? data.error : 'Could not confirm delivery.');
+
+  delete pendingProofFile[orderId];
+  delete pendingProofCoords[orderId];
+  closeDeliveryPinModal();
+  showToast('Delivery confirmed ✅ Waiting for the customer to confirm receipt.');
+  updateNotifBadge();
+  await loadMyAssignedOrders();
+  renderRiderDashboard();
+}
+
+// An honest record beats a forced "delivered". Panel item 7. //
+async function reportFailedDelivery(orderId) {
+  var reason = prompt('Why couldn\'t this be delivered? (e.g. nobody home, wrong address, customer refused)');
+  if (!reason || !reason.trim()) { showToast('A reason is required', 'info'); return; }
+
+  const { data, error } = await supabase.rpc('log_failed_delivery_attempt', {
+    order_id_input: orderId,
+    reason_input: reason.trim()
+  });
+
+  if (error || !data || !data.ok) {
+    showToast('Could not log the attempt: ' + ((data && data.error) || (error && error.message) || 'unknown error'), 'error');
+    return;
+  }
+
+  closeDeliveryPinModal();
+  showToast('Attempt logged. The customer has been notified — the order stays with you.', 'info');
+  updateNotifBadge();
+  await loadMyAssignedOrders();
+  renderRiderDashboard();
 }
 
 
@@ -8793,6 +10083,10 @@ document.addEventListener('DOMContentLoaded', async function() {
       supabase.rpc('check_and_cancel_stale_pickups').then(function(res) {
         if (res.error) console.error('check_and_cancel_stale_pickups error:', res.error);
       });
+      // Panel item 8 — the 24h unclaimed sweep. Runs on the same heartbeat
+      // as the two above so expired orders are released even if nobody
+      // opens My Orders, which is what fetchOrders() alone depended on. //
+      sweepExpiredOrders();
     }
   }, 30000);
 });

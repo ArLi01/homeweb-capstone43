@@ -155,6 +155,14 @@
 		<div class="product-grid" id="home-product-grid">
 			<p style="color:#999;padding:2rem;">Loading products...</p>
 		</div>
+		<!-- #CUSTOMER_STORE_SEARCH -->
+		<div id="home-store-search" style="display:none;margin-bottom:14px;">
+			<div style="position:relative;max-width:420px;">
+				<i class="fas fa-store" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#bbb;font-size:13px;"></i>
+				<input type="text" id="home-store-search-input" autocomplete="off" oninput="filterHomeStores(this.value)" placeholder="Search for a store by name..." style="width:100%;padding:11px 38px 11px 38px;border:1px solid #e5e5e5;border-radius:10px;font-size:13.5px;outline:none;"/>
+				<button type="button" id="home-store-search-clear" onclick="clearHomeStoreSearch()" style="display:none;position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#bbb;cursor:pointer;font-size:14px;"><i class="fas fa-times"></i></button>
+			</div>
+		</div>
 		<div class="product-grid" id="home-merchant-grid" style="display:none;"></div>
 	</div>
 </section>
