@@ -595,6 +595,13 @@ supabase.auth.onAuthStateChange(async function(event, session) {
     myMerchantId = null;
     myMerchantProducts = [];
     myMerchantBusinessType = null;
+
+    // Same class of leak as the cart and merchant id above. shippingInfo
+    // lives for the whole page session, so without this the next person to
+    // log in on the same device would open checkout pre-filled with the
+    // previous account's name, phone and home address. Only wiped on a real
+    // account change, not on the hourly token refresh. //
+    resetShippingInfo();
   }
   lastAuthUserId = newUserId;
 
@@ -2414,8 +2421,93 @@ function sweepExpiredOrders() {
   }).catch(function() { return 0; });
 }
 
+// Clears every personal value out of the checkout form. Called when the
+// logged-in account changes, so one person's details can never be shown to
+// the next person using the same browser. Keeps the fulfilment mode and the
+// default municipality, which aren't personal. //
+function resetShippingInfo() {
+  shippingInfo.firstName = '';
+  shippingInfo.lastName = '';
+  shippingInfo.phone = '';
+  shippingInfo.recipientName = '';
+  shippingInfo.street = '';
+  shippingInfo.barangay = '';
+  shippingInfo.city = 'Sta. Barbara';
+  shippingInfo.zip = '5002';
+  accountDefaultName = '';
+  prefilledFromPastOrder = false;
+  clearCheckoutDeliveryFeeLock();
+}
+
 // The logged-in account's own name, used as the fallback recipient. //
 let accountDefaultName = '';
+
+// True when the delivery address was carried over from this customer's last
+// order, so the form can say so rather than silently filling itself in. //
+let prefilledFromPastOrder = false;
+
+// Profiles store one `full_name`, but the shipping form has separate First
+// and Last fields. Filipino names are usually "Firstname [Middle] Surname",
+// so the last word is treated as the surname and everything before it as
+// the given name(s) — "Angel Ann Subaldo" -> "Angel Ann" / "Subaldo".
+// A single-word name goes entirely in the first-name field. //
+function splitFullName(fullName) {
+  var parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { firstName: '', lastName: '' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: '' };
+  return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1] };
+}
+
+// Pre-fills the checkout from what the account already knows: the name and
+// phone from the profile, and the address from this customer's most recent
+// delivery order. Every field is still editable — this only saves the
+// customer re-typing what the site was already told.
+// #CUSTOMER_CHECKOUT_PREFILL
+async function prefillCheckoutFromAccount(myProfile) {
+  // --- Name and phone, straight off the profile ---
+  if (myProfile && myProfile.full_name) {
+    var split = splitFullName(myProfile.full_name);
+    if (!shippingInfo.firstName) shippingInfo.firstName = split.firstName;
+    if (!shippingInfo.lastName) shippingInfo.lastName = split.lastName;
+  }
+  if (!shippingInfo.phone && myProfile && myProfile.phone) {
+    shippingInfo.phone = myProfile.phone;
+  }
+
+  // --- Address, from the last order that actually had one ---
+  // Profiles don't store an address, so the customer's own order history is
+  // the only record of where they get things delivered. Wrapped so a failed
+  // lookup just leaves the address blank instead of blocking checkout. //
+  if (shippingInfo.street && shippingInfo.barangay) return; // already filled in
+  try {
+    const { data: lastOrder } = await supabase
+      .from('orders')
+      .select('shipping_first_name, shipping_last_name, shipping_phone, shipping_street, shipping_barangay, shipping_city, shipping_zip')
+      .eq('user_id', currentUser.id)
+      .eq('delivery_option', 'delivery')
+      .not('shipping_street', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!lastOrder) return;
+
+    if (!shippingInfo.street) shippingInfo.street = lastOrder.shipping_street || '';
+    if (!shippingInfo.barangay) shippingInfo.barangay = lastOrder.shipping_barangay || '';
+    if (!shippingInfo.zip || shippingInfo.zip === '5002') shippingInfo.zip = lastOrder.shipping_zip || shippingInfo.zip;
+    if (lastOrder.shipping_city && MUNICIPALITY_DISTANCES[lastOrder.shipping_city] !== undefined) {
+      shippingInfo.city = lastOrder.shipping_city;
+    }
+    // Fall back to the last order's contact details if the profile had none //
+    if (!shippingInfo.firstName) shippingInfo.firstName = lastOrder.shipping_first_name || '';
+    if (!shippingInfo.lastName) shippingInfo.lastName = lastOrder.shipping_last_name || '';
+    if (!shippingInfo.phone) shippingInfo.phone = lastOrder.shipping_phone || '';
+
+    prefilledFromPastOrder = true;
+  } catch (e) {
+    console.error('[checkout-prefill] could not read last delivery address', e);
+  }
+}
 
 // Reads the recipient field, falling back to the account name and then to
 // the shipping name, so an order can never be created without one. //
@@ -2453,6 +2545,7 @@ async function openCheckout() {
   if (!cart.length) { showToast('Your cart is empty', 'info'); return; }
   checkoutStep = 1;
   selectedPaymentMethod = 'cod';
+  prefilledFromPastOrder = false;
 
   const { data: myProfile } = await supabase.from('profiles').select('pickup_no_show_count, full_name, phone').eq('id', currentUser.id).single();
   myPickupNoShowCount = myProfile ? (myProfile.pickup_no_show_count || 0) : 0;
@@ -2462,7 +2555,14 @@ async function openCheckout() {
   // this is pre-filled rather than left for the customer to remember. //
   accountDefaultName = (myProfile && myProfile.full_name) ? myProfile.full_name.trim() : '';
   if (!shippingInfo.recipientName) shippingInfo.recipientName = accountDefaultName;
-  if (!shippingInfo.phone && myProfile && myProfile.phone) shippingInfo.phone = myProfile.phone;
+
+  // A logged-in customer already told us who they are — the shipping form
+  // shouldn't ask again. Everything here is pre-filled, not locked: the
+  // customer can still type over any of it (ordering for someone else,
+  // delivering somewhere new). Only fills blanks, so edits made earlier in
+  // this same checkout session are never clobbered on re-entry. //
+  await prefillCheckoutFromAccount(myProfile);
+
   if (myPickupNoShowCount >= PICKUP_NOSHOW_LIMIT && shippingInfo.fulfillment === 'pickup') {
     shippingInfo.fulfillment = 'delivery'; // can't default into a mode they're locked out of
   }
@@ -2579,7 +2679,8 @@ function renderCheckout() {
       var pickupSellersList = pickupGroups.map(function(g) { return '<li>' + g.merchantName + '</li>'; }).join('');
       body = '<div class="co-form">' +
         '<h3>Pickup Details</h3>' +
-        '<p style="margin:-4px 0 14px;font-size:12.5px;color:#666;">We just need a way to reach you when your order is ready \u2014 no delivery address needed.</p>' +
+        '<p style="margin:-4px 0 14px;font-size:12.5px;color:#666;">We just need a way to reach you when your order is ready \u2014 no delivery address needed.' +
+        ((shippingInfo.firstName || shippingInfo.phone) ? ' <span style="color:#15803D;">Filled in from your account.</span>' : '') + '</p>' +
         '<div class="co-form-row">' +
         '<div class="co-field"><label>First Name <span class="co-required">*</span></label><input type="text" id="co-firstName" placeholder="First Name" value="' + shippingInfo.firstName + '"/><span class="co-field-error">First name is required</span></div>' +
         '<div class="co-field"><label>Last Name <span class="co-required">*</span></label><input type="text" id="co-lastName" placeholder="Last Name" value="' + shippingInfo.lastName + '"/><span class="co-field-error">Last name is required</span></div>' +
@@ -2597,6 +2698,11 @@ function renderCheckout() {
     } else {
       body = '<div class="co-form">' +
         '<h3>Delivery Address</h3>' +
+        (prefilledFromPastOrder
+          ? '<p style="margin:-4px 0 12px;font-size:12px;color:#15803D;"><i class="fas fa-circle-check"></i> Filled in from your account and last delivery \u2014 edit anything that\u2019s changed.</p>'
+          : (shippingInfo.firstName || shippingInfo.phone
+              ? '<p style="margin:-4px 0 12px;font-size:12px;color:#15803D;"><i class="fas fa-circle-check"></i> Filled in from your account \u2014 edit anything that\u2019s changed.</p>'
+              : '')) +
         '<div class="co-form-row">' +
         '<div class="co-field"><label>First Name <span class="co-required">*</span></label><input type="text" id="co-firstName" placeholder="First Name" value="' + shippingInfo.firstName + '"/><span class="co-field-error">First name is required</span></div>' +
         '<div class="co-field"><label>Last Name <span class="co-required">*</span></label><input type="text" id="co-lastName" placeholder="Last Name" value="' + shippingInfo.lastName + '"/><span class="co-field-error">Last name is required</span></div>' +
